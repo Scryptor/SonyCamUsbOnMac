@@ -40,9 +40,16 @@ final class PTPIPChannel: @unchecked Sendable {
             connection.stateUpdateHandler = { [weak self] state in
                 switch state {
                 case .ready:
-                    if once.claim() { done.resume() }
-                    self?.receive()
-                case .failed(let error), .waiting(let error):
+                    if once.claim() {
+                        done.resume()
+                        self?.receive()
+                    }
+                case .waiting:
+                    // путь к камере временно недоступен (macOS переспрашивает доступ к локальной сети,
+                    // Wi-Fi переподключается): соединение само вернётся в ready или завершится ошибкой —
+                    // до подключения ждём до тайм-аута, после — просто ждём
+                    break
+                case .failed(let error):
                     if once.claim() { done.resume(throwing: TransportError.failed("\(error)")) }
                     self?.fail(TransportError.disconnected)
                 case .cancelled:

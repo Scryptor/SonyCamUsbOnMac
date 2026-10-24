@@ -63,6 +63,7 @@ final class CameraController {
     @ObservationIgnored private var closeTransport: (() async -> Void)?
     @ObservationIgnored private let identity = PTPIPIdentity.load()
     @ObservationIgnored private var wifiBusy = false
+    @ObservationIgnored private var wifiFailures = 0
     @ObservationIgnored private var session: CameraSession?
     @ObservationIgnored private var coalescer: WriteCoalescer?
     @ObservationIgnored private var targets: [UInt16: Int64] = [:]
@@ -499,6 +500,7 @@ final class CameraController {
             }
             Prefs.wifiHost = host
             Prefs.wifiCameraName = name
+            wifiFailures = 0
             isPairing = false
             wifiStatus = nil
             connectionMessage = nil
@@ -513,6 +515,12 @@ final class CameraController {
             return false
         } catch {
             await transport.close()
+            // камера в сети, но не отвечает: обычно она ещё держит прошлое, оборванное подключение
+            wifiFailures += 1
+            if wifiFailures >= 3, !isPairing {
+                wifiStatus = "Камера найдена (\(host)), но пока не отвечает — видимо, держит прошлое подключение. "
+                    + "Обычно это проходит за 1–2 минуты; если нет — выключите и снова включите на камере PC Remote"
+            }
             return false
         }
     }
