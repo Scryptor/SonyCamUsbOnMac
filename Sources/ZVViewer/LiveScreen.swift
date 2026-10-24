@@ -26,8 +26,11 @@ struct LiveScreen: View {
                 }
                 Spacer()
                 if fnOpen {
-                    FnMenu(controller: controller, selected: $selected) { allSettingsOpen = true }
-                } else {
+                    FnMenu(controller: controller, selected: $selected) {
+                        fnOpen = false
+                        allSettingsOpen = true
+                    }
+                } else if !allSettingsOpen {
                     InfoLine(controller: controller) { id in
                         if let id { selected = id }
                         fnOpen = true
@@ -40,6 +43,13 @@ struct LiveScreen: View {
                 RecordButton(controller: controller)
             }
             .padding(.trailing, 20)
+            if allSettingsOpen {
+                GeometryReader { geo in
+                    AllSettingsPanel(controller: controller)
+                        .frame(width: geo.size.width * 0.6, height: geo.size.height * 0.78)
+                        .position(x: geo.size.width / 2, y: geo.size.height / 2)
+                }
+            }
         }
         .contentShape(Rectangle())
         .onTapGesture { closeOverlays() }

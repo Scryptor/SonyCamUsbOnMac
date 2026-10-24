@@ -21,6 +21,9 @@ struct FnMenu: View {
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
         }
         .frame(maxWidth: 920)
+        // клики по промежуткам внутри меню не должны его закрывать
+        .contentShape(Rectangle())
+        .onTapGesture {}
         .onScrollWheelStep { controller.requestStep(selected, offset: $0) }
     }
 
