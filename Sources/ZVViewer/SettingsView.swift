@@ -10,6 +10,9 @@ struct SettingsView: View {
     @AppStorage(Prefs.Key.reviewSeconds) private var reviewSeconds = 3
     @AppStorage(Prefs.Key.reviewSource) private var reviewSource: Prefs.ReviewSource = .downloaded
     @AppStorage(Prefs.Key.autoHide) private var autoHide = true
+    @AppStorage(Prefs.Key.wifiEnabled) private var wifiEnabled = true
+    @AppStorage(Prefs.Key.wifiCameraName) private var wifiCameraName: String?
+    @AppStorage(Prefs.Key.wifiHost) private var wifiHost: String?
 
     var body: some View {
         Form {
@@ -47,6 +50,22 @@ struct SettingsView: View {
                 .pickerStyle(.radioGroup)
                 .disabled(!reviewEnabled)
                 Text("Если снимок сохраняется только на карту, показывается кадр с камеры.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section("Wi-Fi") {
+                Toggle("Подключаться по Wi-Fi, когда камеры нет на кабеле", isOn: $wifiEnabled)
+                LabeledContent("Камера:") {
+                    if let name = wifiCameraName {
+                        HStack {
+                            Text(wifiHost.map { "\(name) · \($0)" } ?? name)
+                            Button("Забыть") { controller.forgetWiFiCamera() }
+                        }
+                    } else {
+                        Text("ещё не подключалась по Wi-Fi").foregroundStyle(.secondary)
+                    }
+                }
+                Text("Сопряжение — на экране ожидания: «Сопрячь с камерой…». Камера помнит его, пока её не сбросят.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

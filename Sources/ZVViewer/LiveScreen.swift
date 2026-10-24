@@ -200,7 +200,7 @@ private struct StatusPill: View {
             }
             HStack(spacing: 6) {
                 Circle().fill(controller.phase == .ready ? .green : .orange).frame(width: 8, height: 8)
-                Text("\(controller.deviceInfo?.model ?? "Камера") · USB")
+                Text("\(controller.deviceInfo?.model ?? "Камера") · \(controller.transportKind == .wifi ? "Wi-Fi" : "USB")")
             }
             Text(ValueFormatter.label(.exposureProgram, controller.property(.exposureProgram)))
             if controller.mode == .video {

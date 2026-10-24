@@ -158,6 +158,13 @@ final class AutomationServer {
             controller.dismissReview()
         case let .setPreference(key, value):
             if let problem = setPreference(key, value) { return problem }
+        case .pairWiFi:
+            guard controller.phase == .searching else { return "camera is already connected" }
+            controller.startPairing()
+        case .cancelPairing:
+            controller.cancelPairing()
+        case .forgetWiFi:
+            controller.forgetWiFiCamera()
         case let .openShot(index):
             guard controller.shots.indices.contains(index) else { return "no shot \(index)" }
             controller.openShot(index)
@@ -183,6 +190,9 @@ final class AutomationServer {
         case "reviewSource":
             guard let r = Prefs.ReviewSource(rawValue: value) else { return "reviewSource: downloaded | camera" }
             Prefs.reviewSource = r
+        case "wifiEnabled":
+            guard let b = Bool(value) else { return "wifiEnabled: true | false" }
+            Prefs.wifiEnabled = b
         case "autoHide":
             guard let b = Bool(value) else { return "autoHide: true | false" }
             Prefs.autoHide = b
@@ -230,6 +240,12 @@ final class AutomationServer {
             "status": controller.statusMessage ?? NSNull(),
             "mode": controller.mode.rawValue,
             "capturing": controller.isCapturing,
+            "transport": controller.transportKind?.rawValue ?? NSNull(),
+            "wifi": [
+                "enabled": Prefs.wifiEnabled, "pairing": controller.isPairing,
+                "host": Prefs.wifiHost ?? NSNull(), "cameraName": Prefs.wifiCameraName ?? NSNull(),
+                "status": controller.wifiStatus ?? NSNull(),
+            ] as [String: Any],
             "recordingSeconds": controller.recordingStartedAt.map { Int(Date().timeIntervalSince($0)) } ?? NSNull(),
             "review": controller.review.map { review -> [String: Any] in
                 ["title": review.title, "source": review.source, "timed": review.endsAt != nil,

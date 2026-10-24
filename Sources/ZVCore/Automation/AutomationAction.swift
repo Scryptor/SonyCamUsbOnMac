@@ -25,6 +25,10 @@ public enum AutomationAction: Equatable, Sendable, Decodable {
     case dismissReview
     case setPreference(String, String)
     case openShot(Int)
+    /// Wi-Fi: начать сопряжение, отменить его, забыть камеру.
+    case pairWiFi
+    case cancelPairing
+    case forgetWiFi
 
     private enum Keys: String, CodingKey {
         case action, key, setting, offset, value, group, name, index, confirm, mode
@@ -55,6 +59,9 @@ public enum AutomationAction: Equatable, Sendable, Decodable {
         case "dismissReview": self = .dismissReview
         case "setPreference": self = .setPreference(try c.decode(String.self, forKey: .key), try c.decode(String.self, forKey: .value))
         case "openShot": self = .openShot(try c.decode(Int.self, forKey: .index))
+        case "pairWiFi": self = .pairWiFi
+        case "cancelPairing": self = .cancelPairing
+        case "forgetWiFi": self = .forgetWiFi
         default:
             throw DecodingError.dataCorruptedError(forKey: .action, in: c, debugDescription: "неизвестная команда \(action)")
         }

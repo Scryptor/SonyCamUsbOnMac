@@ -41,3 +41,12 @@ import Testing
     #expect(try d.decode(AutomationAction.self, from: Data(#"{"action":"toggleRecording","confirm":true}"#.utf8)) == .toggleRecording(confirm: true))
     #expect(throws: (any Error).self) { try d.decode(AutomationAction.self, from: Data(#"{"action":"nope"}"#.utf8)) }
 }
+
+@Test func decodesWiFiActions() throws {
+    func decode(_ json: String) throws -> AutomationAction {
+        try JSONDecoder().decode(AutomationAction.self, from: Data(json.utf8))
+    }
+    #expect(try decode(#"{"action":"pairWiFi"}"#) == .pairWiFi)
+    #expect(try decode(#"{"action":"cancelPairing"}"#) == .cancelPairing)
+    #expect(try decode(#"{"action":"forgetWiFi"}"#) == .forgetWiFi)
+}

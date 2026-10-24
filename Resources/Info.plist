@@ -24,6 +24,8 @@
     <string>14.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Чтобы находить камеру в домашней сети и управлять ей по Wi-Fi.</string>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.photography</string>
 </dict>

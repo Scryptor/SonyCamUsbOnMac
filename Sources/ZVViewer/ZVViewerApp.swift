@@ -35,9 +35,9 @@ struct RootView: View {
     var body: some View {
         switch controller.phase {
         case .searching:
-            WaitingView(kind: .searching, message: controller.connectionMessage)
+            WaitingView(kind: .searching, controller: controller)
         case .notPCRemote:
-            WaitingView(kind: .notPCRemote)
+            WaitingView(kind: .notPCRemote, controller: controller)
         case .connecting, .settling, .ready:
             LiveScreen(controller: controller, screen: screen)
         }

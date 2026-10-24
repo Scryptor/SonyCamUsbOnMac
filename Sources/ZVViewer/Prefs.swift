@@ -47,6 +47,9 @@ enum Prefs {
         static let reviewSeconds = "reviewSeconds"
         static let reviewSource = "reviewSource"
         static let autoHide = "autoHideControls"
+        static let wifiEnabled = "wifiEnabled"
+        static let wifiHost = "wifiHost"
+        static let wifiCameraName = "wifiCameraName"
     }
 
     private static var defaults: UserDefaults { .standard }
@@ -84,5 +87,22 @@ enum Prefs {
     static var autoHide: Bool {
         get { defaults.object(forKey: Key.autoHide) as? Bool ?? true }
         set { defaults.set(newValue, forKey: Key.autoHide) }
+    }
+
+    /// Подключаться к камере по Wi-Fi, когда её нет на кабеле.
+    static var wifiEnabled: Bool {
+        get { defaults.object(forKey: Key.wifiEnabled) as? Bool ?? true }
+        set { defaults.set(newValue, forKey: Key.wifiEnabled) }
+    }
+
+    /// Последний адрес сопряжённой камеры в сети: с него начинаем поиск.
+    static var wifiHost: String? {
+        get { defaults.string(forKey: Key.wifiHost) }
+        set { defaults.set(newValue, forKey: Key.wifiHost) }
+    }
+
+    static var wifiCameraName: String? {
+        get { defaults.string(forKey: Key.wifiCameraName) }
+        set { defaults.set(newValue, forKey: Key.wifiCameraName) }
     }
 }

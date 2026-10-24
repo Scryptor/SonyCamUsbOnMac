@@ -1,39 +1,74 @@
 import SwiftUI
 
-/// Экран, пока камеры нет или она не в режиме PC Remote.
+/// Экран, пока камеры нет или она не в режиме PC Remote: как подключить по кабелю и по Wi-Fi.
 struct WaitingView: View {
     enum Kind { case searching, notPCRemote }
 
     let kind: Kind
-    /// Почему не удалось подключиться (если пробовали).
-    var message: String?
-
-    private let cameraSteps = [
-        "1. На камере: MENU → Network → Smartphone Connect → Smartphone Connection: Off",
-        "2. MENU → Network → PC Remote Function → PC Remote: On, PC Remote Cnct Method: USB",
-    ]
+    let controller: CameraController
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 22) {
             Text(kind == .searching ? "Подключите камеру" : "Камера подключена, но не в режиме PC Remote")
                 .font(.title.weight(.semibold))
-            VStack(alignment: .leading, spacing: 10) {
-                ForEach(cameraSteps, id: \.self) { Text($0) }
-                Text(kind == .searching ? "3. Подключите камеру к Mac кабелем USB-C" : "Переподключите кабель")
+            HStack(alignment: .top, spacing: 48) {
+                usb
+                if kind == .searching { wifi }
             }
-            .font(.title3)
-            .foregroundStyle(.secondary)
-            if kind == .searching {
-                HStack(spacing: 10) {
-                    ProgressView().controlSize(.small)
-                    Text(message ?? "Ищу камеру…").foregroundStyle(.secondary)
-                }
-                .padding(.top, 8)
+            if kind == .searching, let message = controller.connectionMessage {
+                Text(message).foregroundStyle(.secondary)
             }
         }
         .padding(48)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(.black)
         .environment(\.colorScheme, .dark)
+    }
+
+    private var usb: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("По кабелю USB").font(.title2.weight(.semibold))
+            Group {
+                Text("1. MENU → Network → Smartphone Connect → Smartphone Connection: Off")
+                Text("2. MENU → Network → PC Remote Function → PC Remote: On, PC Remote Cnct Method: USB")
+                Text(kind == .searching ? "3. Подключите камеру к Mac кабелем USB-C" : "Переподключите кабель")
+            }
+            .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: 520, alignment: .leading)
+    }
+
+    private var wifi: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("По Wi-Fi").font(.title2.weight(.semibold))
+            Group {
+                Text("1. Камера и Mac — в одной сети Wi-Fi (у камеры: MENU → Network → Wi-Fi Settings → Access Point Set.)")
+                Text("2. MENU → Network → PC Remote Function → PC Remote: On, PC Remote Cnct Method: Wi-Fi Access Point")
+                Text("3. Один раз — сопряжение: кнопка ниже, на камере PC Remote Function → Pairing")
+            }
+            .foregroundStyle(.secondary)
+            HStack(spacing: 12) {
+                if controller.isPairing {
+                    ProgressView().controlSize(.small)
+                    Button("Отмена") { controller.cancelPairing() }
+                } else {
+                    Button("Сопрячь с камерой…") { controller.startPairing() }
+                }
+                if !controller.isPairing, Prefs.wifiEnabled, let name = Prefs.wifiCameraName {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text("Ищу \(name) в сети…").foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .padding(.top, 4)
+            if let status = controller.wifiStatus {
+                Text(status).foregroundStyle(.orange)
+            }
+            if !Prefs.wifiEnabled {
+                Text("Подключение по Wi-Fi выключено в настройках (⌘,)").foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: 520, alignment: .leading)
     }
 }

@@ -59,7 +59,10 @@ final class CameraController {
     @ObservationIgnored private(set) var lastJPEG: Data?
     @ObservationIgnored private let discovery = CameraDiscovery()
     @ObservationIgnored private var device: ICCameraDevice?
-    @ObservationIgnored private var transport: ICCameraTransport?
+    /// Как закрыть текущее подключение (USB или Wi-Fi).
+    @ObservationIgnored private var closeTransport: (() async -> Void)?
+    @ObservationIgnored private let identity = PTPIPIdentity.load()
+    @ObservationIgnored private var wifiBusy = false
     @ObservationIgnored private var session: CameraSession?
     @ObservationIgnored private var coalescer: WriteCoalescer?
     @ObservationIgnored private var targets: [UInt16: Int64] = [:]
@@ -75,6 +78,14 @@ final class CameraController {
     private(set) var connectionMessage: String?
     /// Камера на связи, но кадры давно не приходят.
     private(set) var isFrameStale = false
+
+    enum TransportKind: String { case usb, wifi }
+    /// Чем подключена камера сейчас.
+    private(set) var transportKind: TransportKind?
+    /// Идёт сопряжение по Wi-Fi (кнопка «Сопрячь с камерой»).
+    private(set) var isPairing = false
+    /// Что сейчас с Wi-Fi: «ищу камеру», «камера найдена, нужно сопряжение» и т.п.
+    private(set) var wifiStatus: String?
 
     init() {
         presets = Self.loadPresets(key: presetsKey)
@@ -93,6 +104,13 @@ final class CameraController {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(500))
                 self?.tickFrameStats()
+            }
+        }
+        // без кабеля — ищем камеру в сети
+        Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                await self?.wifiTick()
             }
         }
     }
@@ -376,13 +394,30 @@ final class CameraController {
     }
 
     private func connect(_ device: ICCameraDevice) {
+        // кабель важнее сети: если шёл сеанс по Wi-Fi, закрываем его
+        if transportKind == .wifi { teardown() }
         let id = ObjectIdentifier(device)
         self.device = device
-        phase = .connecting
         // транспорт становится делегатом устройства ещё до открытия сессии: колбэки ICC идут живому объекту
         let transport = ICCameraTransport(device: device)
+        runSession(transport: transport, kind: .usb, close: { await transport.close() },
+                   prepare: { try await device.openSession() },
+                   onReady: { [weak self] in self?.tracker.connected(id) },
+                   onFailure: { [weak self] in
+                       // отменённая попытка (камеру отключили, начали заново) — не повторяем
+                       guard let self else { return }
+                       self.perform(self.tracker.failed(id))
+                   })
+    }
+
+    /// Сеанс одинаков для USB и Wi-Fi: различаются подготовка транспорта и что делать при обрыве.
+    private func runSession(transport: PTPTransport, kind: TransportKind, close: @escaping () async -> Void,
+                            prepare: @escaping () async throws -> Void,
+                            onReady: @escaping () -> Void, onFailure: @escaping () -> Void) {
+        phase = .connecting
+        transportKind = kind
         let session = CameraSession(transport: transport)
-        self.transport = transport
+        closeTransport = close
         self.session = session
         coalescer = WriteCoalescer { [weak self] code, value in
             let result = try? await session.set(code, to: value)
@@ -390,17 +425,17 @@ final class CameraController {
         }
         tasks.append(Task { [weak self] in
             do {
-                try await device.openSession()
+                try await prepare()
                 try await session.start()
                 guard let self, !Task.isCancelled else { return }
                 self.deviceInfo = await session.deviceInfo
                 self.phase = .settling
-                self.startStreams(session, deviceID: id)
+                self.startStreams(session, onEnded: onFailure)
                 try await session.waitUntilReady()
                 guard !Task.isCancelled else { return }
                 self.phase = .ready
                 self.connectionMessage = nil
-                self.tracker.connected(id)
+                onReady()
             } catch is CancellationError {
                 return
             } catch SessionError.notPCRemote {
@@ -408,21 +443,93 @@ final class CameraController {
                 self.deviceInfo = await session.deviceInfo
                 self.phase = .notPCRemote
             } catch {
-                // отменённая попытка (камеру отключили, начали заново) — не повторяем
-                guard let self, !Task.isCancelled else { return }
-                self.perform(self.tracker.failed(id))
+                guard self != nil, !Task.isCancelled else { return }
+                onFailure()
             }
         })
     }
 
-    private func startStreams(_ session: CameraSession, deviceID: ObjectIdentifier) {
+    // MARK: - Wi-Fi
+
+    /// Начать сопряжение: программа ищет камеру и стучится, пока на камере включено Pairing.
+    func startPairing() {
+        isPairing = true
+        wifiStatus = "Ищу камеру в сети…"
+    }
+
+    func cancelPairing() {
+        isPairing = false
+        wifiStatus = nil
+    }
+
+    /// Забыть камеру: программа перестанет подключаться к ней сама (сопряжение в камере остаётся).
+    func forgetWiFiCamera() {
+        Prefs.wifiHost = nil
+        Prefs.wifiCameraName = nil
+        if transportKind == .wifi { teardown() }
+    }
+
+    /// Раз в секунду: если камеры на кабеле нет и связи нет — ищем камеру в сети и подключаемся.
+    private func wifiTick() async {
+        guard (Prefs.wifiEnabled || isPairing), phase == .searching, tracker.attached.isEmpty, !wifiBusy else { return }
+        wifiBusy = true
+        defer { wifiBusy = false }
+        // сначала — последний адрес камеры: так подключение после перерыва занимает секунду, а не поиск
+        let last = isPairing ? nil : Prefs.wifiHost
+        if let last, await tryWiFi(last) { return }
+        if isPairing, wifiStatus == nil { wifiStatus = "Ищу камеру в сети…" }
+        let found = await WiFiDiscovery.search()
+        for host in found.map(\.host) where host != last {
+            guard phase == .searching, tracker.attached.isEmpty else { return }
+            if await tryWiFi(host) { return }
+        }
+        if found.isEmpty, isPairing { wifiStatus = "Камеру в сети не вижу. Проверьте, что она подключена к той же сети Wi-Fi" }
+    }
+
+    /// Одна попытка подключиться к камере по адресу. true — сеанс начат.
+    private func tryWiFi(_ host: String) async -> Bool {
+        let transport = PTPIPTransport(host: host, identity: identity)
+        if isPairing { wifiStatus = "Камера найдена (\(host)). Включите на камере PC Remote Function → Pairing и подтвердите сопряжение" }
+        do {
+            // при сопряжении камера ждёт подтверждения на экране — ответа ждём дольше
+            let name = try await transport.connect(initTimeout: isPairing ? .seconds(60) : .seconds(5))
+            guard phase == .searching, tracker.attached.isEmpty else {
+                await transport.close()
+                return false
+            }
+            Prefs.wifiHost = host
+            Prefs.wifiCameraName = name
+            isPairing = false
+            wifiStatus = nil
+            connectionMessage = nil
+            runSession(transport: transport, kind: .wifi, close: { await transport.close() }, prepare: {},
+                       onReady: {}, onFailure: { [weak self] in self?.wifiLost() })
+            return true
+        } catch PTPIPError.rejected {
+            await transport.close()
+            wifiStatus = isPairing
+                ? "Камера найдена (\(host)). Включите на камере PC Remote Function → Pairing"
+                : "В сети есть камера (\(host)), но программа с ней не сопряжена — нажмите «Сопрячь с камерой»"
+            return false
+        } catch {
+            await transport.close()
+            return false
+        }
+    }
+
+    private func wifiLost() {
+        teardown()
+        connectionMessage = "Связь по Wi-Fi пропала. Ищу камеру…"
+    }
+
+    private func startStreams(_ session: CameraSession, onEnded: @escaping () -> Void) {
         tasks.append(Task { [weak self] in
             for await snapshot in session.snapshots {
                 self?.apply(snapshot)
             }
-            // поток закончился сам — сеанс оборвался; если камера ещё на месте, переподключимся с паузой
-            guard let self, !Task.isCancelled else { return }
-            self.perform(self.tracker.failed(deviceID))
+            // поток закончился сам — сеанс оборвался; дальше решает, кто начал сеанс (USB или Wi-Fi)
+            guard self != nil, !Task.isCancelled else { return }
+            onEnded()
         })
         tasks.append(Task.detached(priority: .userInitiated) { [weak self] in
             var failures = 0
@@ -491,10 +598,11 @@ final class CameraController {
     private func teardown() {
         tasks.forEach { $0.cancel() }
         tasks.removeAll()
-        let transport = self.transport
-        Task { await transport?.close() }
+        let close = closeTransport
+        Task { await close?() }
         device = nil
-        self.transport = nil
+        closeTransport = nil
+        transportKind = nil
         session = nil
         coalescer = nil
         targets = [:]
