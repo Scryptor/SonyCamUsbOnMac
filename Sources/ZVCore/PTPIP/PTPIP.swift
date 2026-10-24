@@ -26,6 +26,11 @@ public enum PTPIPInitResult: Equatable, Sendable {
 /// PTP поверх TCP (CIPA DC-005): два соединения на порт 15740 — команды с данными и события.
 public enum PTPIP {
     public static let port: UInt16 = 15740
+    /// Адрес камеры, когда она сама раздаёт сеть (Wi-Fi Direct): у камер Sony он всегда такой.
+    public static let cameraAccessPointHost = "192.168.122.1"
+
+    /// Камера раздаёт сеть сама — связь напрямую, без роутера.
+    public static func isCameraAccessPoint(_ host: String) -> Bool { host == cameraAccessPointHost }
 
     public enum PacketType {
         public static let initCommandRequest: UInt32 = 1

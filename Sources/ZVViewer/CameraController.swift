@@ -93,6 +93,8 @@ final class CameraController {
     enum TransportKind: String { case usb, wifi }
     /// Чем подключена камера сейчас.
     private(set) var transportKind: TransportKind?
+    /// Связь по Wi-Fi напрямую: камера сама раздаёт сеть (режим Wi-Fi Direct).
+    private(set) var wifiDirect = false
     /// Идёт сопряжение по Wi-Fi (кнопка «Сопрячь с камерой»).
     private(set) var isPairing = false
     /// Что сейчас с Wi-Fi: «ищу камеру», «камера найдена, нужно сопряжение» и т.п.
@@ -131,6 +133,12 @@ final class CameraController {
 
     func isWritable(_ id: SettingID) -> Bool {
         phase == .ready && !isApplyingPreset && !isCapturing && property(id)?.isWritable == true
+    }
+
+    /// Как подключена камера — для строки состояния: USB, Wi-Fi или Wi-Fi Direct.
+    var transportLabel: String {
+        guard transportKind == .wifi else { return "USB" }
+        return wifiDirect ? "Wi-Fi Direct" : "Wi-Fi"
     }
 
     /// Подпись значения настройки. Баланс белого в режиме «Цвет. темп.» — сама температура; температура вне этого
@@ -546,6 +554,7 @@ final class CameraController {
             }
             Prefs.wifiHost = host
             Prefs.wifiCameraName = name
+            wifiDirect = PTPIP.isCameraAccessPoint(host)
             wifiFailures = 0
             isPairing = false
             wifiStatus = nil
@@ -692,6 +701,7 @@ final class CameraController {
         device = nil
         closeTransport = nil
         transportKind = nil
+        wifiDirect = false
         wifiTransport = nil
         session = nil
         coalescer = nil

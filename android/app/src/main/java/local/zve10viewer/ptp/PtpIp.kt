@@ -22,6 +22,11 @@ class PtpIpRejected(val reason: Long) : Exception("камера отклонил
 /** PTP поверх TCP (CIPA DC-005): два соединения на порт 15740 — команды с данными и события. */
 object PtpIp {
     const val PORT = 15740
+    /** Адрес камеры, когда она сама раздаёт сеть (Wi-Fi Direct): у камер Sony он всегда такой. */
+    const val CAMERA_ACCESS_POINT_HOST = "192.168.122.1"
+
+    /** Камера раздаёт сеть сама — связь напрямую, без роутера. */
+    fun isCameraAccessPoint(host: String): Boolean = host == CAMERA_ACCESS_POINT_HOST
 
     const val INIT_COMMAND_REQUEST = 1
     const val INIT_COMMAND_ACK = 2

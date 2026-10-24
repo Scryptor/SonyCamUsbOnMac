@@ -183,6 +183,7 @@ private fun WaitingScreen(controller: CameraController, notPcRemote: Boolean) {
                     "1. Камера и планшет — в одной сети Wi-Fi (у камеры: MENU → Network → Wi-Fi Settings → Access Point Set.)",
                     "2. MENU → Network → PC Remote Function → PC Remote: On, PC Remote Cnct Method: Wi-Fi Access Point",
                     "3. Один раз — сопряжение: кнопка ниже, на камере PC Remote Function → Pairing",
+                    "Без роутера: на камере PC Remote Cnct Method: Wi-Fi Direct, а планшет подключите к сети камеры (DIRECT-…, пароль — на экране камеры)",
                 ).forEach { Text(it, color = Secondary, fontSize = 18.sp, modifier = Modifier.padding(vertical = 4.dp)) }
                 Spacer(Modifier.height(10.dp))
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -350,7 +351,7 @@ private fun StatusPill(controller: CameraController, screen: ScreenState) {
         val ready = controller.phase == CameraController.Phase.ready
         Box(Modifier.size(10.dp).background(if (ready) Color(0xFF34C759) else Color(0xFFFF9F0A), CircleShape))
         // касание — подсказка: адреса и сигнал / что это за кадры
-        PillText("${controller.deviceInfo?.model ?: "Камера"} · ${if (controller.transportKind == CameraController.TransportKind.wifi) "Wi-Fi" else "USB"}",
+        PillText("${controller.deviceInfo?.model ?: "Камера"} · ${transportLabel(controller)}",
             Modifier.clickable { screen.togglePillInfo(PillInfo.connection) })
         PillText("${controller.shownFps} к/с", Modifier.clickable { screen.togglePillInfo(PillInfo.frames) })
         PillText(ValueFormatter.label(SettingID.exposureProgram, controller.property(SettingID.exposureProgram)))
@@ -375,6 +376,12 @@ private fun PillText(text: String, modifier: Modifier = Modifier) =
 
 enum class PillInfo { connection, frames }
 
+private fun transportLabel(controller: CameraController) = when {
+    controller.transportKind != CameraController.TransportKind.wifi -> "USB"
+    controller.wifiDirect -> "Wi-Fi Direct"
+    else -> "Wi-Fi"
+}
+
 @Composable
 private fun PillInfoCard(controller: CameraController, info: PillInfo) {
     val wifi = controller.transportKind == CameraController.TransportKind.wifi
@@ -393,13 +400,17 @@ private fun PillInfoCard(controller: CameraController, info: PillInfo) {
                         details = controller.connectionDetails()
                     }
                 }
-                InfoTitle(if (wifi) "Подключение по Wi-Fi" else "Подключение по USB")
+                InfoTitle("Подключение по ${transportLabel(controller)}")
                 controller.deviceInfo?.let { InfoRow("Камера", "${it.model}, прошивка ${it.firmware}") }
                 if (wifi) {
                     details.cameraHost?.let { InfoRow("IP камеры", it) }
                     details.localHost?.let { InfoRow("IP планшета", it) }
                     details.signalDbm?.let { InfoRow("Сигнал Wi-Fi", "${it.toString().replace('-', '−')} дБм, ${signalWord(it)}") }
-                    InfoNote("Сигнал — между планшетом и роутером. Если картинка дёргается, подойдите ближе к роутеру или поставьте ближе к нему камеру.")
+                    InfoNote(if (controller.wifiDirect) {
+                        "Камера сама раздаёт сеть, сигнал — между планшетом и камерой. Если картинка дёргается, поднесите планшет ближе к камере."
+                    } else {
+                        "Сигнал — между планшетом и роутером. Если картинка дёргается, подойдите ближе к роутеру или поставьте ближе к нему камеру."
+                    })
                 } else {
                     InfoNote("Без кабеля планшет сам найдёт камеру по Wi-Fi, если она сопряжена (⚙ → Wi-Fi).")
                 }

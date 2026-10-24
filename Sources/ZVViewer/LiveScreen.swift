@@ -203,7 +203,7 @@ private struct StatusPill: View {
             PillButton(info: .connection, screen: screen) {
                 HStack(spacing: 6) {
                     Circle().fill(controller.phase == .ready ? .green : .orange).frame(width: 8, height: 8)
-                    Text("\(controller.deviceInfo?.model ?? "Камера") · \(controller.transportKind == .wifi ? "Wi-Fi" : "USB")")
+                    Text("\(controller.deviceInfo?.model ?? "Камера") · \(controller.transportLabel)")
                 }
             } popover: {
                 ConnectionInfo(controller: controller)
@@ -267,7 +267,7 @@ private struct ConnectionInfo: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(wifi ? "Подключение по Wi-Fi" : "Подключение по USB").font(.headline)
+            Text("Подключение по \(controller.transportLabel)").font(.headline)
             Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
                 if let info = controller.deviceInfo {
                     InfoRow(label: "Камера", value: "\(info.model), прошивка \(info.firmware)")
@@ -281,9 +281,9 @@ private struct ConnectionInfo: View {
                 }
             }
             .textSelection(.enabled)
-            Text(wifi
-                 ? "Сигнал — между Mac и роутером. Если картинка дёргается, поставьте камеру ближе к роутеру."
-                 : "Без кабеля программа сама найдёт камеру по Wi-Fi, если она сопряжена (⌘, → Wi-Fi).")
+            Text(!wifi ? "Без кабеля программа сама найдёт камеру по Wi-Fi, если она сопряжена (⌘, → Wi-Fi)."
+                 : controller.wifiDirect ? "Камера сама раздаёт сеть, сигнал — между Mac и камерой. Если картинка дёргается, поставьте Mac ближе к камере."
+                 : "Сигнал — между Mac и роутером. Если картинка дёргается, поставьте камеру ближе к роутеру.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

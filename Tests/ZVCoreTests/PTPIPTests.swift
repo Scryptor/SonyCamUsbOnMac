@@ -95,3 +95,10 @@ private func packet(_ type: UInt32, _ payload: [UInt8]) -> Data {
     #expect(SSDP.parse(reply) == SSDP.Response(host: "192.168.1.194", usn: "uuid:00000000-0005-0010-8000-000000000000"))
     #expect(SSDP.parse("HTTP/1.1 200 OK\r\nLOCATION: http://192.168.1.1:1900/igd.xml\r\nST: upnp:rootdevice\r\n\r\n") == nil)
 }
+
+@Test func cameraAccessPointIsRecognisedByItsAddress() {
+    // в режиме Wi-Fi Direct камера сама раздаёт сеть и всегда берёт себе 192.168.122.1
+    #expect(PTPIP.isCameraAccessPoint("192.168.122.1"))
+    #expect(!PTPIP.isCameraAccessPoint("192.168.1.194"))
+    #expect(!PTPIP.isCameraAccessPoint("192.168.122.10"))
+}

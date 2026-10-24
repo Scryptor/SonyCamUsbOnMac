@@ -45,6 +45,7 @@ struct WaitingView: View {
                 Text("1. Камера и Mac — в одной сети Wi-Fi (у камеры: MENU → Network → Wi-Fi Settings → Access Point Set.)")
                 Text("2. MENU → Network → PC Remote Function → PC Remote: On, PC Remote Cnct Method: Wi-Fi Access Point")
                 Text("3. Один раз — сопряжение: кнопка ниже, на камере PC Remote Function → Pairing")
+                Text("Без роутера: на камере PC Remote Cnct Method: Wi-Fi Direct, Mac — к сети камеры (DIRECT-…, пароль на экране камеры). Интернета на Mac в это время не будет.")
             }
             .foregroundStyle(.secondary)
             HStack(spacing: 12) {

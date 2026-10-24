@@ -29,6 +29,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import local.zve10viewer.ptp.PtpIp
 import local.zve10viewer.ptp.PtpIpRejected
 import local.zve10viewer.ptp.PtpTransport
 import local.zve10viewer.ptp.TransportException
@@ -131,6 +132,9 @@ class CameraController(private val context: Context, private val scope: Coroutin
     enum class TransportKind { usb, wifi }
     /** Чем подключена камера сейчас. */
     var transportKind by mutableStateOf<TransportKind?>(null)
+        private set
+    /** Связь по Wi-Fi напрямую: камера сама раздаёт сеть (режим Wi-Fi Direct). */
+    var wifiDirect by mutableStateOf(false)
         private set
     /** Идёт сопряжение по Wi-Fi (кнопка «Сопрячь с камерой»). */
     var isPairing by mutableStateOf(false)
@@ -603,6 +607,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
                 return false
             }
             prefs.wifiHost = host
+            wifiDirect = PtpIp.isCameraAccessPoint(host)
             prefs.wifiCameraName = name
             wifiFailures = 0
             isPairing = false
@@ -786,6 +791,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
         session?.close()
         transport?.close()
         transportKind = null
+        wifiDirect = false
         session = null
         transport = null
         coalescer = null

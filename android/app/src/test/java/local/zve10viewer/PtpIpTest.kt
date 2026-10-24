@@ -11,6 +11,7 @@ import local.zve10viewer.ptp.PtpReply
 import local.zve10viewer.ptp.Ssdp
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -122,5 +123,12 @@ class PtpIpTest {
             "USN: uuid:00000000-0005-0010-8000-000000000000::urn:schemas-sony-com:service:DigitalImaging:1\r\n\r\n"
         assertEquals(Ssdp.Response("192.168.1.194", "uuid:00000000-0005-0010-8000-000000000000"), Ssdp.parse(reply))
         assertNull(Ssdp.parse("HTTP/1.1 200 OK\r\nLOCATION: http://192.168.1.1:1900/igd.xml\r\nST: upnp:rootdevice\r\n\r\n"))
+    }
+
+    @Test fun cameraAccessPointIsRecognisedByItsAddress() {
+        // в режиме Wi-Fi Direct камера сама раздаёт сеть и всегда берёт себе 192.168.122.1
+        assertTrue(PtpIp.isCameraAccessPoint("192.168.122.1"))
+        assertFalse(PtpIp.isCameraAccessPoint("192.168.1.194"))
+        assertFalse(PtpIp.isCameraAccessPoint("192.168.122.10"))
     }
 }
