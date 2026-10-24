@@ -12,9 +12,10 @@ public enum SettingOptions {
     }
 
     /// Соседнее разрешённое значение; nil, если сдвинуться некуда.
-    public static func neighbour(_ id: SettingID, _ property: SonyProperty, offset: Int) -> Int64? {
+    /// `from` — точка отсчёта вместо текущего значения камеры (например, ещё не подтверждённый запрос).
+    public static func neighbour(_ id: SettingID, _ property: SonyProperty, offset: Int, from: Int64? = nil) -> Int64? {
         let list = values(property)
-        guard let current = property.current.intValue, let index = list.firstIndex(of: current) else { return nil }
+        guard let current = from ?? property.current.intValue, let index = list.firstIndex(of: current) else { return nil }
         let target = min(max(index + offset, 0), list.count - 1)
         return target == index ? nil : list[target]
     }

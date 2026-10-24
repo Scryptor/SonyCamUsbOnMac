@@ -86,6 +86,14 @@ private func props() throws -> [UInt16: SonyProperty] {
     #expect(SettingOptions.neighbour(.iso, iso, offset: -2) == 125)
 }
 
+@Test func neighbourStepsFromPendingTarget() throws {
+    let f = try #require(try props()[SonyProp.fNumber])
+    // камера ещё показывает f/2.8, но уже запрошено f/3.2 — следующий шаг от f/3.2
+    #expect(SettingOptions.neighbour(.aperture, f, offset: 1, from: 320) == 350)
+    #expect(SettingOptions.neighbour(.aperture, f, offset: -1, from: 320) == 280)
+    #expect(SettingOptions.neighbour(.aperture, f, offset: 1, from: 12345) == nil)
+}
+
 @Test func catalogLayout() {
     #expect(SettingCatalog.fnTopRow == [.setting(.shutter), .setting(.aperture), .setting(.iso),
                                         .setting(.whiteBalance), .setting(.exposureComp), .setting(.focusMode)])

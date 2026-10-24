@@ -54,6 +54,14 @@ final class CameraController {
         Task { await coalescer.submit(id.code, value) }
     }
 
+    /// Шаг по списку значений (стрелки, колесо): считаем от последнего запроса, а не от подтверждённого значения,
+    /// иначе быстрые шаги упирались бы в ожидание камеры.
+    func requestStep(_ id: SettingID, offset: Int) {
+        guard let property = property(id),
+              let target = SettingOptions.neighbour(id, property, offset: offset, from: targets[id.code]) else { return }
+        request(id, target)
+    }
+
     func toggleRecording() {
         guard phase == .ready, let session else { return }
         Task { [weak self] in

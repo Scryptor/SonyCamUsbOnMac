@@ -1,9 +1,13 @@
 import SwiftUI
 import ZVCore
 
-/// Основной экран: видео с камеры, статус, строка значений и кнопка записи.
+/// Основной экран: видео с камеры, статус, строка значений, кнопка записи и меню Fn поверх кадра.
 struct LiveScreen: View {
     let controller: CameraController
+    @State private var fnOpen = false
+    @State private var allSettingsOpen = false
+    @State private var selected: SettingID = .shutter
+    @FocusState private var focused: Bool
 
     var body: some View {
         ZStack {
@@ -21,7 +25,14 @@ struct LiveScreen: View {
                     StatusPill(controller: controller)
                 }
                 Spacer()
-                InfoLine(controller: controller)
+                if fnOpen {
+                    FnMenu(controller: controller, selected: $selected) { allSettingsOpen = true }
+                } else {
+                    InfoLine(controller: controller) { id in
+                        if let id { selected = id }
+                        fnOpen = true
+                    }
+                }
             }
             .padding(16)
             HStack {
@@ -30,7 +41,36 @@ struct LiveScreen: View {
             }
             .padding(.trailing, 20)
         }
+        .contentShape(Rectangle())
+        .onTapGesture { closeOverlays() }
         .environment(\.colorScheme, .dark)
+        .focusable()
+        .focusEffectDisabled()
+        .focused($focused)
+        .onAppear { focused = true }
+        // F в любой раскладке: латинская f и русская а на той же клавише
+        .onKeyPress(characters: CharacterSet(charactersIn: "fFаА")) { _ in
+            fnOpen.toggle()
+            return .handled
+        }
+        .onKeyPress(.escape) {
+            guard fnOpen || allSettingsOpen else { return .ignored }
+            closeOverlays()
+            return .handled
+        }
+        .onKeyPress(.leftArrow) { step(-1) }
+        .onKeyPress(.rightArrow) { step(1) }
+    }
+
+    private func step(_ offset: Int) -> KeyPress.Result {
+        guard fnOpen else { return .ignored }
+        controller.requestStep(selected, offset: offset)
+        return .handled
+    }
+
+    private func closeOverlays() {
+        fnOpen = false
+        allSettingsOpen = false
     }
 }
 
@@ -54,21 +94,34 @@ private struct StatusPill: View {
     }
 }
 
-/// Тонкая строка с основными значениями, как на дисплее камеры.
+/// Тонкая строка с основными значениями, как на дисплее камеры. Клик открывает меню Fn.
 private struct InfoLine: View {
     let controller: CameraController
+    /// nil — кнопка Fn, иначе — выбранная настройка.
+    let onOpen: (SettingID?) -> Void
 
     var body: some View {
         HStack(spacing: 22) {
             ForEach(SettingCatalog.infoLine, id: \.self) { id in
-                VStack(spacing: 2) {
-                    Text(id.shortTitle.uppercased())
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    Text(ValueFormatter.label(id, controller.property(id)))
-                        .font(.headline.monospacedDigit())
+                Button { onOpen(id) } label: {
+                    VStack(spacing: 2) {
+                        Text(id.shortTitle.uppercased())
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Text(ValueFormatter.label(id, controller.property(id)))
+                            .font(.headline.monospacedDigit())
+                    }
                 }
+                .buttonStyle(.plain)
             }
+            Button { onOpen(nil) } label: {
+                Text("Fn")
+                    .font(.caption.weight(.bold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(.white.opacity(0.16), in: RoundedRectangle(cornerRadius: 5))
+            }
+            .buttonStyle(.plain)
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 10)
