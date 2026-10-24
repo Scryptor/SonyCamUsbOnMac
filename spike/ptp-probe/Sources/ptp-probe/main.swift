@@ -270,6 +270,10 @@ final class Probe: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate {
                 await runWalk(cam, props: props, code: code, target: target)
                 return finish(code: 0)
             }
+            if case .lvmeta = mode {
+                await runLvMeta(cam, props: props)
+                return finish(code: 0)
+            }
             if case .dump = mode {
                 let props = try await readProperties(cam, file: "props_dump.bin")
                 dump(props)
@@ -367,6 +371,29 @@ final class Probe: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate {
             log("  walk error: \(error)")
         }
         check("Walk \(p.name) to \(h(target))", cur == target, "final \(h(cur)) after \(steps) writes")
+    }
+
+    /// Диагностика: в одном сеансе меняет выдержку и пишет служебный блок кадров live view.
+    /// Исходная выдержка читается в начале и возвращается в конце.
+    func runLvMeta(_ cam: ICCameraDevice, props: [SonyProperty]) async {
+        guard let original = props.first(where: { $0.code == 0xD20D })?.currentValue.intValue else { return }
+        log("  original shutter 0x\(String(original, radix: 16))")
+        let steps: [(String, Int64)] = [("orig", original), ("1/25", 0x10019), ("1/80", 0x10050), ("1/200", 0x100C8), ("orig", original)]
+        for (name, value) in steps {
+            _ = try? await send(cam, OC.sonySetExtDevicePropValue, [0xD20D], outData: encodeValue(value, type: 6), quiet: true)
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            var got = 0
+            while got < 10 {
+                guard let r = try? await send(cam, OC.getObject, [sonyLiveViewHandle], quiet: true) else { break }
+                if r.response.code == RC.ok, r.data.count > 1132 {
+                    log("META \(name) \(r.data.subdata(in: 1012..<1132).map { String(format: "%02x", $0) }.joined())")
+                    got += 1
+                }
+                try? await Task.sleep(nanoseconds: 60_000_000)
+            }
+        }
+        let now = try? await readProperties(cam).first { $0.code == 0xD20D }?.currentValue.intValue
+        log("  shutter after restore 0x\(now.map { String($0, radix: 16) } ?? "?") (original 0x\(String(original, radix: 16)))")
     }
 
     func waitForChange(_ cam: ICCameraDevice, code: UInt16, from: Int64, timeout: TimeInterval) async throws -> Int64 {
@@ -583,11 +610,13 @@ enum Mode {
     case set(code: UInt16, value: Int64, variant: DataOutVariant, type: UInt16)
     case walk(code: UInt16, target: Int64)
     case dump
+    case lvmeta
 }
 
 let cliArgs = Array(CommandLine.arguments.dropFirst())
 let mode: Mode = {
     if cliArgs.first == "dump" { return .dump }
+    if cliArgs.first == "lvmeta" { return .lvmeta }
     if cliArgs.first == "walk", cliArgs.count >= 3,
        let code = UInt16(cliArgs[1].replacingOccurrences(of: "0x", with: ""), radix: 16),
        let target = Int64(cliArgs[2].replacingOccurrences(of: "0x", with: ""), radix: cliArgs[2].hasPrefix("0x") ? 16 : 10) {
