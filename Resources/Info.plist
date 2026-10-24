@@ -2,31 +2,31 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleExecutable</key>
-    <string>ZVViewer</string>
-    <key>CFBundleIdentifier</key>
-    <string>local.zve10viewer</string>
-    <key>CFBundleName</key>
-    <string>ZV-E10 Viewer</string>
-    <key>CFBundleDisplayName</key>
-    <string>ZV-E10 Viewer</string>
-    <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
-    <key>CFBundleIconName</key>
-    <string>AppIcon</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-    <string>0.1.2</string>
-    <key>CFBundleVersion</key>
-    <string>3</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>14.0</string>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>NSLocalNetworkUsageDescription</key>
-    <string>Чтобы находить камеру в домашней сети и управлять ей по Wi-Fi.</string>
-    <key>LSApplicationCategoryType</key>
-    <string>public.app-category.photography</string>
+	<key>CFBundleDisplayName</key>
+	<string>ZV-E10 Viewer</string>
+	<key>CFBundleExecutable</key>
+	<string>ZVViewer</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIconName</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>local.zve10viewer</string>
+	<key>CFBundleName</key>
+	<string>ZV-E10 Viewer</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.2.0</string>
+	<key>CFBundleVersion</key>
+	<string>4</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.photography</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Чтобы находить камеру в домашней сети и управлять ей по Wi-Fi.</string>
 </dict>
 </plist>
