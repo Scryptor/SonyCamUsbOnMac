@@ -4,6 +4,7 @@ import android.hardware.usb.UsbConstants
 import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbInterface
+import android.hardware.usb.UsbRequest
 import android.util.Log
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
@@ -14,6 +15,8 @@ import local.zve10viewer.ptp.PtpReply
 import local.zve10viewer.ptp.PtpTransport
 import local.zve10viewer.ptp.TransportException
 import local.zve10viewer.sony.SonyOp
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import kotlin.concurrent.thread
 
 /**
@@ -32,6 +35,7 @@ class UsbPtpTransport(
     private var nextTransactionId = 1
     private var sessionOpen = false
     @Volatile private var closed = false
+    private var eventRequest: UsbRequest? = null
     private val eventChannel = Channel<PtpEvent>(Channel.UNLIMITED)
     override val events: Flow<PtpEvent> = eventChannel.receiveAsFlow()
 
@@ -50,7 +54,37 @@ class UsbPtpTransport(
         bulkIn = input ?: throw TransportException("у камеры нет bulk IN")
         bulkOut = output ?: throw TransportException("у камеры нет bulk OUT")
         interruptIn = interrupt
+        reset()
         startEventReader()
+    }
+
+    /**
+     * Сброс по стандарту PTP поверх USB: запрос Device Reset (0x66), снятие «залипания» с каналов
+     * и вычитывание остатков. Нужен, если прошлое подключение оборвалось посреди ответа камеры:
+     * иначе камера ждёт, пока у неё заберут старые данные, и не принимает новые команды.
+     */
+    private fun reset() {
+        connection.controlTransfer(0x21, 0x66, 0, usbInterface.id, null, 0, 1000)
+        for (ep in listOf(bulkIn, bulkOut)) {
+            // CLEAR_FEATURE(ENDPOINT_HALT) для конкретного канала
+            connection.controlTransfer(0x02, 0x01, 0, ep.address, null, 0, 1000)
+        }
+        // Get Device Status (0x67): после сброса камера какое-то время отвечает «занята»
+        val status = ByteArray(32)
+        for (attempt in 0 until 20) {
+            val n = connection.controlTransfer(0xA1, 0x67, 0, usbInterface.id, status, status.size, 500)
+            if (n >= 4 && le16(status, 2) == 0x2001) break
+            Thread.sleep(100)
+        }
+        // остатки старых ответов: читаем, пока два раза подряд ничего не придёт
+        var quiet = 0
+        repeat(64) {
+            if (connection.bulkTransfer(bulkIn, chunk, chunk.size, 150) <= 0) {
+                if (++quiet >= 2) return
+            } else {
+                quiet = 0
+            }
+        }
     }
 
     @Synchronized
@@ -63,6 +97,12 @@ class UsbPtpTransport(
         var data = ByteArray(0)
         while (true) {
             val container = readContainer()
+            // остатки прошлых обменов (оборванное подключение) отсеиваем по номеру транзакции и коду
+            if (container.transactionId != transactionId ||
+                (container.type == PtpContainer.DATA && container.code != operation)) {
+                Log.w(TAG, "пропускаю чужой контейнер: тип ${container.type}, транзакция ${container.transactionId}")
+                continue
+            }
             when (container.type) {
                 PtpContainer.DATA -> data = container.payload
                 PtpContainer.RESPONSE -> {
@@ -81,6 +121,7 @@ class UsbPtpTransport(
     override fun close() {
         if (closed) return
         closed = true
+        eventRequest?.let { runCatching { it.cancel() } }
         runCatching { connection.releaseInterface(usbInterface) }
         runCatching { connection.close() }
         eventChannel.close()
@@ -95,7 +136,7 @@ class UsbPtpTransport(
         }
     }
 
-    private class Container(val type: Int, val code: Int, val bytes: ByteArray) {
+    private class Container(val type: Int, val code: Int, val transactionId: Int, val bytes: ByteArray) {
         val payload: ByteArray get() = bytes.copyOfRange(PtpContainer.HEADER, bytes.size)
         fun params(): List<Long> = (PtpContainer.HEADER until bytes.size - 3 step 4).map { le32(bytes, it) }
     }
@@ -128,18 +169,31 @@ class UsbPtpTransport(
             System.arraycopy(chunk, 0, bytes, received, minOf(m, length - received))
             received += m
         }
-        return Container(type, code, bytes)
+        return Container(type, code, le32(bytes, 8).toInt(), bytes)
     }
 
+    /**
+     * События ждём асинхронным запросом без тайм-аута. Синхронное чтение с тайм-аутом на этом канале
+     * каждые ~1,5 с тормозило ответ камеры на запрос кадра на 150–200 мс — видео дёргалось.
+     */
     private fun startEventReader() {
         val endpoint = interruptIn ?: return
+        val request = UsbRequest()
+        if (!request.initialize(connection, endpoint)) return
+        eventRequest = request
         thread(name = "ptp-events", isDaemon = true) {
-            val buffer = ByteArray(endpoint.maxPacketSize.coerceAtLeast(64))
+            val buffer = ByteBuffer.allocate(endpoint.maxPacketSize.coerceAtLeast(64)).order(ByteOrder.LITTLE_ENDIAN)
             while (!closed) {
-                val n = connection.bulkTransfer(endpoint, buffer, buffer.size, 500)
-                if (n >= PtpContainer.HEADER && le16(buffer, 4) == PtpContainer.EVENT) {
-                    val params = (PtpContainer.HEADER until n - 3 step 4).map { le32(buffer, it) }
-                    eventChannel.trySend(PtpEvent(le16(buffer, 6), params))
+                buffer.clear()
+                @Suppress("DEPRECATION")
+                if (!request.queue(buffer, buffer.capacity())) break
+                val done = runCatching { connection.requestWait() }.getOrNull() ?: break
+                if (done !== request || closed) continue
+                val n = buffer.position()
+                val bytes = ByteArray(n).also { buffer.rewind(); buffer.get(it) }
+                if (n >= PtpContainer.HEADER && le16(bytes, 4) == PtpContainer.EVENT) {
+                    val params = (PtpContainer.HEADER until n - 3 step 4).map { le32(bytes, it) }
+                    eventChannel.trySend(PtpEvent(le16(bytes, 6), params))
                 }
             }
         }
@@ -151,7 +205,8 @@ class UsbPtpTransport(
 
     companion object {
         private const val TAG = "ZVTransport"
-        private const val CHUNK = 256 * 1024
+        /** Больше 16 КБ за одно чтение ядро Android на части устройств не пропускает. */
+        private const val CHUNK = 16 * 1024
 
         private fun le16(b: ByteArray, at: Int): Int = (b[at].toInt() and 0xFF) or ((b[at + 1].toInt() and 0xFF) shl 8)
 

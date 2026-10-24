@@ -133,8 +133,8 @@ class CoreTest {
         val sent = camera.sent.map { it.first to it.second }
         assertEquals(
             listOf(
-                SonyOp.GET_DEVICE_INFO to emptyList(),
                 SonyOp.OPEN_SESSION to listOf(1L),
+                SonyOp.GET_DEVICE_INFO to emptyList(),
                 SonyOp.CONNECT to listOf(1L, 0L, 0L),
                 SonyOp.CONNECT to listOf(2L, 0L, 0L),
                 SonyOp.GET_EXT_DEVICE_INFO to listOf(0x12CL, 1L),
@@ -157,7 +157,7 @@ class CoreTest {
             session.start(this)
             fail("ожидали NotPcRemote")
         } catch (e: SessionException.NotPcRemote) {
-            assertEquals(listOf(SonyOp.GET_DEVICE_INFO), camera.sent.map { it.first })
+            assertEquals(listOf(SonyOp.OPEN_SESSION, SonyOp.GET_DEVICE_INFO), camera.sent.map { it.first })
         }
     }
 

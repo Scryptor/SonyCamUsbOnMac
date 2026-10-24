@@ -7,6 +7,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.BitmapFactory
 import android.hardware.usb.UsbConstants
+import android.os.BatteryManager
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.os.Build
@@ -56,6 +57,13 @@ class CameraController(private val context: Context, private val scope: Coroutin
     /** Кадры давно не приходят. */
     var isFrameStale by mutableStateOf(false)
         private set
+    /** Заряд самого планшета: в полноэкранном режиме системную строку не видно. */
+    var tabletBattery by mutableStateOf<Int?>(null)
+        private set
+    var tabletCharging by mutableStateOf(false)
+        private set
+    private val batteryManager = context.getSystemService(BatteryManager::class.java)
+    private var batteryCheckedAt = 0L
 
     @Volatile var lastJpeg: ByteArray? = null
         private set
@@ -88,6 +96,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
             while (isActive) {
                 if (device == null && System.currentTimeMillis() >= retryAt) findCamera()
                 tickFrameStats()
+                tickTabletBattery()
                 delay(500)
             }
         }
@@ -200,12 +209,22 @@ class CameraController(private val context: Context, private val scope: Coroutin
         }
         jobs += scope.launch(Dispatchers.Default) {
             var errors = 0
+            var lastArrival = 0L
             while (isActive) {
                 try {
+                    val t0 = System.nanoTime()
                     val jpeg = session.nextLiveViewFrame()
+                    val t1 = System.nanoTime()
                     errors = 0
                     val bitmap = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size)?.asImageBitmap() ?: continue
+                    val t2 = System.nanoTime()
                     withContext(Dispatchers.Main) { show(bitmap, jpeg) }
+                    val t3 = System.nanoTime()
+                    if (lastArrival != 0L && t1 - lastArrival > 100_000_000L) {
+                        Log.i("ZVFrames", "пауза %.0f мс: запрос %.0f мс (ожиданий %d), декодирование %.0f мс, показ %.0f мс".format(
+                            (t1 - lastArrival) / 1e6, (t1 - t0) / 1e6, session.lastLiveViewWaits, (t2 - t1) / 1e6, (t3 - t2) / 1e6))
+                    }
+                    lastArrival = t1
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: TransportException) {
@@ -221,7 +240,26 @@ class CameraController(private val context: Context, private val scope: Coroutin
         }
     }
 
+    /** Замер ровности видео: интервалы между кадрами и повторы одного и того же кадра. Пишется в журнал раз в 3 с. */
+    private val frameLog = ArrayList<Pair<Long, Int>>()
+    private var frameLogStart = 0L
+
+    private fun measure(jpeg: ByteArray) {
+        val now = System.nanoTime()
+        if (frameLog.isEmpty()) frameLogStart = now
+        frameLog += now to jpeg.contentHashCode()
+        if (now - frameLogStart < 3_000_000_000L) return
+        val gaps = frameLog.zipWithNext { a, b -> (b.first - a.first) / 1_000_000.0 }.sorted()
+        val repeats = frameLog.zipWithNext().count { (a, b) -> a.second == b.second }
+        if (gaps.isNotEmpty()) {
+            Log.i("ZVFrames", "кадров %d за 3 с, повторов %d, интервал: медиана %.0f мс, 90%% %.0f мс, макс %.0f мс".format(
+                frameLog.size, repeats, gaps[gaps.size / 2], gaps[(gaps.size * 9) / 10], gaps.last()))
+        }
+        frameLog.clear()
+    }
+
     private fun show(bitmap: ImageBitmap, jpeg: ByteArray) {
+        measure(jpeg)
         frame = bitmap
         lastJpeg = jpeg
         val now = System.currentTimeMillis()
@@ -237,6 +275,14 @@ class CameraController(private val context: Context, private val scope: Coroutin
         fps = frameTimes.size / 2.0
         val live = phase == Phase.settling || phase == Phase.ready
         isFrameStale = live && frame != null && now - lastFrameAt > 1500
+    }
+
+    private fun tickTabletBattery() {
+        val now = System.currentTimeMillis()
+        if (now - batteryCheckedAt < 15_000) return
+        batteryCheckedAt = now
+        tabletBattery = batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY).takeIf { it in 0..100 }
+        tabletCharging = batteryManager.isCharging
     }
 
     /** Останавливает всё, что связано с текущей камерой, и закрывает соединение. */

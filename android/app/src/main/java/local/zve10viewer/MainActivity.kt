@@ -130,8 +130,11 @@ private fun StatusPill(controller: CameraController, modifier: Modifier) {
         Text("${controller.deviceInfo?.model ?: "Камера"} · USB", color = Color.White, fontSize = 16.sp)
         Text(ValueFormatter.label(SettingID.exposureProgram, controller.property(SettingID.exposureProgram)),
             color = Color.White, fontSize = 16.sp)
-        Text("Батарея: ${ValueFormatter.label(SettingID.battery, controller.property(SettingID.battery))}",
+        Text("Камера: ${ValueFormatter.label(SettingID.battery, controller.property(SettingID.battery))}",
             color = Color.White, fontSize = 16.sp)
+        controller.tabletBattery?.let { level ->
+            Text("Планшет: $level%" + if (controller.tabletCharging) " ⚡" else "", color = Color.White, fontSize = 16.sp)
+        }
         Text("%.0f к/с".format(controller.fps), color = Secondary, fontSize = 16.sp)
     }
 }

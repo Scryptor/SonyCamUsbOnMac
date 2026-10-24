@@ -70,14 +70,15 @@ class CameraSession(private val transport: PtpTransport, private val timing: Ses
 
     /** Рукопожатие Sony, передача приоритета компьютеру и первое чтение свойств. */
     suspend fun start(scope: CoroutineScope) {
-        val info = DeviceInfo.parse(call(SonyOp.GET_DEVICE_INFO).data)
-        deviceInfo = info
-        if (!info.isPcRemote) throw SessionException.NotPcRemote()
-        // на Mac сессию PTP открывал ImageCaptureCore, здесь — сами
+        // на Mac сессию PTP открывал ImageCaptureCore, здесь — сами, и первой командой:
+        // внутри сессии у каждой команды свой номер транзакции, и чужие ответы легко отсеять
         val open = raw(SonyOp.OPEN_SESSION, listOf(1L))
         if (open.code != PtpResponseCode.OK && open.code != PtpResponseCode.SESSION_ALREADY_OPEN) {
             throw SessionException.OperationFailed(SonyOp.OPEN_SESSION, open.code)
         }
+        val info = DeviceInfo.parse(call(SonyOp.GET_DEVICE_INFO).data)
+        deviceInfo = info
+        if (!info.isPcRemote) throw SessionException.NotPcRemote()
         call(SonyOp.CONNECT, listOf(1L, 0L, 0L))
         call(SonyOp.CONNECT, listOf(2L, 0L, 0L))
         var hasExtInfo = false
@@ -130,17 +131,29 @@ class CameraSession(private val transport: PtpTransport, private val timing: Ses
     }
 
     /** Следующий кадр live view (JPEG). Пока кадр не готов, камера отвечает AccessDenied — ждём и повторяем. */
+    /** Сколько раз подряд камера ответила «кадр не готов» перед последним кадром (для замеров). */
+    @Volatile var lastLiveViewWaits = 0
+        private set
+
     suspend fun nextLiveViewFrame(): ByteArray {
+        var waits = 0
         while (true) {
             coroutineContext.ensureActive()
             val reply = raw(SonyOp.GET_OBJECT, listOf(Sony.LIVE_VIEW_HANDLE))
             when (reply.code) {
                 PtpResponseCode.OK -> {
-                    LiveViewFrame.jpeg(reply.data)?.let { return it }
+                    LiveViewFrame.jpeg(reply.data)?.let {
+                        lastLiveViewWaits = waits
+                        return it
+                    }
                     delay(20)
                 }
                 // кадр ещё не готов или камера занята (например, переключает режим) — ждём и повторяем
-                PtpResponseCode.ACCESS_DENIED, PtpResponseCode.DEVICE_BUSY -> delay(20)
+                // ждём недолго: кадр у камеры готов раз в 40 мс, и длинная пауза сбивает ровность видео
+                PtpResponseCode.ACCESS_DENIED, PtpResponseCode.DEVICE_BUSY -> {
+                    waits++
+                    delay(5)
+                }
                 PtpResponseCode.INVALID_OBJECT_HANDLE -> delay(50)
                 else -> throw SessionException.OperationFailed(SonyOp.GET_OBJECT, reply.code)
             }
@@ -213,7 +226,13 @@ class CameraSession(private val transport: PtpTransport, private val timing: Ses
     private fun listenForEvents(scope: CoroutineScope) {
         eventJob = scope.launch {
             transport.events.collect { event ->
-                if (event.code == Sony.PROPERTY_CHANGED_EVENT) runCatching { refresh() }
+                if (event.code == Sony.PROPERTY_CHANGED_EVENT) {
+                    val t0 = System.nanoTime()
+                    runCatching { refresh() }
+                    android.util.Log.d("ZVFrames", "событие 0xC203 → свойства перечитаны за %.0f мс".format((System.nanoTime() - t0) / 1e6))
+                } else {
+                    android.util.Log.d("ZVFrames", "событие 0x%04X".format(event.code))
+                }
             }
             // поток событий закончился — камера отключена
             close()
