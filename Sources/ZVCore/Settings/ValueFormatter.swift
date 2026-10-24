@@ -9,6 +9,13 @@ public enum ValueFormatter {
         return label(id, value)
     }
 
+    /// Баланс белого в строке значений: в режиме «Цвет. темп.» — сама температура, как на экране камеры.
+    public static func whiteBalanceLabel(whiteBalance: Int64?, colorTemperature: Int64?) -> String {
+        guard let whiteBalance else { return "—" }
+        if whiteBalance == WhiteBalanceTemperature.manualMode, let colorTemperature { return label(.colorTemperature, colorTemperature) }
+        return label(.whiteBalance, whiteBalance)
+    }
+
     public static func label(_ id: SettingID, _ value: Int64) -> String {
         switch id {
         case .shutter: return shutter(value)

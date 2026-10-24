@@ -10,6 +10,7 @@ struct SettingsView: View {
     @AppStorage(Prefs.Key.reviewSeconds) private var reviewSeconds = 3
     @AppStorage(Prefs.Key.reviewSource) private var reviewSource: Prefs.ReviewSource = .downloaded
     @AppStorage(Prefs.Key.autoHide) private var autoHide = true
+    @AppStorage(Prefs.Key.autoHideSeconds) private var autoHideSeconds = 3
     @AppStorage(Prefs.Key.wifiEnabled) private var wifiEnabled = true
     @AppStorage(Prefs.Key.wifiCameraName) private var wifiCameraName: String?
     @AppStorage(Prefs.Key.wifiHost) private var wifiHost: String?
@@ -70,7 +71,16 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
             Section("Интерфейс") {
-                Toggle("Скрывать элементы управления через 3 с без движения мыши", isOn: $autoHide)
+                Toggle("Скрывать элементы управления без движения мыши", isOn: $autoHide)
+                LabeledContent("Через:") {
+                    HStack {
+                        Slider(value: Binding(get: { Double(autoHideSeconds) }, set: { autoHideSeconds = Int($0.rounded()) }),
+                               in: 1...30, step: 1)
+                            .frame(width: 200)
+                        Text("\(autoHideSeconds) с").monospacedDigit()
+                    }
+                }
+                .disabled(!autoHide)
                 Text("H — скрыть или показать вручную. S — стоп-кадр в видеорежиме, пробел — снимок в фоторежиме.")
                     .font(.caption)
                     .foregroundStyle(.secondary)

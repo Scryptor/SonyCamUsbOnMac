@@ -40,6 +40,8 @@ import local.zve10viewer.settings.LumaHistogram
 import local.zve10viewer.settings.PresetCatalog
 import local.zve10viewer.settings.SettingID
 import local.zve10viewer.settings.SettingOptions
+import local.zve10viewer.settings.ValueFormatter
+import local.zve10viewer.settings.WhiteBalanceTemperature
 import local.zve10viewer.settings.WriteCoalescer
 import local.zve10viewer.settings.apply
 import local.zve10viewer.sony.DeviceInfo
@@ -152,6 +154,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
     private val targets = HashMap<Int, Long>()
     private val jobs = mutableListOf<Job>()
     private var reviewJob: Job? = null
+    private var temperatureJob: Job? = null
     private var statusJob: Job? = null
     private val frameTimes = ArrayDeque<Long>()
     private var lastFrameAt = 0L
@@ -172,6 +175,43 @@ class CameraController(private val context: Context, private val scope: Coroutin
     val isRecording: Boolean get() = recordingStartedAt != null
 
     // MARK: - Изменение настроек
+
+    /**
+     * Подпись значения настройки. Баланс белого в режиме «Цвет. темп.» — сама температура; температура вне этого
+     * режима — примерная или «авто»: камера отдаёт сохранённую ручную, которая сейчас не действует.
+     */
+    fun label(id: SettingID): String {
+        val whiteBalance = property(SettingID.whiteBalance)?.current?.intValue
+        val kelvin = property(SettingID.colorTemperature)?.current?.intValue
+        return when (id) {
+            SettingID.whiteBalance -> ValueFormatter.whiteBalanceLabel(whiteBalance, kelvin)
+            SettingID.colorTemperature -> WhiteBalanceTemperature.caption(WhiteBalanceTemperature.reading(whiteBalance, kelvin))
+            else -> ValueFormatter.label(id, property(id))
+        }
+    }
+
+    /**
+     * Ручная температура. Пишется, только когда камера в режиме «Цвет. темп.», — иначе сначала переключаем режим
+     * и ждём, пока камера подтвердит его.
+     */
+    fun setColorTemperature(kelvin: Long) {
+        temperatureJob?.cancel()
+        if (property(SettingID.whiteBalance)?.current?.intValue == WhiteBalanceTemperature.MANUAL_MODE) {
+            request(SettingID.colorTemperature, kelvin)
+            return
+        }
+        if (!isWritable(SettingID.whiteBalance)) return
+        request(SettingID.whiteBalance, WhiteBalanceTemperature.MANUAL_MODE)
+        temperatureJob = scope.launch {
+            repeat(40) {
+                delay(100)
+                if (isWritable(SettingID.colorTemperature)) {
+                    if (property(SettingID.colorTemperature)?.current?.intValue != kelvin) request(SettingID.colorTemperature, kelvin)
+                    return@launch
+                }
+            }
+        }
+    }
 
     fun request(id: SettingID, value: Long) {
         val coalescer = coalescer ?: return

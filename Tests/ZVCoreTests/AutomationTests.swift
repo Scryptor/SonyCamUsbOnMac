@@ -50,3 +50,13 @@ import Testing
     #expect(try decode(#"{"action":"cancelPairing"}"#) == .cancelPairing)
     #expect(try decode(#"{"action":"forgetWiFi"}"#) == .forgetWiFi)
 }
+
+@Test func decodesShowInfo() throws {
+    func decode(_ json: String) throws -> AutomationAction {
+        try JSONDecoder().decode(AutomationAction.self, from: Data(json.utf8))
+    }
+    // подсказки строки состояния: о подключении, о кадрах; без имени — закрыть
+    #expect(try decode(#"{"action":"showInfo","name":"connection"}"#) == .showInfo("connection"))
+    #expect(try decode(#"{"action":"showInfo","name":"frames"}"#) == .showInfo("frames"))
+    #expect(try decode(#"{"action":"showInfo"}"#) == .showInfo(nil))
+}

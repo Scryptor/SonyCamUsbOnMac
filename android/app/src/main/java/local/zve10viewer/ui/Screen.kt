@@ -41,6 +41,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.zIndex
+import kotlin.math.roundToInt
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -213,14 +214,14 @@ private fun WaitingScreen(controller: CameraController, notPcRemote: Boolean) {
 @Composable
 private fun LiveScreen(controller: CameraController, screen: ScreenState) {
     var hint by remember { mutableStateOf(false) }
-    // автоскрытие: 3 с без касаний, если не открыто меню, панель или просмотр снимка
+    // автоскрытие: через заданное в настройках время без касаний, если не открыто меню, панель или просмотр снимка
     LaunchedEffect(Unit) {
         while (true) {
             delay(500)
             val busy = screen.overlayOpen || controller.review != null
             if (busy || !controller.prefs.autoHide) {
                 screen.autoHidden = false
-            } else if (!screen.autoHidden && System.currentTimeMillis() - screen.lastActivity > 3000) {
+            } else if (!screen.autoHidden && System.currentTimeMillis() - screen.lastActivity > controller.prefs.autoHideSeconds * 1000L) {
                 screen.autoHidden = true
             }
         }
@@ -452,7 +453,7 @@ private fun InfoLine(controller: CameraController, onOpen: (SettingID?) -> Unit)
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 Text(id.shortTitle.uppercase(), color = Secondary, fontSize = 12.sp)
-                Text(ValueFormatter.label(id, controller.property(id)), color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                Text(controller.label(id), color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
             }
         }
         Text("Fn", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold,
@@ -561,6 +562,7 @@ private fun SettingsPanel(controller: CameraController, modifier: Modifier) {
     var reviewSeconds by remember { mutableIntStateOf(prefs.reviewSeconds) }
     var reviewSource by remember { mutableStateOf(prefs.reviewSource) }
     var autoHide by remember { mutableStateOf(prefs.autoHide) }
+    var autoHideSeconds by remember { mutableIntStateOf(prefs.autoHideSeconds) }
     var wifiEnabled by remember { mutableStateOf(prefs.wifiEnabled) }
     var wifiCamera by remember { mutableStateOf(prefs.wifiCameraName?.let { name -> prefs.wifiHost?.let { "$name · $it" } ?: name }) }
     Column(
@@ -590,7 +592,10 @@ private fun SettingsPanel(controller: CameraController, modifier: Modifier) {
         }
         Text("Если снимок сохраняется только на карту, показывается кадр с камеры.", color = Secondary, fontSize = 13.sp)
         Spacer(Modifier.height(8.dp))
-        Toggle("Скрывать элементы через 3 с без касаний", autoHide) { autoHide = it; prefs.autoHide = it }
+        Toggle("Скрывать элементы без касаний", autoHide) { autoHide = it; prefs.autoHide = it }
+        Text("Через: $autoHideSeconds с", color = if (autoHide) Color.White else Secondary, fontSize = 16.sp)
+        Slider(autoHideSeconds.toFloat(), { autoHideSeconds = it.roundToInt(); prefs.autoHideSeconds = autoHideSeconds },
+            valueRange = 1f..30f, steps = 28, enabled = autoHide)
         Text("Касание видео прячет и возвращает элементы.", color = Secondary, fontSize = 13.sp)
         Spacer(Modifier.height(8.dp))
         Text("Wi-Fi", color = Secondary, fontSize = 15.sp)

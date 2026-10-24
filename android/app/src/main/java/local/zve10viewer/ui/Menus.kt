@@ -68,6 +68,7 @@ import local.zve10viewer.settings.SettingGroup
 import local.zve10viewer.settings.SettingID
 import local.zve10viewer.settings.SettingOptions
 import local.zve10viewer.settings.ValueFormatter
+import local.zve10viewer.settings.WhiteBalanceTemperature
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlin.math.roundToLong
@@ -108,7 +109,7 @@ private fun Tile(controller: CameraController, screen: ScreenState, slot: FnSlot
             ) {
                 Text(id.shortTitle, color = if (selected) Color.White else Secondary, fontSize = 14.sp, maxLines = 1)
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(ValueFormatter.label(id, controller.property(id)), color = Color.White, fontSize = 19.sp,
+                    Text(controller.label(id), color = Color.White, fontSize = 19.sp,
                         fontWeight = FontWeight.SemiBold, maxLines = 1)
                     if (id in controller.pending) {
                         CircularProgressIndicator(Modifier.padding(start = 6.dp).size(14.dp), color = Color.White, strokeWidth = 2.dp)
@@ -164,25 +165,31 @@ fun ValueStrip(controller: CameraController, id: SettingID) {
     }
 }
 
-/** Цветовая температура (только в режиме K) и сдвиг A–B / G–M. */
+/**
+ * Цветовая температура и сдвиг A–B / G–M. Ползунок температуры работает в любом режиме:
+ * сдвинули — камера переходит на ручную температуру.
+ */
 @Composable
 private fun WhiteBalanceFineTune(controller: CameraController) {
     val temperature = controller.property(SettingID.colorTemperature)
     val ab = controller.property(SettingID.wbShiftAB)
     val gm = controller.property(SettingID.wbShiftGM)
+    val reading = WhiteBalanceTemperature.reading(controller.property(SettingID.whiteBalance)?.current?.intValue, temperature?.current?.intValue)
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-        val range = temperature?.range
-        Column(Modifier.width(200.dp)) {
-            Text("Цвет. темп.: ${ValueFormatter.label(SettingID.colorTemperature, temperature)}", color = Secondary, fontSize = 14.sp)
-            if (range != null && range.max > range.min) {
-                var kelvin by remember { mutableFloatStateOf((temperature.current.intValue ?: range.min).toFloat()) }
-                LaunchedEffect(temperature.current.intValue) { temperature.current.intValue?.let { kelvin = it.toFloat() } }
-                Slider(
-                    kelvin, { kelvin = it }, valueRange = range.min.toFloat()..range.max.toFloat(),
-                    steps = ((range.max - range.min) / range.step - 1).toInt().coerceAtLeast(0),
-                    enabled = controller.isWritable(SettingID.colorTemperature),
-                    onValueChangeFinished = { controller.request(SettingID.colorTemperature, (kelvin / range.step).roundToLong() * range.step) },
-                )
+        val range = temperature?.range?.takeIf { it.max > it.min } ?: WhiteBalanceTemperature.fallbackRange
+        val position = WhiteBalanceTemperature.sliderValue(reading, temperature?.current?.intValue).toFloat()
+        Column(Modifier.width(220.dp)) {
+            Text("Цвет. темп.: ${WhiteBalanceTemperature.caption(reading)}", color = Secondary, fontSize = 14.sp)
+            var kelvin by remember { mutableFloatStateOf(position) }
+            LaunchedEffect(position) { kelvin = position }
+            Slider(
+                kelvin, { kelvin = it }, valueRange = range.min.toFloat()..range.max.toFloat(),
+                steps = ((range.max - range.min) / range.step - 1).toInt().coerceAtLeast(0),
+                enabled = controller.isWritable(SettingID.whiteBalance) || controller.isWritable(SettingID.colorTemperature),
+                onValueChangeFinished = { controller.setColorTemperature((kelvin / range.step).roundToLong() * range.step) },
+            )
+            if (reading !is WhiteBalanceTemperature.Reading.Manual) {
+                Text(WhiteBalanceTemperature.explanation(reading), color = Secondary, fontSize = 12.sp, lineHeight = 15.sp)
             }
         }
         if (ab != null && gm != null) ShiftPad(controller)
@@ -282,7 +289,7 @@ fun AllSettingsPanel(controller: CameraController, screen: ScreenState, modifier
                     if (id in controller.pending) {
                         CircularProgressIndicator(Modifier.padding(end = 8.dp).size(14.dp), color = Color.White, strokeWidth = 2.dp)
                     }
-                    Text(ValueFormatter.label(id, controller.property(id)), color = if (writable) Color.White else Secondary,
+                    Text(controller.label(id), color = if (writable) Color.White else Secondary,
                         fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
                 }
                 if (screen.editing == id) ValueStrip(controller, id)

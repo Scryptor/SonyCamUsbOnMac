@@ -47,6 +47,7 @@ enum Prefs {
         static let reviewSeconds = "reviewSeconds"
         static let reviewSource = "reviewSource"
         static let autoHide = "autoHideControls"
+        static let autoHideSeconds = "autoHideSeconds"
         static let wifiEnabled = "wifiEnabled"
         static let wifiHost = "wifiHost"
         static let wifiCameraName = "wifiCameraName"
@@ -87,6 +88,12 @@ enum Prefs {
     static var autoHide: Bool {
         get { defaults.object(forKey: Key.autoHide) as? Bool ?? true }
         set { defaults.set(newValue, forKey: Key.autoHide) }
+    }
+
+    /// Через сколько секунд без движения мыши прятать элементы (1…30).
+    static var autoHideSeconds: Int {
+        get { min(max(defaults.object(forKey: Key.autoHideSeconds) as? Int ?? 3, 1), 30) }
+        set { defaults.set(min(max(newValue, 1), 30), forKey: Key.autoHideSeconds) }
     }
 
     /// Подключаться к камере по Wi-Fi, когда её нет на кабеле.

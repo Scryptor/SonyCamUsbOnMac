@@ -2,14 +2,14 @@ import SwiftUI
 import ZVCore
 
 /// Основной экран: видео, статус, строка значений, кнопки справа, пресеты, гистограмма, лента снимков
-/// и меню поверх кадра. Элементы прячутся сами (3 с без мыши) или клавишей H.
+/// и меню поверх кадра. Элементы прячутся сами (через заданное в настройках время без мыши) или клавишей H.
 struct LiveScreen: View {
     let controller: CameraController
     let screen: ScreenState
     @FocusState private var focused: Bool
     @State private var showHiddenHint = false
 
-    private var showControls: Bool { !screen.controlsHidden || screen.fnOpen || screen.allSettingsOpen }
+    private var showControls: Bool { !screen.controlsHidden || screen.fnOpen || screen.allSettingsOpen || screen.pillInfo != nil }
 
     var body: some View {
         ZStack {
@@ -62,8 +62,8 @@ struct LiveScreen: View {
         .task {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(500))
-                screen.tickAutoHide(enabled: Prefs.autoHide,
-                                    busy: screen.fnOpen || screen.allSettingsOpen || controller.review != nil)
+                screen.tickAutoHide(enabled: Prefs.autoHide, delay: TimeInterval(Prefs.autoHideSeconds),
+                                    busy: screen.fnOpen || screen.allSettingsOpen || screen.pillInfo != nil || controller.review != nil)
             }
         }
         .environment(\.colorScheme, .dark)
@@ -137,7 +137,7 @@ struct LiveScreen: View {
                 HStack(alignment: .top) {
                     TopBar(controller: controller, screen: screen)
                     Spacer()
-                    StatusPill(controller: controller)
+                    StatusPill(controller: controller, screen: screen)
                 }
                 Spacer()
                 if !screen.fnOpen {
@@ -192,15 +192,26 @@ struct LiveScreen: View {
 
 private struct StatusPill: View {
     let controller: CameraController
+    let screen: ScreenState
 
     var body: some View {
         HStack(spacing: 14) {
             if let started = controller.recordingStartedAt {
                 RecBadge(startedAt: started)
             }
-            HStack(spacing: 6) {
-                Circle().fill(controller.phase == .ready ? .green : .orange).frame(width: 8, height: 8)
-                Text("\(controller.deviceInfo?.model ?? "Камера") · \(controller.transportKind == .wifi ? "Wi-Fi" : "USB")")
+            // щелчок — подсказка: адреса и сигнал / что это за кадры
+            PillButton(info: .connection, screen: screen) {
+                HStack(spacing: 6) {
+                    Circle().fill(controller.phase == .ready ? .green : .orange).frame(width: 8, height: 8)
+                    Text("\(controller.deviceInfo?.model ?? "Камера") · \(controller.transportKind == .wifi ? "Wi-Fi" : "USB")")
+                }
+            } popover: {
+                ConnectionInfo(controller: controller)
+            }
+            PillButton(info: .frames, screen: screen) {
+                Text("\(controller.shownFPS) к/с").monospacedDigit()
+            } popover: {
+                FramesInfo(controller: controller)
             }
             Text(ValueFormatter.label(.exposureProgram, controller.property(.exposureProgram)))
             if controller.mode == .video {
@@ -222,6 +233,112 @@ private struct StatusPill: View {
     }
 }
 
+/// Часть строки состояния, по щелчку открывающая подсказку.
+private struct PillButton<Label: View, Popover: View>: View {
+    let info: ScreenState.PillInfo
+    let screen: ScreenState
+    @ViewBuilder let label: () -> Label
+    @ViewBuilder let popover: () -> Popover
+
+    var body: some View {
+        Button { screen.togglePillInfo(info) } label: { label().contentShape(Rectangle()) }
+            .buttonStyle(.plain)
+            .onHover { inside in
+                if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+            }
+            .popover(isPresented: Binding(
+                get: { screen.pillInfo == info },
+                set: { if !$0, screen.pillInfo == info { screen.pillInfo = nil } }
+            ), arrowEdge: .bottom) {
+                popover()
+                    .padding(16)
+                    .frame(width: 360, alignment: .leading)
+                    // тёмная, как весь экран, и при светлой теме системы
+                    .preferredColorScheme(.dark)
+            }
+    }
+}
+
+private struct ConnectionInfo: View {
+    let controller: CameraController
+    @State private var details = CameraController.ConnectionDetails()
+
+    private var wifi: Bool { controller.transportKind == .wifi }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(wifi ? "Подключение по Wi-Fi" : "Подключение по USB").font(.headline)
+            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
+                if let info = controller.deviceInfo {
+                    InfoRow(label: "Камера", value: "\(info.model), прошивка \(info.firmware)")
+                }
+                if wifi {
+                    if let host = details.cameraHost { InfoRow(label: "IP камеры", value: host) }
+                    if let host = details.localHost { InfoRow(label: "IP Mac", value: host) }
+                    if let dbm = details.signalDBm {
+                        InfoRow(label: "Сигнал Wi-Fi", value: "\(String(dbm).replacingOccurrences(of: "-", with: "−")) дБм, \(Self.signalWord(dbm))")
+                    }
+                }
+            }
+            .textSelection(.enabled)
+            Text(wifi
+                 ? "Сигнал — между Mac и роутером. Если картинка дёргается, поставьте камеру ближе к роутеру."
+                 : "Без кабеля программа сама найдёт камеру по Wi-Fi, если она сопряжена (⌘, → Wi-Fi).")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        // сигнал меняется — пока подсказка открыта, обновляем раз в секунду
+        .task {
+            while !Task.isCancelled {
+                details = await controller.connectionDetails()
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+
+    static func signalWord(_ dbm: Int) -> String {
+        dbm >= -60 ? "хороший" : dbm >= -70 ? "средний" : "слабый"
+    }
+}
+
+private struct FramesInfo: View {
+    let controller: CameraController
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Кадры трансляции").font(.headline)
+            Group {
+                Text("Столько кадров в секунду (сейчас \(controller.shownFPS)) доходит до Mac \(controller.transportKind == .wifi ? "по Wi-Fi" : "по USB"). Это картинка для просмотра, а не съёмка.")
+                Text("На запись это не влияет: камера пишет видео на карту со своей частотой (например, 25p) и снимает фото в полном качестве, сколько бы кадров ни доходило сюда.")
+                    .foregroundStyle(.secondary)
+                Text("Счётчик — чтобы проверить связь. Камера отдаёт до 25–30 кадров в секунду; если число заметно меньше или скачет, связь не успевает и картинка подёргивается.")
+                    .foregroundStyle(.secondary)
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
+                InfoRow(label: "Самая долгая пауза за 10 с", value: "\(controller.frameGapMs) мс")
+            }
+            Text("Обычно между кадрами около 40 мс; паузы дольше 200 мс заметны как рывок.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+private struct InfoRow: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        GridRow {
+            Text(label).foregroundStyle(.secondary)
+            Text(value).monospacedDigit()
+        }
+    }
+}
+
 /// Тонкая строка с основными значениями, как на дисплее камеры. Клик открывает меню Fn.
 private struct InfoLine: View {
     let controller: CameraController
@@ -236,7 +353,7 @@ private struct InfoLine: View {
                         Text(id.shortTitle.uppercased())
                             .font(.caption2)
                             .foregroundStyle(.secondary)
-                        Text(ValueFormatter.label(id, controller.property(id)))
+                        Text(controller.label(id))
                             .font(.headline.monospacedDigit())
                     }
                 }

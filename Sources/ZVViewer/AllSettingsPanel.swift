@@ -42,7 +42,6 @@ struct AllSettingsPanel: View {
     }
 
     @ViewBuilder private func row(_ id: SettingID) -> some View {
-        let property = controller.property(id)
         let writable = controller.isWritable(id)
         Button {
             if writable { screen.editing = screen.editing == id ? nil : id }
@@ -51,7 +50,7 @@ struct AllSettingsPanel: View {
                 Text(id.title)
                 Spacer()
                 if controller.pending.contains(id) { ProgressView().controlSize(.mini) }
-                Text(ValueFormatter.label(id, property)).fontWeight(.semibold).monospacedDigit()
+                Text(controller.label(id)).fontWeight(.semibold).monospacedDigit()
             }
             .padding(.vertical, 9)
             .padding(.horizontal, 6)

@@ -124,6 +124,12 @@ final class AutomationServer {
             screen.selected = id
         case let .step(offset):
             controller.requestStep(screen.selected, offset: offset)
+        case let .request(.colorTemperature, value):
+            // как ползунок: вне режима «Цвет. темп.» камера сначала переключается в него
+            guard controller.isWritable(.colorTemperature) || controller.isWritable(.whiteBalance) else {
+                return "colorTemperature is not writable now"
+            }
+            controller.setColorTemperature(value)
         case let .request(id, value):
             guard controller.isWritable(id) else { return "\(id.rawValue) is not writable now" }
             controller.request(id, value)
@@ -165,6 +171,15 @@ final class AutomationServer {
             controller.cancelPairing()
         case .forgetWiFi:
             controller.forgetWiFiCamera()
+        case let .showInfo(name):
+            guard let name else {
+                screen.pillInfo = nil
+                return nil
+            }
+            guard let info = ScreenState.PillInfo(rawValue: name) else { return "unknown info \(name)" }
+            guard controller.phase == .ready || controller.phase == .settling else { return "camera is not connected" }
+            screen.closeOverlays()
+            screen.pillInfo = info
         case let .openShot(index):
             guard controller.shots.indices.contains(index) else { return "no shot \(index)" }
             controller.openShot(index)
@@ -196,6 +211,9 @@ final class AutomationServer {
         case "autoHide":
             guard let b = Bool(value) else { return "autoHide: true | false" }
             Prefs.autoHide = b
+        case "autoHideSeconds":
+            guard let n = Int(value), (1...30).contains(n) else { return "autoHideSeconds: 1…30" }
+            Prefs.autoHideSeconds = n
         default:
             return "unknown preference \(key)"
         }
@@ -209,7 +227,7 @@ final class AutomationServer {
                 "id": id.rawValue,
                 "code": String(format: "0x%04X", id.code),
                 "title": id.title,
-                "label": ValueFormatter.label(id, property),
+                "label": controller.label(id),
                 "writable": controller.isWritable(id),
                 "pending": controller.pending.contains(id),
             ]
@@ -235,6 +253,7 @@ final class AutomationServer {
             "firmware": controller.deviceInfo?.firmware ?? NSNull(),
             "recording": controller.isRecording,
             "fps": (controller.fps * 10).rounded() / 10,
+            "frameGapMs": controller.frameGapMs,
             "histogramBins": controller.histogram.count,
             "applyingPreset": controller.isApplyingPreset,
             "status": controller.statusMessage ?? NSNull(),
@@ -255,7 +274,7 @@ final class AutomationServer {
             "prefs": [
                 "destination": Prefs.destination.rawValue, "folder": Prefs.folderURL.path,
                 "reviewEnabled": Prefs.reviewEnabled, "reviewSeconds": Prefs.reviewSeconds,
-                "reviewSource": Prefs.reviewSource.rawValue, "autoHide": Prefs.autoHide,
+                "reviewSource": Prefs.reviewSource.rawValue, "autoHide": Prefs.autoHide, "autoHideSeconds": Prefs.autoHideSeconds,
             ] as [String: Any],
             "cameraDestination": controller.properties[SonyProp.stillImageStoreDestination]?.current.intValue ?? NSNull(),
             "presets": controller.presets.map { preset in
@@ -269,12 +288,35 @@ final class AutomationServer {
         return result
     }
 
-    /// Снимок собственного окна (без разрешения на запись экрана).
+    /// Снимок собственного окна (без разрешения на запись экрана) вместе с открытыми подсказками:
+    /// popover — отдельное окно, его дорисовываем поверх на своё место.
     private func screenshot() -> Data? {
         guard let window = NSApp.windows.first(where: { $0.isVisible && $0.title == "ZV-E10 Viewer" }) ?? NSApp.mainWindow,
               let view = window.contentView,
               let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return nil }
         view.cacheDisplay(in: view.bounds, to: rep)
+        let popovers = NSApp.windows.filter { $0 !== window && $0.isVisible && String(describing: type(of: $0)).contains("Popover") }
+        if !popovers.isEmpty, let context = NSGraphicsContext(bitmapImageRep: rep) {
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = context
+            for popover in popovers {
+                guard let content = popover.contentView, let layer = content.layer else { continue }
+                // в координатах окна, как и у снимка: начало внизу слева (вид SwiftUI перевёрнут — его координаты не годятся)
+                let inWindow = window.convertPoint(fromScreen: popover.convertPoint(toScreen: content.frame.origin))
+                let rect = NSRect(x: inWindow.x - view.frame.minX, y: inWindow.y - view.frame.minY,
+                                  width: content.bounds.width, height: content.bounds.height)
+                // фон popover — размытие окном системы, в снимок оно не попадает: подкладываем тёмную плашку
+                NSColor(white: 0.16, alpha: 1).setFill()
+                NSBezierPath(roundedRect: rect, xRadius: 10, yRadius: 10).fill()
+                let cg = context.cgContext
+                cg.saveGState()
+                cg.translateBy(x: rect.minX, y: rect.maxY)
+                cg.scaleBy(x: 1, y: -1)
+                layer.render(in: cg)
+                cg.restoreGState()
+            }
+            NSGraphicsContext.restoreGraphicsState()
+        }
         return rep.representation(using: .png, properties: [:])
     }
 

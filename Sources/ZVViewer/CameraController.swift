@@ -1,4 +1,5 @@
 import CoreGraphics
+import CoreWLAN
 import Foundation
 import ImageCaptureCore
 import ImageIO
@@ -21,6 +22,10 @@ final class CameraController {
     /// Гистограмма яркости последнего кадра (64 столбца).
     private(set) var histogram: [Int] = []
     private(set) var fps: Double = 0
+    /// fps для строки состояния: обновляется дважды в секунду, а не с каждым кадром.
+    private(set) var shownFPS = 0
+    /// Самая долгая пауза между кадрами за последние 10 с, мс — насколько ровно идёт картинка.
+    private(set) var frameGapMs = 0
     /// Настройки, для которых запрошено новое значение, но камера его ещё не подтвердила.
     private(set) var pending: Set<SettingID> = []
     private(set) var isRecording = false
@@ -54,6 +59,7 @@ final class CameraController {
     }
 
     @ObservationIgnored private var reviewTask: Task<Void, Never>?
+    @ObservationIgnored private var temperatureTask: Task<Void, Never>?
 
     /// Последний кадр как пришёл с камеры (для API автоматизации).
     @ObservationIgnored private(set) var lastJPEG: Data?
@@ -70,6 +76,10 @@ final class CameraController {
     @ObservationIgnored private var tasks: [Task<Void, Never>] = []
     @ObservationIgnored private var frameTimes: [Date] = []
     @ObservationIgnored private var lastFrameAt: Date?
+    /// Паузы между кадрами за последние 10 с: когда пришёл кадр и сколько его ждали.
+    @ObservationIgnored private var frameGaps: [(at: Date, gap: TimeInterval)] = []
+    /// Связь по Wi-Fi — для подсказки с адресами.
+    @ObservationIgnored private var wifiTransport: PTPIPTransport?
     @ObservationIgnored private var statusTask: Task<Void, Never>?
     @ObservationIgnored private let presetsKey = "presets"
     @ObservationIgnored private var tracker = ConnectionTracker<ObjectIdentifier>()
@@ -105,6 +115,7 @@ final class CameraController {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(500))
                 self?.tickFrameStats()
+                self?.tickShownStats()
             }
         }
         // без кабеля — ищем камеру в сети
@@ -120,6 +131,41 @@ final class CameraController {
 
     func isWritable(_ id: SettingID) -> Bool {
         phase == .ready && !isApplyingPreset && !isCapturing && property(id)?.isWritable == true
+    }
+
+    /// Подпись значения настройки. Баланс белого в режиме «Цвет. темп.» — сама температура; температура вне этого
+    /// режима — примерная или «авто»: камера отдаёт сохранённую ручную, которая сейчас не действует.
+    func label(_ id: SettingID) -> String {
+        let whiteBalance = property(.whiteBalance)?.current.intValue
+        let kelvin = property(.colorTemperature)?.current.intValue
+        switch id {
+        case .whiteBalance: return ValueFormatter.whiteBalanceLabel(whiteBalance: whiteBalance, colorTemperature: kelvin)
+        case .colorTemperature:
+            return WhiteBalanceTemperature.caption(WhiteBalanceTemperature.reading(whiteBalance: whiteBalance, colorTemperature: kelvin))
+        default: return ValueFormatter.label(id, property(id))
+        }
+    }
+
+    /// Ручная температура. Пишется, только когда камера в режиме «Цвет. темп.», — иначе сначала переключаем режим
+    /// и ждём, пока камера подтвердит его.
+    func setColorTemperature(_ kelvin: Int64) {
+        temperatureTask?.cancel()
+        if property(.whiteBalance)?.current.intValue == WhiteBalanceTemperature.manualMode {
+            request(.colorTemperature, kelvin)
+            return
+        }
+        guard isWritable(.whiteBalance) else { return }
+        request(.whiteBalance, WhiteBalanceTemperature.manualMode)
+        temperatureTask = Task { [weak self] in
+            for _ in 0..<40 {
+                try? await Task.sleep(for: .milliseconds(100))
+                guard let self, !Task.isCancelled else { return }
+                if self.isWritable(.colorTemperature) {
+                    if self.property(.colorTemperature)?.current.intValue != kelvin { self.request(.colorTemperature, kelvin) }
+                    return
+                }
+            }
+        }
     }
 
     func request(_ id: SettingID, _ value: Int64) {
@@ -504,6 +550,7 @@ final class CameraController {
             isPairing = false
             wifiStatus = nil
             connectionMessage = nil
+            wifiTransport = transport
             runSession(transport: transport, kind: .wifi, close: { await transport.close() }, prepare: {},
                        onReady: {}, onFailure: { [weak self] in self?.wifiLost() })
             return true
@@ -539,16 +586,16 @@ final class CameraController {
             guard self != nil, !Task.isCancelled else { return }
             onEnded()
         })
-        tasks.append(Task.detached(priority: .userInitiated) { [weak self] in
+        // следующий кадр запрашиваем, пока текущий декодируется: по Wi-Fi запрос идёт 25–35 мс.
+        // Не успеваем показать — показываем самый свежий
+        let (frames, sink) = AsyncStream.makeStream(of: Data.self, bufferingPolicy: .bufferingNewest(1))
+        tasks.append(Task.detached(priority: .userInitiated) {
+            defer { sink.finish() }
             var failures = 0
             while !Task.isCancelled {
                 do {
-                    let jpeg = try await session.nextLiveViewFrame()
+                    sink.yield(try await session.nextLiveViewFrame())
                     failures = 0
-                    guard let image = Self.decode(jpeg) else { continue }
-                    let bins = Self.histogram(of: image)
-                    guard !Task.isCancelled else { break }
-                    await self?.show(image, jpeg: jpeg, histogram: bins)
                 } catch TransportError.disconnected {
                     break
                 } catch is CancellationError {
@@ -558,6 +605,14 @@ final class CameraController {
                     failures += 1
                     try? await Task.sleep(for: .milliseconds(min(100 * failures, 1000)))
                 }
+            }
+        })
+        tasks.append(Task.detached(priority: .userInitiated) { [weak self] in
+            for await jpeg in frames {
+                guard let image = Self.decode(jpeg) else { continue }
+                let bins = Self.histogram(of: image)
+                guard !Task.isCancelled else { break }
+                await self?.show(image, jpeg: jpeg, histogram: bins)
             }
         })
     }
@@ -578,9 +633,35 @@ final class CameraController {
         lastJPEG = jpeg
         self.histogram = histogram
         let now = Date()
+        if let lastFrameAt { frameGaps.append((now, now.timeIntervalSince(lastFrameAt))) }
         lastFrameAt = now
         frameTimes.append(now)
         tickFrameStats()
+    }
+
+    /// Числа для строки состояния и подсказки о кадрах; пересчитываются дважды в секунду.
+    private func tickShownStats() {
+        let now = Date()
+        frameGaps.removeAll { now.timeIntervalSince($0.at) > 10 }
+        // кадры перестали приходить — пауза растёт и сейчас
+        let open = frame == nil ? 0 : lastFrameAt.map { now.timeIntervalSince($0) } ?? 0
+        let gap = Int((max(frameGaps.map(\.gap).max() ?? 0, open) * 1000).rounded())
+        let shown = Int(fps.rounded())
+        if shownFPS != shown { shownFPS = shown }
+        if frameGapMs != gap { frameGapMs = gap }
+    }
+
+    struct ConnectionDetails {
+        var cameraHost: String?
+        var localHost: String?
+        var signalDBm: Int?
+    }
+
+    /// Для подсказки о подключении: адреса камеры и Mac, сигнал Wi-Fi.
+    func connectionDetails() async -> ConnectionDetails {
+        guard let wifi = wifiTransport else { return ConnectionDetails() }
+        let rssi = CWWiFiClient.shared().interface()?.rssiValue() ?? 0
+        return ConnectionDetails(cameraHost: wifi.host, localHost: await wifi.localHost(), signalDBm: rssi == 0 ? nil : rssi)
     }
 
     /// fps за последние 2 с и признак «кадры не приходят» (больше 1,5 с).
@@ -611,6 +692,7 @@ final class CameraController {
         device = nil
         closeTransport = nil
         transportKind = nil
+        wifiTransport = nil
         session = nil
         coalescer = nil
         targets = [:]
@@ -619,8 +701,11 @@ final class CameraController {
         lastJPEG = nil
         lastFrameAt = nil
         frameTimes = []
+        frameGaps = []
         histogram = []
         fps = 0
+        shownFPS = 0
+        frameGapMs = 0
         isFrameStale = false
         properties = [:]
         deviceInfo = nil

@@ -31,7 +31,7 @@ struct FnMenu: View {
         case let .setting(id):
             let enabled = controller.isWritable(id)
             Button { screen.selected = id } label: {
-                TileLabel(title: id.shortTitle, value: ValueFormatter.label(id, controller.property(id)),
+                TileLabel(title: id.shortTitle, value: controller.label(id),
                           isSelected: id == screen.selected, isPending: controller.pending.contains(id))
             }
             .buttonStyle(.plain)

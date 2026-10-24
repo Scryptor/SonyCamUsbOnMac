@@ -18,6 +18,13 @@ final class PTPIPChannel: @unchecked Sendable {
         self.connection = connection
     }
 
+    /// Адрес этого Mac в сети, через который идёт соединение.
+    var localHost: String? {
+        guard case let .hostPort(host, _) = connection.currentPath?.localEndpoint else { return nil }
+        // у IPv6 бывает «%en0» — интерфейс в адресе не нужен
+        return "\(host)".split(separator: "%").first.map(String.init)
+    }
+
     /// Открывает соединение и ждёт готовности не дольше timeout.
     static func open(host: String, port: UInt16, timeout: Duration) async throws -> PTPIPChannel {
         let tcp = NWProtocolTCP.Options()
@@ -208,6 +215,11 @@ public actor PTPIPTransport: PTPTransport {
             close()
             throw error
         }
+    }
+
+    /// Адрес этого Mac в сети, через который идёт связь с камерой.
+    public func localHost() -> String? {
+        command?.localHost
     }
 
     public func send(_ operation: UInt16, _ params: [UInt32], outData: Data?) async throws -> PTPReply {

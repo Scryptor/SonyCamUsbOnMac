@@ -49,6 +49,11 @@ class Prefs(context: Context) {
         get() = prefs.getBoolean("autoHideControls", true)
         set(value) = prefs.edit().putBoolean("autoHideControls", value).apply()
 
+    /** Через сколько секунд без касаний прятать элементы (1…30). */
+    var autoHideSeconds: Int
+        get() = prefs.getInt("autoHideSeconds", 3).coerceIn(1, 30)
+        set(value) = prefs.edit().putInt("autoHideSeconds", value.coerceIn(1, 30)).apply()
+
     var histogramOn: Boolean
         get() = prefs.getBoolean("histogramOn", false)
         set(value) = prefs.edit().putBoolean("histogramOn", value).apply()

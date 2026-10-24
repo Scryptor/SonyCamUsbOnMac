@@ -48,10 +48,11 @@ struct ValueStrip: View {
     }
 }
 
-/// Цветовая температура (только в режиме K) и сдвиг A–B / G–M.
+/// Цветовая температура и сдвиг A–B / G–M. Ползунок температуры работает в любом режиме:
+/// сдвинули — камера переходит на ручную температуру.
 private struct WhiteBalanceFineTune: View {
     let controller: CameraController
-    @State private var kelvin: Double = 5500
+    @State private var kelvin: Double = 5600
     @State private var pad: CGPoint?
 
     var body: some View {
@@ -61,25 +62,29 @@ private struct WhiteBalanceFineTune: View {
         }
     }
 
+    private var reading: WhiteBalanceTemperature.Reading {
+        WhiteBalanceTemperature.reading(whiteBalance: controller.property(.whiteBalance)?.current.intValue,
+                                        colorTemperature: controller.property(.colorTemperature)?.current.intValue)
+    }
+
     @ViewBuilder private var temperature: some View {
         let property = controller.property(.colorTemperature)
-        let range = property?.range
+        let range = property?.range.flatMap { $0.max > $0.min ? $0 : nil } ?? WhiteBalanceTemperature.fallbackRange
+        let position = Double(WhiteBalanceTemperature.sliderValue(reading, stored: property?.current.intValue))
         VStack(alignment: .leading, spacing: 4) {
-            Text("Цвет. темп.: \(ValueFormatter.label(.colorTemperature, property))")
+            Text("Цвет. темп.: \(WhiteBalanceTemperature.caption(reading))")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            if let range, range.max > range.min {
-                Slider(value: $kelvin, in: Double(range.min)...Double(range.max), step: Double(range.step)) { editing in
-                    if !editing { controller.request(.colorTemperature, Int64(kelvin)) }
-                }
-                .frame(width: 160)
-                .disabled(property?.isWritable != true)
-                .onAppear { kelvin = Double(property?.current.intValue ?? range.min) }
-                .onChange(of: property?.current.intValue) { _, value in
-                    if let value { kelvin = Double(value) }
-                }
+                .monospacedDigit()
+            Slider(value: $kelvin, in: Double(range.min)...Double(range.max), step: Double(range.step)) { editing in
+                if !editing { controller.setColorTemperature(Int64(kelvin)) }
             }
+            .frame(width: 160)
+            .disabled(!controller.isWritable(.whiteBalance) && !controller.isWritable(.colorTemperature))
+            .onAppear { kelvin = position }
+            .onChange(of: position) { _, value in kelvin = value }
         }
+        .help(WhiteBalanceTemperature.explanation(reading))
     }
 
     @ViewBuilder private var shiftPad: some View {

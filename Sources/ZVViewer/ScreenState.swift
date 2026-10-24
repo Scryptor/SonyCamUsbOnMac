@@ -20,7 +20,20 @@ final class ScreenState {
     @ObservationIgnored private let defaults = UserDefaults.standard
     @ObservationIgnored private var lastActivity = Date()
 
+    /// Подсказка из строки состояния: о подключении или о кадрах.
+    enum PillInfo: String {
+        case connection, frames
+    }
+
+    var pillInfo: PillInfo?
+
     var controlsHidden: Bool { manualHidden || autoHidden }
+
+    func togglePillInfo(_ info: PillInfo) {
+        let open = pillInfo != info
+        closeOverlays()
+        if open { pillInfo = info }
+    }
 
     func noteActivity() {
         lastActivity = Date()
@@ -33,13 +46,13 @@ final class ScreenState {
         lastActivity = Date()
     }
 
-    /// busy — открыто меню или просмотр снимка: тогда не прячем.
-    func tickAutoHide(enabled: Bool, busy: Bool) {
+    /// busy — открыто меню или просмотр снимка: тогда не прячем. delay — сколько секунд ждать без движения мыши.
+    func tickAutoHide(enabled: Bool, delay: TimeInterval, busy: Bool) {
         if busy || !enabled {
             autoHidden = false
             return
         }
-        if !autoHidden, Date().timeIntervalSince(lastActivity) > 3 { autoHidden = true }
+        if !autoHidden, Date().timeIntervalSince(lastActivity) > delay { autoHidden = true }
     }
 
     init() {
@@ -53,6 +66,7 @@ final class ScreenState {
     func openFn(_ id: SettingID?) {
         if let id { selected = id }
         allSettingsOpen = false
+        pillInfo = nil
         fnOpen = true
     }
 
@@ -62,6 +76,7 @@ final class ScreenState {
             editing = nil
         }
         fnOpen = false
+        pillInfo = nil
         allSettingsOpen = true
     }
 
@@ -69,6 +84,7 @@ final class ScreenState {
         fnOpen = false
         allSettingsOpen = false
         editing = nil
+        pillInfo = nil
     }
 
     func toggleHistogram() {

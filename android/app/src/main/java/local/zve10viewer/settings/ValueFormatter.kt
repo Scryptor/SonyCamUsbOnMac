@@ -13,6 +13,13 @@ object ValueFormatter {
         return label(id, value)
     }
 
+    /** Баланс белого в строке значений: в режиме «Цвет. темп.» — сама температура, как на экране камеры. */
+    fun whiteBalanceLabel(whiteBalance: Long?, colorTemperature: Long?): String {
+        whiteBalance ?: return "—"
+        if (whiteBalance == WhiteBalanceTemperature.MANUAL_MODE && colorTemperature != null) return label(SettingID.colorTemperature, colorTemperature)
+        return label(SettingID.whiteBalance, whiteBalance)
+    }
+
     fun label(id: SettingID, value: Long): String = when (id) {
         SettingID.shutter -> shutter(value)
         SettingID.aperture -> aperture(value)

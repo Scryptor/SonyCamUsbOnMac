@@ -1,7 +1,7 @@
 import SwiftUI
 import ZVCore
 
-/// Слева сверху: кнопка гистограммы, пресеты (клик — применить) и «+» для сохранения текущих настроек.
+/// Слева сверху: кнопка гистограммы, пресеты (клик — применить), «+» для сохранения текущих настроек и настройки.
 struct TopBar: View {
     let controller: CameraController
     let screen: ScreenState
@@ -48,6 +48,8 @@ struct TopBar: View {
                 .buttonStyle(.plain)
                 .disabled(controller.phase != .ready)
                 .help("Сохранить текущие настройки как пресет")
+
+                SettingsButton()
             }
             .padding(5)
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
@@ -97,5 +99,20 @@ struct HistogramView: View {
         .frame(width: 220, height: 80)
         .padding(8)
         .background(.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+/// Окно настроек — то же, что ⌘,.
+private struct SettingsButton: View {
+    @Environment(\.openSettings) private var openSettings
+
+    var body: some View {
+        Button { openSettings() } label: {
+            Image(systemName: "gearshape")
+                .frame(width: 26, height: 26)
+                .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
+        }
+        .buttonStyle(.plain)
+        .help("Настройки (⌘,)")
     }
 }
