@@ -5,6 +5,8 @@
 
     <application
         android:label="ZV-E10 Viewer"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
         android:supportsRtl="true"
         android:theme="@style/Theme.ZV">
         <activity

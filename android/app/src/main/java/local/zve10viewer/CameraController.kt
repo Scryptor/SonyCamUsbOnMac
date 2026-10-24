@@ -5,11 +5,12 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.hardware.usb.UsbConstants
-import android.os.BatteryManager
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
+import android.os.BatteryManager
 import android.os.Build
 import android.util.Log
 import androidx.compose.runtime.getValue
@@ -29,7 +30,13 @@ import local.zve10viewer.ptp.TransportException
 import local.zve10viewer.session.CameraSession
 import local.zve10viewer.session.SessionException
 import local.zve10viewer.settings.CaptureMode
+import local.zve10viewer.settings.FileNaming
+import local.zve10viewer.settings.LumaHistogram
+import local.zve10viewer.settings.PresetCatalog
 import local.zve10viewer.settings.SettingID
+import local.zve10viewer.settings.SettingOptions
+import local.zve10viewer.settings.WriteCoalescer
+import local.zve10viewer.settings.apply
 import local.zve10viewer.sony.DeviceInfo
 import local.zve10viewer.sony.Sony
 import local.zve10viewer.sony.SonyProp
@@ -37,9 +44,25 @@ import local.zve10viewer.sony.SonyProperty
 import local.zve10viewer.usb.UsbPtpTransport
 import kotlin.coroutines.cancellation.CancellationException
 
-/** Состояние приложения: поиск камеры, разрешение USB, сеанс и live view. */
+/** Состояние приложения: поиск камеры, разрешение USB, сеанс, live view, настройки, съёмка и пресеты. */
 class CameraController(private val context: Context, private val scope: CoroutineScope) {
     enum class Phase { searching, permission, connecting, settling, ready, notPcRemote }
+
+    /** Снимок или стоп-кадр этой сессии. */
+    class Shot(val files: List<SavedFile>, val thumbnail: ImageBitmap?, val preview: ByteArray?) {
+        val title: String get() = files.joinToString(" + ") { it.name }
+    }
+
+    /** Что показывается поверх видео после снимка или при открытии снимка из ленты. */
+    data class Review(
+        val image: ImageBitmap?, val title: String, val detail: String,
+        val files: List<SavedFile>, val source: String,
+        /** null — показывается, пока не закроют (снимок открыт из ленты). */
+        val endsAt: Long?,
+    )
+
+    val prefs = Prefs(context)
+    val saver = MediaSaver(context)
 
     var phase by mutableStateOf(Phase.searching)
         private set
@@ -57,34 +80,265 @@ class CameraController(private val context: Context, private val scope: Coroutin
     /** Кадры давно не приходят. */
     var isFrameStale by mutableStateOf(false)
         private set
+    /** Гистограмма яркости последнего кадра (64 столбца), пока она включена. */
+    var histogram by mutableStateOf<IntArray?>(null)
+        private set
+    var histogramOn by mutableStateOf(prefs.histogramOn)
+        private set
+    /** Настройки, для которых запрошено новое значение, но камера его ещё не подтвердила. */
+    var pending by mutableStateOf<Set<SettingID>>(emptySet())
+        private set
+    var presets by mutableStateOf(prefs.presets)
+        private set
+    var isApplyingPreset by mutableStateOf(false)
+        private set
+    var isCapturing by mutableStateOf(false)
+        private set
+    /** Короткое сообщение: пресет применён, снимок сохранён и т.п. */
+    var statusMessage by mutableStateOf<String?>(null)
+        private set
+    /** Когда началась запись (для таймера «● REC»). */
+    var recordingStartedAt by mutableStateOf<Long?>(null)
+        private set
+    var review by mutableStateOf<Review?>(null)
+        private set
+    /** Снимки и стоп-кадры этой сессии, новые сначала. */
+    var shots by mutableStateOf<List<Shot>>(emptyList())
+        private set
     /** Заряд самого планшета: в полноэкранном режиме системную строку не видно. */
     var tabletBattery by mutableStateOf<Int?>(null)
         private set
     var tabletCharging by mutableStateOf(false)
         private set
-    private val batteryManager = context.getSystemService(BatteryManager::class.java)
-    private var batteryCheckedAt = 0L
 
     @Volatile var lastJpeg: ByteArray? = null
         private set
 
     private val usbManager = context.getSystemService(UsbManager::class.java)
+    private val batteryManager = context.getSystemService(BatteryManager::class.java)
     private var device: UsbDevice? = null
     private var transport: UsbPtpTransport? = null
     private var session: CameraSession? = null
+    private var coalescer: WriteCoalescer? = null
+    private val targets = HashMap<Int, Long>()
     private val jobs = mutableListOf<Job>()
+    private var reviewJob: Job? = null
+    private var statusJob: Job? = null
     private val frameTimes = ArrayDeque<Long>()
     private var lastFrameAt = 0L
     private var failures = 0
     private var retryAt = 0L
+    private var batteryCheckedAt = 0L
 
     fun property(id: SettingID): SonyProperty? = properties[id.code]
+
+    fun isWritable(id: SettingID): Boolean =
+        phase == Phase.ready && !isApplyingPreset && !isCapturing && property(id)?.isWritable == true
 
     val mode: CaptureMode
         get() = property(SettingID.exposureProgram)?.current?.intValue?.let(CaptureMode::of) ?: CaptureMode.video
 
-    val isRecording: Boolean
-        get() = properties[SonyProp.MOVIE_RECORDING_STATE]?.current?.intValue == 1L
+    val isRecording: Boolean get() = recordingStartedAt != null
+
+    // MARK: - Изменение настроек
+
+    fun request(id: SettingID, value: Long) {
+        val coalescer = coalescer ?: return
+        if (!isWritable(id)) return
+        targets[id.code] = value
+        pending = pending + id
+        coalescer.submit(id.code, value)
+    }
+
+    /** Шаг по списку значений: считаем от последнего запроса, иначе быстрые шаги упирались бы в ожидание камеры. */
+    fun requestStep(id: SettingID, offset: Int) {
+        val property = property(id) ?: return
+        val target = SettingOptions.neighbour(property, offset, targets[id.code]) ?: return
+        request(id, target)
+    }
+
+    fun toggleRecording() {
+        val session = session ?: return
+        if (phase != Phase.ready) return
+        scope.launch { runCatching { session.toggleRecording() } }
+    }
+
+    /** Переключает камеру между фото и видео, сохраняя букву режима (M ↔ видео M и т.п.). */
+    fun switchMode(target: CaptureMode) {
+        val p = property(SettingID.exposureProgram) ?: return
+        val current = p.current.intValue ?: return
+        val value = CaptureMode.counterpart(current, target, p.settableValues) ?: return
+        request(SettingID.exposureProgram, value)
+    }
+
+    fun toggleHistogram() {
+        histogramOn = !histogramOn
+        prefs.histogramOn = histogramOn
+        if (!histogramOn) histogram = null
+    }
+
+    /** Пользователь поменял «куда сохранять» — переносим это в камеру (PC Remote → Still Img. Save Dest.). */
+    fun applyDestinationPreference() {
+        val session = session ?: return
+        if (phase != Phase.ready) return
+        val want = prefs.destination.cameraValue
+        if (properties[SonyProp.STILL_IMAGE_STORE_DESTINATION]?.current?.intValue == want) return
+        scope.launch { runCatching { session.set(SonyProp.STILL_IMAGE_STORE_DESTINATION, want) } }
+    }
+
+    // MARK: - Фото
+
+    fun capturePhoto() {
+        val session = session ?: return
+        if (phase != Phase.ready || mode != CaptureMode.photo || isCapturing || isApplyingPreset) return
+        isCapturing = true
+        val destination = prefs.destination
+        val cameraFrame = frame
+        val reviewOn = prefs.reviewEnabled
+        val source = if (destination.savesToDevice) prefs.reviewSource else Prefs.ReviewSource.camera
+        if (reviewOn) {
+            // кадр с камеры есть сразу; загруженный снимок появится после скачивания
+            showReview(Review(cameraFrame, "Снимок", if (source == Prefs.ReviewSource.camera) "" else "Загружаю…",
+                emptyList(), "Кадр с камеры", null), timed = source == Prefs.ReviewSource.camera)
+        }
+        scope.launch {
+            try {
+                if (properties[SonyProp.STILL_IMAGE_STORE_DESTINATION]?.current?.intValue != destination.cameraValue) {
+                    session.set(SonyProp.STILL_IMAGE_STORE_DESTINATION, destination.cameraValue)
+                }
+                val objects = session.capturePhoto(destination.savesToDevice)
+                if (!destination.savesToDevice) {
+                    showStatus("Снимок сохранён на карту камеры")
+                    return@launch
+                }
+                if (objects.isEmpty()) throw IllegalStateException("камера не отдала файл")
+                val files = withContext(Dispatchers.IO) { objects.map { saver.save(it.filename, it.data) } }
+                val jpeg = objects.firstOrNull { it.filename.endsWith(".JPG", ignoreCase = true) }?.data
+                val large = withContext(Dispatchers.Default) { jpeg?.let { MediaSaver.decode(it, 2048)?.asImageBitmap() } }
+                val small = withContext(Dispatchers.Default) { jpeg?.let { MediaSaver.decode(it, 160)?.asImageBitmap() } }
+                val shot = Shot(files, small ?: cameraFrame, jpeg)
+                shots = listOf(shot) + shots
+                val megabytes = objects.sumOf { it.data.size } / 1_048_576.0
+                showStatus("Сохранено: ${shot.title}")
+                if (reviewOn && review != null) {
+                    val downloaded = source == Prefs.ReviewSource.downloaded && large != null
+                    showReview(Review(if (downloaded) large else cameraFrame, shot.title,
+                        "%.1f МБ · «%s»".format(megabytes, saver.folderTitle), files,
+                        if (downloaded) "Загруженный снимок" else "Кадр с камеры", null), timed = true)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "снимок не удался", e)
+                dismissReview()
+                showStatus("Снимок не удался: ${e.message}")
+            } finally {
+                isCapturing = false
+            }
+        }
+    }
+
+    /** Стоп-кадр из видео: сохраняет текущий кадр live view, запись не прерывается. */
+    fun grabFrame() {
+        val jpeg = lastJpeg ?: return
+        val thumbnail = frame
+        scope.launch {
+            try {
+                val file = withContext(Dispatchers.IO) { saver.save(FileNaming.frameGrab(), jpeg) }
+                shots = listOf(Shot(listOf(file), thumbnail, jpeg)) + shots
+                showStatus("Кадр сохранён: ${file.name}")
+            } catch (e: Exception) {
+                showStatus("Не удалось сохранить кадр: ${e.message}")
+            }
+        }
+    }
+
+    /** Открывает снимок из ленты поверх видео (пока не закроют). */
+    fun openShot(index: Int) {
+        val shot = shots.getOrNull(index) ?: return
+        scope.launch {
+            val image = withContext(Dispatchers.Default) { shot.preview?.let { MediaSaver.decode(it, 2048)?.asImageBitmap() } }
+            showReview(Review(image ?: shot.thumbnail, shot.title, "«${saver.folderTitle}»", shot.files, "Снимок из ленты", null),
+                timed = false)
+        }
+    }
+
+    /** Открывает файл в программе для просмотра на планшете. */
+    fun openExternally(file: SavedFile) {
+        val intent = Intent(Intent.ACTION_VIEW).setDataAndType(file.uri, file.mime)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        runCatching { context.startActivity(intent) }.onFailure { showStatus("Нет программы, чтобы открыть ${file.name}") }
+    }
+
+    fun dismissReview() {
+        reviewJob?.cancel()
+        review = null
+    }
+
+    private fun showReview(value: Review, timed: Boolean) {
+        reviewJob?.cancel()
+        if (!timed) {
+            review = value
+            return
+        }
+        val seconds = prefs.reviewSeconds
+        review = value.copy(endsAt = System.currentTimeMillis() + seconds * 1000L)
+        reviewJob = scope.launch {
+            delay(seconds * 1000L)
+            review = null
+        }
+    }
+
+    // MARK: - Пресеты
+
+    fun savePreset(name: String? = null) {
+        if (phase != Phase.ready) return
+        val title = name?.trim()?.takeIf { it.isNotEmpty() } ?: "Пресет ${presets.size + 1}"
+        presets = presets + PresetCatalog.capture(title, properties)
+        prefs.presets = presets
+        showStatus("Сохранено: «$title»")
+    }
+
+    fun applyPreset(index: Int) {
+        val preset = presets.getOrNull(index) ?: return
+        val session = session ?: return
+        if (phase != Phase.ready || isApplyingPreset) return
+        isApplyingPreset = true
+        statusJob?.cancel()
+        statusMessage = "Применяю «${preset.name}»…"
+        scope.launch {
+            val result = session.apply(preset)
+            isApplyingPreset = false
+            val total = result.applied.size + result.skipped.size
+            var text = "«${preset.name}»: применено ${result.applied.size} из $total"
+            if (result.skipped.isNotEmpty()) text += ". Не удалось: " + result.skipped.joinToString(", ") { it.title }
+            showStatus(text)
+        }
+    }
+
+    fun renamePreset(index: Int, name: String) {
+        val trimmed = name.trim()
+        if (index !in presets.indices || trimmed.isEmpty()) return
+        presets = presets.toMutableList().also { it[index] = it[index].copy(name = trimmed) }
+        prefs.presets = presets
+    }
+
+    fun deletePreset(index: Int) {
+        if (index !in presets.indices) return
+        presets = presets.toMutableList().also { it.removeAt(index) }
+        prefs.presets = presets
+    }
+
+    private fun showStatus(text: String) {
+        statusMessage = text
+        statusJob?.cancel()
+        statusJob = scope.launch {
+            delay(5000)
+            statusMessage = null
+        }
+    }
+
+    // MARK: - Подключение
 
     fun start() {
         ContextCompat.registerReceiver(context, receiver, IntentFilter().apply {
@@ -122,7 +376,6 @@ class CameraController(private val context: Context, private val scope: Coroutin
 
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(c: Context, intent: Intent) {
-            val target = deviceFrom(intent)
             when (intent.action) {
                 ACTION_USB_PERMISSION -> {
                     val camera = device ?: return
@@ -136,7 +389,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
                     }
                 }
                 UsbManager.ACTION_USB_DEVICE_DETACHED -> {
-                    if (target?.deviceName == device?.deviceName) {
+                    if (deviceFrom(intent)?.deviceName == device?.deviceName) {
                         teardown()
                         message = null
                         failures = 0
@@ -165,10 +418,21 @@ class CameraController(private val context: Context, private val scope: Coroutin
             retryLater("Не удалось открыть камеру")
             return
         }
-        val transport = UsbPtpTransport(connection, usbInterface)
+        val transport = try {
+            UsbPtpTransport(connection, usbInterface)
+        } catch (e: Exception) {
+            connection.close()
+            retryLater("Не удалось открыть камеру: ${e.message}")
+            return
+        }
         val session = CameraSession(transport)
         this.transport = transport
         this.session = session
+        coalescer = WriteCoalescer(scope) { code, value ->
+            runCatching { session.set(code, value) }
+            // ждём только последнее запрошенное значение; промежуточные пропускаем
+            if (targets[code] == value) clearTarget(code)
+        }
         jobs += scope.launch {
             try {
                 session.start(this)
@@ -201,7 +465,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
 
     private fun startStreams(session: CameraSession) {
         jobs += scope.launch {
-            session.properties.collect { properties = it }
+            session.properties.collect { apply(it) }
         }
         jobs += scope.launch {
             session.ended.await()
@@ -216,9 +480,10 @@ class CameraController(private val context: Context, private val scope: Coroutin
                     val jpeg = session.nextLiveViewFrame()
                     val t1 = System.nanoTime()
                     errors = 0
-                    val bitmap = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size)?.asImageBitmap() ?: continue
+                    val bitmap = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size) ?: continue
+                    val bins = if (histogramOn) histogramOf(bitmap) else null
                     val t2 = System.nanoTime()
-                    withContext(Dispatchers.Main) { show(bitmap, jpeg) }
+                    withContext(Dispatchers.Main) { show(bitmap.asImageBitmap(), jpeg, bins) }
                     val t3 = System.nanoTime()
                     if (lastArrival != 0L && t1 - lastArrival > 100_000_000L) {
                         Log.i("ZVFrames", "пауза %.0f мс: запрос %.0f мс (ожиданий %d), декодирование %.0f мс, показ %.0f мс".format(
@@ -240,6 +505,21 @@ class CameraController(private val context: Context, private val scope: Coroutin
         }
     }
 
+    private fun apply(snapshot: Map<Int, SonyProperty>) {
+        properties = snapshot
+        val recording = snapshot[SonyProp.MOVIE_RECORDING_STATE]?.current?.intValue == 1L
+        if (recording && recordingStartedAt == null) recordingStartedAt = System.currentTimeMillis()
+        if (!recording) recordingStartedAt = null
+        for ((code, target) in targets.toMap()) {
+            if (snapshot[code]?.current?.intValue == target) clearTarget(code)
+        }
+    }
+
+    private fun clearTarget(code: Int) {
+        targets.remove(code)
+        SettingID.entries.firstOrNull { it.code == code }?.let { pending = pending - it }
+    }
+
     /** Замер ровности видео: интервалы между кадрами и повторы одного и того же кадра. Пишется в журнал раз в 3 с. */
     private val frameLog = ArrayList<Pair<Long, Int>>()
     private var frameLogStart = 0L
@@ -258,10 +538,11 @@ class CameraController(private val context: Context, private val scope: Coroutin
         frameLog.clear()
     }
 
-    private fun show(bitmap: ImageBitmap, jpeg: ByteArray) {
+    private fun show(bitmap: ImageBitmap, jpeg: ByteArray, bins: IntArray?) {
         measure(jpeg)
         frame = bitmap
         lastJpeg = jpeg
+        if (bins != null) histogram = bins
         val now = System.currentTimeMillis()
         lastFrameAt = now
         frameTimes.addLast(now)
@@ -293,19 +574,35 @@ class CameraController(private val context: Context, private val scope: Coroutin
         transport?.close()
         session = null
         transport = null
+        coalescer = null
+        targets.clear()
+        pending = emptySet()
         device = null
         deviceInfo = null
         properties = emptyMap()
         frame = null
         lastJpeg = null
+        histogram = null
         frameTimes.clear()
         fps = 0.0
         isFrameStale = false
+        recordingStartedAt = null
+        isApplyingPreset = false
+        isCapturing = false
+        dismissReview()
         phase = Phase.searching
     }
 
     companion object {
         private const val TAG = "ZVController"
         private const val ACTION_USB_PERMISSION = "local.zve10viewer.USB_PERMISSION"
+
+        /** Гистограмма по уменьшенной копии кадра (128×72 достаточно для графика). */
+        private fun histogramOf(bitmap: Bitmap): IntArray {
+            val small = Bitmap.createScaledBitmap(bitmap, 128, 72, false)
+            val pixels = IntArray(128 * 72)
+            small.getPixels(pixels, 0, 128, 0, 0, 128, 72)
+            return LumaHistogram.bins(pixels)
+        }
     }
 }

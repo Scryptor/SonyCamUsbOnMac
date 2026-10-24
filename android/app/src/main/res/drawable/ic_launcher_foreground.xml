@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- камера ZV-E10: та же геометрия, что у иконки программы для Mac (Resources/AppIcon.icon) -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <group android:translateX="11.50" android:translateY="11.34" android:scaleX="0.083" android:scaleY="0.083">
+        <path android:fillColor="#FFFFFFFF" android:pathData="M556,268 h178 a36,36 0 0 1 36,36 v28 a36,36 0 0 1 -36,36 h-178 a36,36 0 0 1 -36,-36 v-28 a36,36 0 0 1 36,-36 z" />
+        <path android:fillColor="#FFFFFFFF" android:pathData="M248,330 h528 a96,96 0 0 1 96,96 v238 a96,96 0 0 1 -96,96 h-528 a96,96 0 0 1 -96,-96 v-238 a96,96 0 0 1 96,-96 z" />
+        <path android:fillColor="#FFDADDE4" android:pathData="M236,354 h10 a60,60 0 0 1 60,60 v262 a60,60 0 0 1 -60,60 h-10 a60,60 0 0 1 -60,-60 v-262 a60,60 0 0 1 60,-60 z" />
+        <path android:fillColor="#FF1E2127" android:pathData="M389,548 a196,196 0 1,0 392,0 a196,196 0 1,0 -392,0 z" />
+        <path android:fillColor="#FF30343D" android:pathData="M435,548 a150,150 0 1,0 300,0 a150,150 0 1,0 -300,0 z" />
+        <path android:fillColor="#FF0A0C10" android:pathData="M473,548 a112,112 0 1,0 224,0 a112,112 0 1,0 -224,0 z" />
+        <path android:fillColor="#99FFFFFF" android:pathData="M526,508 a26,26 0 1,0 52,0 a26,26 0 1,0 -52,0 z" />
+        <path android:fillColor="#FFFF3B30" android:pathData="M788,392 a24,24 0 1,0 48,0 a24,24 0 1,0 -48,0 z" />
+    </group>
+</vector>
