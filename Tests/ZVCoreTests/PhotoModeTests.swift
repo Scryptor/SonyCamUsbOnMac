@@ -90,6 +90,7 @@ private func photoCamera() -> FakeCamera {
 @Test func decodesPhotoModeActions() throws {
     func decode(_ json: String) throws -> AutomationAction { try JSONDecoder().decode(AutomationAction.self, from: Data(json.utf8)) }
     #expect(try decode(#"{"action":"switchMode","mode":"photo"}"#) == .switchMode(.photo))
+    #expect(try decode(#"{"action":"switchMode","mode":"slowQuick"}"#) == .switchMode(.slowQuick))
     #expect(try decode(#"{"action":"capture","confirm":true}"#) == .capture(confirm: true))
     #expect(try decode(#"{"action":"grabFrame"}"#) == .grabFrame)
     #expect(try decode(#"{"action":"toggleControls"}"#) == .toggleControls)

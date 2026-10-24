@@ -17,7 +17,7 @@ public enum AutomationAction: Equatable, Sendable, Decodable {
     case deletePreset(Int)
     /// Запись ролика на карту — только с явным подтверждением.
     case toggleRecording(confirm: Bool)
-    case switchMode(CaptureMode)
+    case switchMode(ShootingMode)
     /// Снимок пишет файл (на карту и/или на Mac) — только с явным подтверждением.
     case capture(confirm: Bool)
     case grabFrame
@@ -54,7 +54,7 @@ public enum AutomationAction: Equatable, Sendable, Decodable {
         case "renamePreset": self = .renamePreset(try c.decode(Int.self, forKey: .index), try c.decode(String.self, forKey: .name))
         case "deletePreset": self = .deletePreset(try c.decode(Int.self, forKey: .index))
         case "toggleRecording": self = .toggleRecording(confirm: try c.decodeIfPresent(Bool.self, forKey: .confirm) ?? false)
-        case "switchMode": self = .switchMode(try c.decode(CaptureMode.self, forKey: .mode))
+        case "switchMode": self = .switchMode(try c.decode(ShootingMode.self, forKey: .mode))
         case "capture": self = .capture(confirm: try c.decodeIfPresent(Bool.self, forKey: .confirm) ?? false)
         case "grabFrame": self = .grabFrame
         case "toggleControls": self = .toggleControls

@@ -66,6 +66,7 @@ import local.zve10viewer.settings.FnSlot
 import local.zve10viewer.settings.SettingCatalog
 import local.zve10viewer.settings.SettingGroup
 import local.zve10viewer.settings.SettingID
+import local.zve10viewer.settings.ShootingMode
 import local.zve10viewer.settings.SettingOptions
 import local.zve10viewer.settings.ValueFormatter
 import local.zve10viewer.settings.WhiteBalanceTemperature
@@ -316,9 +317,9 @@ fun RightColumn(controller: CameraController, modifier: Modifier) {
 private fun ModeSwitch(controller: CameraController) {
     val enabled = controller.isWritable(SettingID.exposureProgram) && !controller.isRecording
     Column(Modifier.background(Panel, RoundedCornerShape(12.dp)).padding(4.dp).alpha(if (enabled) 1f else 0.5f)) {
-        listOf(CaptureMode.photo to "Фото", CaptureMode.video to "Видео").forEach { (mode, title) ->
-            val active = controller.mode == mode
-            Text(title, color = if (active) Color.Black else Color.White, fontSize = 17.sp,
+        ShootingMode.entries.forEach { mode ->
+            val active = controller.shootingMode == mode
+            Text(mode.title, color = if (active) Color.Black else Color.White, fontSize = 17.sp,
                 fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
                 textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                 modifier = Modifier.width(88.dp).background(if (active) Color.White else Color.Transparent, RoundedCornerShape(9.dp))

@@ -34,7 +34,7 @@ func waitForCamera(_ discovery: CameraDiscovery, seconds: Int) async -> ICCamera
 @MainActor
 func run() async -> Int32 {
     var args = Array(CommandLine.arguments.dropFirst())
-    let usage = "usage: zv-probe [--wifi <адрес>] info | props | lv <кадров> <путь.jpg> | set <код hex> <значение> | rec\n"
+    let usage = "usage: zv-probe [--wifi <адрес>] info | props | dump | watch <секунд> | lv <кадров> <путь.jpg> | set <код hex> <значение> | rec\n"
         + "       zv-probe wifi-find | wifi-pair <адрес>"
     // по Wi-Fi: поиск камеры и сопряжение (на камере в это время включено PC Remote Function → Pairing)
     if args.first == "wifi-find" {
@@ -58,7 +58,7 @@ func run() async -> Int32 {
         wifiHost = args[1]
         args.removeFirst(2)
     }
-    guard let command = args.first, ["info", "props", "lv", "set", "rec"].contains(command) else {
+    guard let command = args.first, ["info", "props", "dump", "watch", "lv", "set", "rec"].contains(command) else {
         return fail(usage)
     }
     let transport: PTPTransport
@@ -103,6 +103,37 @@ func run() async -> Int32 {
             let props = await session.properties
             for id in SettingID.allCases {
                 print(String(format: "0x%04X ", id.code) + "\(id.title): \(ValueFormatter.label(id, props[id.code]))")
+            }
+        case "dump":
+            // все свойства из 0x9209 как есть: код, тип, «можно менять», значение, допустимые значения или диапазон
+            let props = await session.properties
+            for (code, p) in props.sorted(by: { $0.key < $1.key }) {
+                let known = SettingID.allCases.first { $0.code == code }?.title ?? "—"
+                var line = String(format: "0x%04X type=0x%04X getSet=%d enabled=%d ", code, p.dataType, p.getSet, p.enabled)
+                line += "value=\(p.current.intValue.map(String.init) ?? "\(p.current)")"
+                if let r = p.range { line += " range=\(r.min)…\(r.max)/\(r.step)" }
+                if !p.settableValues.isEmpty { line += " settable=" + p.settableValues.map { String(format: "0x%X", $0) }.joined(separator: ",") }
+                print(line + "  [\(known)]")
+            }
+        case "watch":
+            // раз в секунду перечитывает все свойства и печатает, что изменилось, — для опытов «меняю на камере, смотрю код»
+            let seconds = args.count >= 2 ? Int(args[1]) ?? 300 : 300
+            func describe(_ p: SonyProperty) -> String {
+                "value=\(p.current.intValue.map { String(format: "%lld (0x%llX)", $0, $0) } ?? "\(p.current)") enabled=\(p.enabled)"
+                    + (p.settableValues.isEmpty ? "" : " settable=" + p.settableValues.map { String(format: "0x%X", $0) }.joined(separator: ","))
+            }
+            var last = await session.properties
+            print("слежу \(seconds) с, свойств: \(last.count)")
+            for _ in 0..<seconds {
+                try await Task.sleep(for: .seconds(1))
+                try? await session.refresh()
+                let now = await session.properties
+                for (code, p) in now.sorted(by: { $0.key < $1.key }) where last[code] != p {
+                    let stamp = String(format: "%.0f", Date().timeIntervalSince1970.truncatingRemainder(dividingBy: 100000))
+                    print(String(format: "[%@] 0x%04X: ", stamp, code) + (last[code].map(describe) ?? "—") + "  →  " + describe(p))
+                }
+                last = now
+                fflush(stdout)
             }
         case "lv":
             guard args.count >= 3, let count = Int(args[1]), count > 0 else { return fail("usage: zv-probe lv <кадров> <путь.jpg>") }

@@ -280,10 +280,24 @@ final class CameraController {
     }
 
     /// Переключает камеру между фото и видео, сохраняя букву режима (M ↔ видео M и т.п.).
-    func switchMode(_ target: CaptureMode) {
+    /// Фото, видео или S&Q — по режиму съёмки камеры.
+    var shootingMode: ShootingMode {
+        property(.exposureProgram)?.current.intValue.map(ShootingMode.init(exposureProgram:)) ?? .video
+    }
+
+    func switchMode(_ target: ShootingMode) {
         guard let p = property(.exposureProgram), let current = p.current.intValue,
-              let value = CaptureMode.counterpart(of: current, to: target, settable: p.settableValues) else { return }
+              let value = ShootingMode.counterpart(of: current, to: target, settable: p.settableValues) else { return }
         request(.exposureProgram, value)
+    }
+
+    /// В режиме S&Q: частота съёмки (если её видно по выдержке) и частота ролика.
+    var slowMotion: (capture: Int?, record: Int?)? {
+        guard shootingMode == .slowQuick else { return nil }
+        let setting = property(.movieRecordingSetting)?.current.intValue
+        let pal = setting.map(RecordingModes.isPALSetting) ?? true
+        let capture = property(.shutter).flatMap { SlowQuick.captureFrameRate(shutterValues: $0.settableValues, pal: pal) }
+        return (capture, setting.flatMap(RecordingModes.frameRate))
     }
 
     /// Пользователь поменял «куда сохранять» — переносим это в камеру (PC Remote → Still Img. Save Dest.).

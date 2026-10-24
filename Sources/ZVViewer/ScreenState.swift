@@ -22,7 +22,7 @@ final class ScreenState {
 
     /// Подсказка из строки состояния: о подключении или о кадрах.
     enum PillInfo: String {
-        case connection, frames
+        case connection, frames, slowMotion
     }
 
     var pillInfo: PillInfo?

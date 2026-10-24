@@ -71,6 +71,7 @@ import local.zve10viewer.settings.CaptureMode
 import local.zve10viewer.settings.SettingCatalog
 import local.zve10viewer.settings.SettingGroup
 import local.zve10viewer.settings.SettingID
+import local.zve10viewer.settings.SlowQuick
 import local.zve10viewer.settings.ValueFormatter
 import local.zve10viewer.sony.SonyProp
 import kotlin.math.sqrt
@@ -355,6 +356,9 @@ private fun StatusPill(controller: CameraController, screen: ScreenState) {
             Modifier.clickable { screen.togglePillInfo(PillInfo.connection) })
         PillText("${controller.shownFps} к/с", Modifier.clickable { screen.togglePillInfo(PillInfo.frames) })
         PillText(ValueFormatter.label(SettingID.exposureProgram, controller.property(SettingID.exposureProgram)))
+        controller.slowMotion?.let { slow ->
+            PillText(slowMotionSummary(slow), Modifier.clickable { screen.togglePillInfo(PillInfo.slowMotion) })
+        }
         if (controller.mode == CaptureMode.video) {
             PillText("Карта: ${ValueFormatter.label(SettingID.cardRemaining, controller.property(SettingID.cardRemaining))}")
         } else {
@@ -374,7 +378,7 @@ private fun StatusPill(controller: CameraController, screen: ScreenState) {
 private fun PillText(text: String, modifier: Modifier = Modifier) =
     Text(text, color = Color.White, fontSize = 16.sp, style = TextStyle(fontFeatureSettings = "tnum"), modifier = modifier)
 
-enum class PillInfo { connection, frames }
+enum class PillInfo { connection, frames, slowMotion }
 
 private fun transportLabel(controller: CameraController) = when {
     controller.transportKind != CameraController.TransportKind.wifi -> "USB"
@@ -415,6 +419,17 @@ private fun PillInfoCard(controller: CameraController, info: PillInfo) {
                     InfoNote("Без кабеля планшет сам найдёт камеру по Wi-Fi, если она сопряжена (⚙ → Wi-Fi).")
                 }
             }
+            PillInfo.slowMotion -> {
+                val slow = controller.slowMotion
+                InfoTitle("Замедленная и ускоренная съёмка (S&Q)")
+                InfoRow("Камера снимает", slow?.capture?.let { "$it кадров в секунду" } ?: "не видно")
+                InfoRow("Ролик", controller.label(SettingID.movieRecordingSetting))
+                if (slow?.capture != null && slow.record != null) InfoRow("Скорость", SlowQuick.speedLabel(slow.capture, slow.record))
+                InfoNote("Частоту съёмки камера по кабелю менять не даёт: её выбирают на камере — MENU → S&Q Settings → Frame Rate. " +
+                    "Частоту и битрейт ролика меняет «Запись» в строке внизу.")
+                InfoNote("Частоту съёмки программа узнаёт по самой длинной выдержке, которую разрешает камера: выдержка не может быть " +
+                    "длиннее кадра. В режимах S&Q P и A выдержку выбирает камера, и частоту не видно.")
+            }
             PillInfo.frames -> {
                 InfoTitle("Кадры трансляции")
                 InfoNote("Столько кадров в секунду (сейчас ${controller.shownFps}) доходит до планшета ${if (wifi) "по Wi-Fi" else "по USB"}. " +
@@ -443,6 +458,14 @@ private fun InfoRow(label: String, value: String) {
 
 @Composable
 private fun InfoNote(text: String, color: Color = Secondary) = Text(text, color = color, fontSize = 14.sp, lineHeight = 19.sp)
+
+/** Коротко для строки состояния: «100 к/с · ×4 замедл.». */
+private fun slowMotionSummary(slow: CameraController.SlowMotion): String {
+    val capture = slow.capture ?: return "S&Q"
+    val record = slow.record ?: return "$capture к/с"
+    if (capture == record) return "$capture к/с · 1:1"
+    return "$capture к/с · " + SlowQuick.speedLabel(capture, record).replace("медленнее", "замедл.").replace("быстрее", "ускор.")
+}
 
 private fun signalWord(dbm: Int) = when {
     dbm >= -60 -> "хороший"

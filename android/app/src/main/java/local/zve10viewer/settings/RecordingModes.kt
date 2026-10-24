@@ -52,6 +52,12 @@ object RecordingModes {
         return modes.sortedWith(order)
     }
 
+    /** Частота кадров ролика по коду `0xD242`. */
+    fun frameRate(setting: Long): Int? = specs[setting]?.first
+
+    /** Система по коду `0xD242`: 25/50/100p — PAL. */
+    fun isPalSetting(setting: Long): Boolean = isPal(setting)
+
     fun label(format: Long?, setting: Long?): String =
         if (format == null || setting == null) "—" else RecordingMode(format, setting).label
 

@@ -58,6 +58,12 @@ public enum RecordingModes {
         return modes.sorted(by: order)
     }
 
+    /// Частота кадров ролика по коду `0xD242`.
+    public static func frameRate(of setting: Int64) -> Int? { specs[setting]?.fps }
+
+    /// Система по коду `0xD242`: 25/50/100p — PAL.
+    public static func isPALSetting(_ setting: Int64) -> Bool { isPAL(setting) }
+
     public static func label(format: Int64?, setting: Int64?) -> String {
         guard let format, let setting else { return "—" }
         return RecordingMode(format: format, setting: setting).label

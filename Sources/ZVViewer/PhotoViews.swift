@@ -25,13 +25,14 @@ private struct ModeSwitch: View {
     var body: some View {
         let enabled = controller.isWritable(.exposureProgram) && !controller.isRecording
         VStack(spacing: 2) {
-            ForEach([CaptureMode.photo, .video], id: \.self) { mode in
+            ForEach(ShootingMode.allCases, id: \.self) { mode in
+                let selected = controller.shootingMode == mode
                 Button { controller.switchMode(mode) } label: {
-                    Text(mode == .photo ? "Фото" : "Видео")
-                        .font(.callout.weight(controller.mode == mode ? .bold : .regular))
+                    Text(mode.title)
+                        .font(.callout.weight(selected ? .bold : .regular))
                         .frame(width: 64, height: 26)
-                        .foregroundStyle(controller.mode == mode ? Color.black : Color.white)
-                        .background(controller.mode == mode ? Color.white : Color.clear, in: RoundedRectangle(cornerRadius: 7))
+                        .foregroundStyle(selected ? Color.black : Color.white)
+                        .background(selected ? Color.white : Color.clear, in: RoundedRectangle(cornerRadius: 7))
                 }
                 .buttonStyle(.plain)
             }
@@ -40,7 +41,7 @@ private struct ModeSwitch: View {
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
         .disabled(!enabled)
         .opacity(enabled ? 1 : 0.5)
-        .help(controller.isRecording ? "Во время записи режим не переключается" : "Фото или видео")
+        .help(controller.isRecording ? "Во время записи режим не переключается" : "Фото, видео или замедленная и ускоренная съёмка (S&Q)")
     }
 }
 
@@ -203,6 +204,16 @@ private struct Countdown: View {
                 Text("\(Int(left.rounded(.up)))").font(.title2.weight(.bold)).monospacedDigit()
             }
             .frame(width: 64, height: 64)
+        }
+    }
+}
+
+extension ShootingMode {
+    var title: String {
+        switch self {
+        case .photo: return "Фото"
+        case .video: return "Видео"
+        case .slowQuick: return "S&Q"
         }
     }
 }

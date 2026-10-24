@@ -59,6 +59,8 @@ check("камера готова", ok)
 baseline_prefs = dict(s["prefs"])
 baseline_mode_value = setting(s, "exposureProgram")["value"]
 baseline_mode = s["mode"]
+# фото, видео или S&Q — возвращать надо именно его, а не «видео» вообще
+baseline_shooting = s.get("shootingMode", baseline_mode)
 baseline_values = {x["id"]: x.get("value") for x in s["settings"] if x["writable"]}
 baseline_dest = s["cameraDestination"]
 shots_before = len(s["shots"])
@@ -174,9 +176,9 @@ finally:
         pref(k, baseline_prefs[k])
     # камера применяет место сохранения примерно за 0,6 с — дождаться
     wait(lambda s: s["cameraDestination"] == baseline_dest, timeout=6)
-    if state()["mode"] != baseline_mode:
-        act(action="switchMode", mode=baseline_mode)
-        wait(lambda s: s["mode"] == baseline_mode)
+    if state().get("shootingMode", state()["mode"]) != baseline_shooting:
+        act(action="switchMode", mode=baseline_shooting)
+        wait(lambda s: s.get("shootingMode", s["mode"]) == baseline_shooting)
     s = state()
     for k, v in baseline_values.items():
         x = setting(s, k)

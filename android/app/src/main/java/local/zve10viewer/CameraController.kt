@@ -42,6 +42,8 @@ import local.zve10viewer.settings.PresetCatalog
 import local.zve10viewer.settings.RecordingMode
 import local.zve10viewer.settings.RecordingModes
 import local.zve10viewer.settings.SettingOption
+import local.zve10viewer.settings.ShootingMode
+import local.zve10viewer.settings.SlowQuick
 import local.zve10viewer.settings.SettingID
 import local.zve10viewer.settings.SettingOptions
 import local.zve10viewer.settings.ValueFormatter
@@ -311,12 +313,28 @@ class CameraController(private val context: Context, private val scope: Coroutin
     }
 
     /** Переключает камеру между фото и видео, сохраняя букву режима (M ↔ видео M и т.п.). */
-    fun switchMode(target: CaptureMode) {
+    /** Фото, видео или S&Q — по режиму съёмки камеры. */
+    val shootingMode: ShootingMode
+        get() = property(SettingID.exposureProgram)?.current?.intValue?.let(ShootingMode::of) ?: ShootingMode.video
+
+    fun switchMode(target: ShootingMode) {
         val p = property(SettingID.exposureProgram) ?: return
         val current = p.current.intValue ?: return
-        val value = CaptureMode.counterpart(current, target, p.settableValues) ?: return
+        val value = ShootingMode.counterpart(current, target, p.settableValues) ?: return
         request(SettingID.exposureProgram, value)
     }
+
+    /** В режиме S&Q: частота съёмки (если её видно по выдержке) и частота ролика; не S&Q — null. */
+    data class SlowMotion(val capture: Int?, val record: Int?)
+
+    val slowMotion: SlowMotion?
+        get() {
+            if (shootingMode != ShootingMode.slowQuick) return null
+            val setting = property(SettingID.movieRecordingSetting)?.current?.intValue
+            val pal = setting?.let(RecordingModes::isPalSetting) ?: true
+            val capture = property(SettingID.shutter)?.let { SlowQuick.captureFrameRate(it.settableValues, pal) }
+            return SlowMotion(capture, setting?.let(RecordingModes::frameRate))
+        }
 
     fun toggleHistogram() {
         histogramOn = !histogramOn

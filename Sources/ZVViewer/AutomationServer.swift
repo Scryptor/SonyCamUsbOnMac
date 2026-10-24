@@ -257,6 +257,8 @@ final class AutomationServer {
             "recording": controller.isRecording,
             "fps": (controller.fps * 10).rounded() / 10,
             "frameGapMs": controller.frameGapMs,
+            "shootingMode": controller.shootingMode.rawValue,
+            "slowMotion": controller.slowMotion.map { ["captureFps": $0.capture ?? NSNull(), "recordFps": $0.record ?? NSNull()] as [String: Any] } ?? NSNull(),
             "histogramBins": controller.histogram.count,
             "applyingPreset": controller.isApplyingPreset,
             "status": controller.statusMessage ?? NSNull(),

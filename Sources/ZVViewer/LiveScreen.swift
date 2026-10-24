@@ -214,6 +214,13 @@ private struct StatusPill: View {
                 FramesInfo(controller: controller)
             }
             Text(ValueFormatter.label(.exposureProgram, controller.property(.exposureProgram)))
+            if let slow = controller.slowMotion {
+                PillButton(info: .slowMotion, screen: screen) {
+                    Text(SlowMotionInfo.summary(slow)).monospacedDigit()
+                } popover: {
+                    SlowMotionInfo(controller: controller)
+                }
+            }
             if controller.mode == .video {
                 Text("Карта: \(ValueFormatter.label(.cardRemaining, controller.property(.cardRemaining)))")
             } else if Prefs.destination != .macOnly, let card = controller.properties[SonyProp.cardRemainingShots],
@@ -321,6 +328,41 @@ private struct FramesInfo: View {
             }
             Text("Обычно между кадрами около 40 мс; паузы дольше 200 мс заметны как рывок.")
                 .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+/// Подсказка о замедленной съёмке: что снимает камера, во что пишет ролик и где менять частоту.
+private struct SlowMotionInfo: View {
+    let controller: CameraController
+
+    static func summary(_ slow: (capture: Int?, record: Int?)) -> String {
+        guard let capture = slow.capture else { return "S&Q" }
+        guard let record = slow.record else { return "\(capture) к/с" }
+        let speed = SlowQuick.speedLabel(capture: capture, record: record)
+            .replacingOccurrences(of: "медленнее", with: "замедл.").replacingOccurrences(of: "быстрее", with: "ускор.")
+        return "\(capture) к/с · " + (capture == record ? "1:1" : speed)
+    }
+
+    var body: some View {
+        let slow = controller.slowMotion
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Замедленная и ускоренная съёмка (S&Q)").font(.headline)
+            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
+                InfoRow(label: "Камера снимает", value: slow?.capture.map { "\($0) кадров в секунду" } ?? "не видно")
+                InfoRow(label: "Ролик", value: controller.label(.movieRecordingSetting))
+                if let capture = slow?.capture, let record = slow?.record {
+                    InfoRow(label: "Скорость", value: SlowQuick.speedLabel(capture: capture, record: record))
+                }
+            }
+            Text("Частоту съёмки камера по кабелю менять не даёт: её выбирают на камере — MENU → S&Q Settings → Frame Rate. Частоту и битрейт ролика меняет «Запись» в строке внизу.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("Частоту съёмки программа узнаёт по самой длинной выдержке, которую разрешает камера: выдержка не может быть длиннее кадра. В режимах S&Q P и A выдержку выбирает камера, и частоту не видно.")
+                .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
