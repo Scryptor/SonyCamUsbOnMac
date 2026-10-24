@@ -84,3 +84,11 @@ private func photoCamera() -> FakeCamera {
     #expect(try decode(#"{"action":"setPreference","key":"reviewSeconds","value":"5"}"#) == .setPreference("reviewSeconds", "5"))
     #expect(try decode(#"{"action":"openShot","index":0}"#) == .openShot(0))
 }
+
+@Test func photoModeLayoutSwapsVideoTilesForPhotoOnes() {
+    #expect(SettingCatalog.fnBottomRow(for: .photo) == [.setting(.focusArea), .setting(.metering), .setting(.dro),
+                                                        .setting(.fileFormat), .setting(.aspectRatio), .allSettings])
+    #expect(SettingCatalog.fnBottomRow(for: .video) == SettingCatalog.fnBottomRow)
+    #expect(SettingCatalog.infoLine(for: .photo) == SettingCatalog.infoLine + [.fileFormat])
+    #expect(SettingCatalog.infoLine(for: .video) == SettingCatalog.infoLine)
+}
