@@ -39,6 +39,8 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.zIndex
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -93,8 +95,17 @@ class ScreenState {
     /** Касание началось, когда элементы были спрятаны: оно только показывает их. */
     var revealTap = false
 
+    /** Подсказка под строкой состояния: о подключении или о кадрах. */
+    var pillInfo by mutableStateOf<PillInfo?>(null)
+
     val controlsHidden: Boolean get() = manualHidden || autoHidden
-    val overlayOpen: Boolean get() = fnOpen || allSettingsOpen || settingsOpen
+    val overlayOpen: Boolean get() = fnOpen || allSettingsOpen || settingsOpen || pillInfo != null
+
+    fun togglePillInfo(info: PillInfo) {
+        val open = pillInfo != info
+        closeOverlays()
+        if (open) pillInfo = info
+    }
 
     fun noteActivity() {
         lastActivity = System.currentTimeMillis()
@@ -103,6 +114,7 @@ class ScreenState {
 
     fun openFn(id: SettingID?) {
         if (id != null) selected = id
+        pillInfo = null
         allSettingsOpen = false
         settingsOpen = false
         fnOpen = true
@@ -115,6 +127,7 @@ class ScreenState {
         }
         fnOpen = false
         settingsOpen = false
+        pillInfo = null
         allSettingsOpen = true
     }
 
@@ -123,6 +136,7 @@ class ScreenState {
         allSettingsOpen = false
         settingsOpen = false
         editing = null
+        pillInfo = null
     }
 }
 
@@ -147,20 +161,52 @@ private fun WaitingScreen(controller: CameraController, notPcRemote: Boolean) {
             if (notPcRemote) "Камера подключена, но не в режиме PC Remote" else "Подключите камеру",
             color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.SemiBold,
         )
-        Spacer(Modifier.height(20.dp))
-        listOf(
-            "1. На камере: MENU → Network → Smartphone Connect → Smartphone Connection: Off",
-            "2. MENU → Network → PC Remote Function → PC Remote: On, PC Remote Cnct Method: USB",
-            if (notPcRemote) "Переподключите кабель" else "3. Подключите камеру к планшету кабелем USB-C",
-        ).forEach { Text(it, color = Secondary, fontSize = 20.sp, modifier = Modifier.padding(vertical = 5.dp)) }
-        Spacer(Modifier.height(16.dp))
-        val status = when {
-            controller.phase == CameraController.Phase.permission -> "Разрешите доступ к камере в окне Android…"
-            controller.message != null -> controller.message
-            notPcRemote -> null
-            else -> "Ищу камеру…"
+        Spacer(Modifier.height(24.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(48.dp)) {
+            Column(Modifier.weight(1f)) {
+                Text("По кабелю USB", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(8.dp))
+                listOf(
+                    "1. MENU → Network → Smartphone Connect → Smartphone Connection: Off",
+                    "2. MENU → Network → PC Remote Function → PC Remote: On, PC Remote Cnct Method: USB",
+                    if (notPcRemote) "Переподключите кабель" else "3. Подключите камеру к планшету кабелем USB-C",
+                ).forEach { Text(it, color = Secondary, fontSize = 18.sp, modifier = Modifier.padding(vertical = 4.dp)) }
+                if (controller.phase == CameraController.Phase.permission) {
+                    Text("Разрешите доступ к камере в окне Android…", color = Secondary, fontSize = 17.sp, modifier = Modifier.padding(top = 8.dp))
+                }
+            }
+            if (!notPcRemote) Column(Modifier.weight(1f)) {
+                Text("По Wi-Fi", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(8.dp))
+                listOf(
+                    "1. Камера и планшет — в одной сети Wi-Fi (у камеры: MENU → Network → Wi-Fi Settings → Access Point Set.)",
+                    "2. MENU → Network → PC Remote Function → PC Remote: On, PC Remote Cnct Method: Wi-Fi Access Point",
+                    "3. Один раз — сопряжение: кнопка ниже, на камере PC Remote Function → Pairing",
+                ).forEach { Text(it, color = Secondary, fontSize = 18.sp, modifier = Modifier.padding(vertical = 4.dp)) }
+                Spacer(Modifier.height(10.dp))
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                    val pairing = controller.isPairing
+                    Text(if (pairing) "Отмена" else "Сопрячь с камерой", color = Color.White, fontSize = 17.sp,
+                        modifier = Modifier.background(if (pairing) PanelLight else Accent, RoundedCornerShape(10.dp))
+                            .clickable { if (pairing) controller.cancelPairing() else controller.startPairing() }
+                            .padding(horizontal = 18.dp, vertical = 12.dp))
+                    if (pairing) CircularProgressIndicator(Modifier.size(22.dp), color = Color.White, strokeWidth = 2.dp)
+                    val name = controller.prefs.wifiCameraName
+                    if (!pairing && controller.prefs.wifiEnabled && name != null) {
+                        CircularProgressIndicator(Modifier.size(18.dp), color = Secondary, strokeWidth = 2.dp)
+                        Text("Ищу $name в сети…", color = Secondary, fontSize = 16.sp)
+                    }
+                }
+                controller.wifiStatus?.let { Text(it, color = Color(0xFFFF9F0A), fontSize = 16.sp, modifier = Modifier.padding(top = 10.dp)) }
+                if (!controller.prefs.wifiEnabled) {
+                    Text("Подключение по Wi-Fi выключено в настройках", color = Secondary, fontSize = 16.sp, modifier = Modifier.padding(top = 10.dp))
+                }
+            }
         }
-        if (status != null) Text(status, color = Secondary, fontSize = 18.sp)
+        controller.message?.let {
+            Spacer(Modifier.height(18.dp))
+            Text(it, color = Secondary, fontSize = 17.sp)
+        }
     }
 }
 
@@ -270,7 +316,11 @@ private fun Controls(controller: CameraController, screen: ScreenState) {
                     .background(Panel, RoundedCornerShape(10.dp)).padding(horizontal = 12.dp, vertical = 7.dp))
             }
         }
-        StatusPill(controller, Modifier.align(Alignment.TopEnd))
+        // поверх кнопок справа: подсказка может их накрыть
+        Column(Modifier.align(Alignment.TopEnd).zIndex(1f), horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            StatusPill(controller, screen)
+            screen.pillInfo?.let { PillInfoCard(controller, it) }
+        }
         RightColumn(controller, Modifier.align(Alignment.CenterEnd).padding(end = 4.dp))
         if (!screen.fnOpen) {
             Column(Modifier.align(Alignment.BottomStart).padding(bottom = 76.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -290,15 +340,18 @@ private fun Controls(controller: CameraController, screen: ScreenState) {
 }
 
 @Composable
-private fun StatusPill(controller: CameraController, modifier: Modifier) {
+private fun StatusPill(controller: CameraController, screen: ScreenState) {
     Row(
-        modifier.background(Panel, RoundedCornerShape(14.dp)).padding(horizontal = 16.dp, vertical = 10.dp),
+        Modifier.background(Panel, RoundedCornerShape(14.dp)).padding(horizontal = 16.dp, vertical = 10.dp),
         horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically,
     ) {
         controller.recordingStartedAt?.let { RecBadge(it) }
         val ready = controller.phase == CameraController.Phase.ready
         Box(Modifier.size(10.dp).background(if (ready) Color(0xFF34C759) else Color(0xFFFF9F0A), CircleShape))
-        PillText("${controller.deviceInfo?.model ?: "Камера"} · USB")
+        // касание — подсказка: адреса и сигнал / что это за кадры
+        PillText("${controller.deviceInfo?.model ?: "Камера"} · ${if (controller.transportKind == CameraController.TransportKind.wifi) "Wi-Fi" else "USB"}",
+            Modifier.clickable { screen.togglePillInfo(PillInfo.connection) })
+        PillText("${controller.shownFps} к/с", Modifier.clickable { screen.togglePillInfo(PillInfo.frames) })
         PillText(ValueFormatter.label(SettingID.exposureProgram, controller.property(SettingID.exposureProgram)))
         if (controller.mode == CaptureMode.video) {
             PillText("Карта: ${ValueFormatter.label(SettingID.cardRemaining, controller.property(SettingID.cardRemaining))}")
@@ -316,7 +369,74 @@ private fun StatusPill(controller: CameraController, modifier: Modifier) {
 }
 
 @Composable
-private fun PillText(text: String) = Text(text, color = Color.White, fontSize = 16.sp)
+private fun PillText(text: String, modifier: Modifier = Modifier) =
+    Text(text, color = Color.White, fontSize = 16.sp, style = TextStyle(fontFeatureSettings = "tnum"), modifier = modifier)
+
+enum class PillInfo { connection, frames }
+
+@Composable
+private fun PillInfoCard(controller: CameraController, info: PillInfo) {
+    val wifi = controller.transportKind == CameraController.TransportKind.wifi
+    Column(
+        // плотнее обычной панели: лежит поверх кнопок справа
+        Modifier.width(430.dp).background(Color(0xF71C1C1E), RoundedCornerShape(14.dp)).padding(18.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        when (info) {
+            PillInfo.connection -> {
+                // сигнал меняется — пока подсказка открыта, обновляем раз в секунду
+                var details by remember { mutableStateOf(controller.connectionDetails()) }
+                LaunchedEffect(Unit) {
+                    while (true) {
+                        delay(1000)
+                        details = controller.connectionDetails()
+                    }
+                }
+                InfoTitle(if (wifi) "Подключение по Wi-Fi" else "Подключение по USB")
+                controller.deviceInfo?.let { InfoRow("Камера", "${it.model}, прошивка ${it.firmware}") }
+                if (wifi) {
+                    details.cameraHost?.let { InfoRow("IP камеры", it) }
+                    details.localHost?.let { InfoRow("IP планшета", it) }
+                    details.signalDbm?.let { InfoRow("Сигнал Wi-Fi", "${it.toString().replace('-', '−')} дБм, ${signalWord(it)}") }
+                    InfoNote("Сигнал — между планшетом и роутером. Если картинка дёргается, подойдите ближе к роутеру или поставьте ближе к нему камеру.")
+                } else {
+                    InfoNote("Без кабеля планшет сам найдёт камеру по Wi-Fi, если она сопряжена (⚙ → Wi-Fi).")
+                }
+            }
+            PillInfo.frames -> {
+                InfoTitle("Кадры трансляции")
+                InfoNote("Столько кадров в секунду (сейчас ${controller.shownFps}) доходит до планшета ${if (wifi) "по Wi-Fi" else "по USB"}. " +
+                    "Это картинка для просмотра, а не съёмка.", Color.White)
+                InfoNote("На запись это не влияет: камера пишет видео на карту со своей частотой (например, 25p) " +
+                    "и снимает фото в полном качестве, сколько бы кадров ни доходило сюда.")
+                InfoNote("Счётчик — чтобы проверить связь. Камера отдаёт до 25–30 кадров в секунду; если число заметно меньше " +
+                    "или скачет, связь не успевает и картинка подёргивается.")
+                InfoRow("Самая долгая пауза за 10 с", "${controller.frameGapMs} мс")
+                InfoNote("Обычно между кадрами около 40 мс; паузы дольше 200 мс заметны как рывок.")
+            }
+        }
+    }
+}
+
+@Composable
+private fun InfoTitle(text: String) = Text(text, color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+
+@Composable
+private fun InfoRow(label: String, value: String) {
+    Row(Modifier.fillMaxWidth()) {
+        Text(label, color = Secondary, fontSize = 15.sp, modifier = Modifier.weight(1f))
+        Text(value, color = Color.White, fontSize = 15.sp, style = TextStyle(fontFeatureSettings = "tnum"))
+    }
+}
+
+@Composable
+private fun InfoNote(text: String, color: Color = Secondary) = Text(text, color = color, fontSize = 14.sp, lineHeight = 19.sp)
+
+private fun signalWord(dbm: Int) = when {
+    dbm >= -60 -> "хороший"
+    dbm >= -70 -> "средний"
+    else -> "слабый"
+}
 
 /** Тонкая строка с основными значениями, как на дисплее камеры. Касание открывает меню Fn. */
 @Composable
@@ -441,6 +561,8 @@ private fun SettingsPanel(controller: CameraController, modifier: Modifier) {
     var reviewSeconds by remember { mutableIntStateOf(prefs.reviewSeconds) }
     var reviewSource by remember { mutableStateOf(prefs.reviewSource) }
     var autoHide by remember { mutableStateOf(prefs.autoHide) }
+    var wifiEnabled by remember { mutableStateOf(prefs.wifiEnabled) }
+    var wifiCamera by remember { mutableStateOf(prefs.wifiCameraName?.let { name -> prefs.wifiHost?.let { "$name · $it" } ?: name }) }
     Column(
         modifier.background(Color(0xF22C2C2E), RoundedCornerShape(18.dp)).padding(24.dp)
             .verticalScroll(rememberScrollState()).pointerInput(Unit) { detectTapGestures { } },
@@ -470,6 +592,21 @@ private fun SettingsPanel(controller: CameraController, modifier: Modifier) {
         Spacer(Modifier.height(8.dp))
         Toggle("Скрывать элементы через 3 с без касаний", autoHide) { autoHide = it; prefs.autoHide = it }
         Text("Касание видео прячет и возвращает элементы.", color = Secondary, fontSize = 13.sp)
+        Spacer(Modifier.height(8.dp))
+        Text("Wi-Fi", color = Secondary, fontSize = 15.sp)
+        Toggle("Подключаться по Wi-Fi, когда камеры нет на кабеле", wifiEnabled) { wifiEnabled = it; prefs.wifiEnabled = it }
+        val cameraName = wifiCamera
+        if (cameraName != null) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Камера: $cameraName", color = Color.White, fontSize = 16.sp, modifier = Modifier.weight(1f))
+                Text("Забыть", color = Accent, fontSize = 16.sp, modifier = Modifier.clickable {
+                    controller.forgetWiFiCamera()
+                    wifiCamera = null
+                }.padding(8.dp))
+            }
+        } else {
+            Text("Камера ещё не подключалась по Wi-Fi", color = Secondary, fontSize = 14.sp)
+        }
     }
 }
 

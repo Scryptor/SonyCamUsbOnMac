@@ -53,6 +53,20 @@ class Prefs(context: Context) {
         get() = prefs.getBoolean("histogramOn", false)
         set(value) = prefs.edit().putBoolean("histogramOn", value).apply()
 
+    /** Подключаться к камере по Wi-Fi, когда её нет на кабеле. */
+    var wifiEnabled: Boolean
+        get() = prefs.getBoolean("wifiEnabled", true)
+        set(value) = prefs.edit().putBoolean("wifiEnabled", value).apply()
+
+    /** Последний адрес сопряжённой камеры в сети: с него начинаем поиск. */
+    var wifiHost: String?
+        get() = prefs.getString("wifiHost", null)
+        set(value) = prefs.edit().putString("wifiHost", value).apply()
+
+    var wifiCameraName: String?
+        get() = prefs.getString("wifiCameraName", null)
+        set(value) = prefs.edit().putString("wifiCameraName", value).apply()
+
     var presets: List<Preset>
         get() = PresetCatalog.fromJson(prefs.getString("presets", "[]")!!)
         set(value) = prefs.edit().putString("presets", PresetCatalog.toJson(value)).apply()

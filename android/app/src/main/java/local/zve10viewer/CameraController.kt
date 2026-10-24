@@ -10,6 +10,8 @@ import android.graphics.BitmapFactory
 import android.hardware.usb.UsbConstants
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.BatteryManager
 import android.os.Build
 import android.util.Log
@@ -22,10 +24,13 @@ import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import local.zve10viewer.ptp.PtpIpRejected
+import local.zve10viewer.ptp.PtpTransport
 import local.zve10viewer.ptp.TransportException
 import local.zve10viewer.session.CameraSession
 import local.zve10viewer.session.SessionException
@@ -42,7 +47,11 @@ import local.zve10viewer.sony.Sony
 import local.zve10viewer.sony.SonyProp
 import local.zve10viewer.sony.SonyProperty
 import local.zve10viewer.usb.UsbPtpTransport
+import local.zve10viewer.wifi.PtpIpIdentity
+import local.zve10viewer.wifi.PtpIpTransport
+import local.zve10viewer.wifi.WiFiDiscovery
 import kotlin.coroutines.cancellation.CancellationException
+import kotlin.math.roundToInt
 
 /** Состояние приложения: поиск камеры, разрешение USB, сеанс, live view, настройки, съёмка и пресеты. */
 class CameraController(private val context: Context, private val scope: CoroutineScope) {
@@ -76,6 +85,12 @@ class CameraController(private val context: Context, private val scope: Coroutin
     var frame by mutableStateOf<ImageBitmap?>(null)
         private set
     var fps by mutableStateOf(0.0)
+        private set
+    /** fps для строки состояния: обновляется дважды в секунду, а не с каждым кадром. */
+    var shownFps by mutableStateOf(0)
+        private set
+    /** Самая долгая пауза между кадрами за последние 10 с, мс — насколько ровно идёт картинка. */
+    var frameGapMs by mutableStateOf(0)
         private set
     /** Кадры давно не приходят. */
     var isFrameStale by mutableStateOf(false)
@@ -111,13 +126,27 @@ class CameraController(private val context: Context, private val scope: Coroutin
     var tabletCharging by mutableStateOf(false)
         private set
 
+    enum class TransportKind { usb, wifi }
+    /** Чем подключена камера сейчас. */
+    var transportKind by mutableStateOf<TransportKind?>(null)
+        private set
+    /** Идёт сопряжение по Wi-Fi (кнопка «Сопрячь с камерой»). */
+    var isPairing by mutableStateOf(false)
+        private set
+    /** Что сейчас с Wi-Fi: «ищу камеру», «камера найдена, нужно сопряжение» и т.п. */
+    var wifiStatus by mutableStateOf<String?>(null)
+        private set
+
     @Volatile var lastJpeg: ByteArray? = null
         private set
 
     private val usbManager = context.getSystemService(UsbManager::class.java)
     private val batteryManager = context.getSystemService(BatteryManager::class.java)
     private var device: UsbDevice? = null
-    private var transport: UsbPtpTransport? = null
+    private var transport: PtpTransport? = null
+    private val identity by lazy { PtpIpIdentity.load(context) }
+    private var wifiBusy = false
+    private var wifiFailures = 0
     private var session: CameraSession? = null
     private var coalescer: WriteCoalescer? = null
     private val targets = HashMap<Int, Long>()
@@ -126,6 +155,8 @@ class CameraController(private val context: Context, private val scope: Coroutin
     private var statusJob: Job? = null
     private val frameTimes = ArrayDeque<Long>()
     private var lastFrameAt = 0L
+    /** Паузы между кадрами за последние 10 с: (когда пришёл кадр, пауза перед ним). */
+    private val frameGaps = ArrayDeque<Pair<Long, Long>>()
     private var failures = 0
     private var retryAt = 0L
     private var batteryCheckedAt = 0L
@@ -350,8 +381,16 @@ class CameraController(private val context: Context, private val scope: Coroutin
             while (isActive) {
                 if (device == null && System.currentTimeMillis() >= retryAt) findCamera()
                 tickFrameStats()
+                tickShownStats()
                 tickTabletBattery()
                 delay(500)
+            }
+        }
+        // без кабеля — ищем камеру в сети
+        scope.launch {
+            while (isActive) {
+                delay(1000)
+                wifiTick()
             }
         }
     }
@@ -408,6 +447,11 @@ class CameraController(private val context: Context, private val scope: Coroutin
         }
 
     private fun connect(camera: UsbDevice) {
+        // кабель важнее сети: если шёл сеанс по Wi-Fi, закрываем его
+        if (transportKind == TransportKind.wifi) {
+            teardown()
+            device = camera
+        }
         phase = Phase.connecting
         message = null
         val usbInterface = (0 until camera.interfaceCount).map(camera::getInterface)
@@ -425,6 +469,15 @@ class CameraController(private val context: Context, private val scope: Coroutin
             retryLater("Не удалось открыть камеру: ${e.message}")
             return
         }
+        runSession(transport, TransportKind.usb,
+            onFailure = { e -> retryLater("Не удалось подключиться к камере: ${e.message}") },
+            onEnded = { if (device != null) retryLater("Связь с камерой оборвалась") })
+    }
+
+    /** Сеанс одинаков для USB и Wi-Fi: различаются транспорт и что делать при обрыве. */
+    private fun runSession(transport: PtpTransport, kind: TransportKind, onFailure: (Exception) -> Unit, onEnded: () -> Unit) {
+        phase = Phase.connecting
+        transportKind = kind
         val session = CameraSession(transport)
         this.transport = transport
         this.session = session
@@ -438,7 +491,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
                 session.start(this)
                 deviceInfo = session.deviceInfo
                 phase = Phase.settling
-                startStreams(session)
+                startStreams(session, onEnded)
                 session.waitUntilReady()
                 phase = Phase.ready
                 failures = 0
@@ -449,9 +502,94 @@ class CameraController(private val context: Context, private val scope: Coroutin
                 phase = Phase.notPcRemote
             } catch (e: Exception) {
                 Log.w(TAG, "подключение не удалось", e)
-                retryLater("Не удалось подключиться к камере: ${e.message}")
+                onFailure(e)
             }
         }
+    }
+
+    // MARK: - Wi-Fi
+
+    /** Начать сопряжение: программа ищет камеру и стучится, пока на камере включено Pairing. */
+    fun startPairing() {
+        isPairing = true
+        wifiStatus = "Ищу камеру в сети…"
+    }
+
+    fun cancelPairing() {
+        isPairing = false
+        wifiStatus = null
+    }
+
+    /** Забыть камеру: программа перестанет подключаться к ней сама (сопряжение в камере остаётся). */
+    fun forgetWiFiCamera() {
+        prefs.wifiHost = null
+        prefs.wifiCameraName = null
+        if (transportKind == TransportKind.wifi) teardown()
+    }
+
+    /** Раз в секунду: если камеры на кабеле нет и связи нет — ищем камеру в сети и подключаемся. */
+    private suspend fun wifiTick() {
+        if (!(prefs.wifiEnabled || isPairing) || phase != Phase.searching || device != null || wifiBusy) return
+        if (usbManager.deviceList.values.any { it.vendorId == Sony.VENDOR_ID }) return
+        wifiBusy = true
+        try {
+            // сначала — последний адрес камеры: так подключение после перерыва занимает секунду, а не поиск
+            val last = if (isPairing) null else prefs.wifiHost
+            if (last != null && tryWiFi(last)) return
+            if (isPairing && wifiStatus == null) wifiStatus = "Ищу камеру в сети…"
+            val found = withContext(Dispatchers.IO) { WiFiDiscovery.search() }
+            for (response in found) {
+                if (response.host == last) continue
+                if (phase != Phase.searching || device != null) return
+                if (tryWiFi(response.host)) return
+            }
+            if (found.isEmpty() && isPairing) wifiStatus = "Камеру в сети не вижу. Проверьте, что она подключена к той же сети Wi-Fi"
+        } finally {
+            wifiBusy = false
+        }
+    }
+
+    /** Одна попытка подключиться к камере по адресу. true — сеанс начат. */
+    private suspend fun tryWiFi(host: String): Boolean {
+        if (isPairing) wifiStatus = "Камера найдена ($host). Включите на камере PC Remote Function → Pairing и подтвердите сопряжение"
+        return try {
+            // при сопряжении камера ждёт подтверждения на экране — ответа ждём дольше
+            val pairing = isPairing
+            val (transport, name) = withContext(Dispatchers.IO) {
+                PtpIpTransport.connect(host, identity, initTimeoutMs = if (pairing) 60_000 else 5000)
+            }
+            if (phase != Phase.searching || device != null) {
+                transport.close()
+                return false
+            }
+            prefs.wifiHost = host
+            prefs.wifiCameraName = name
+            wifiFailures = 0
+            isPairing = false
+            wifiStatus = null
+            message = null
+            runSession(transport, TransportKind.wifi, onFailure = { wifiLost() }, onEnded = { wifiLost() })
+            true
+        } catch (e: PtpIpRejected) {
+            wifiStatus = if (isPairing) "Камера найдена ($host). Включите на камере PC Remote Function → Pairing"
+            else "В сети есть камера ($host), но планшет с ней не сопряжён — нажмите «Сопрячь с камерой»"
+            false
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // камера в сети, но не отвечает: обычно она ещё держит прошлое, оборванное подключение
+            wifiFailures++
+            if (wifiFailures >= 3 && !isPairing) {
+                wifiStatus = "Камера найдена ($host), но пока не отвечает — видимо, держит прошлое подключение. " +
+                    "Обычно это проходит за 1–2 минуты; если нет — выключите и снова включите на камере PC Remote"
+            }
+            false
+        }
+    }
+
+    private fun wifiLost() {
+        teardown()
+        message = "Связь по Wi-Fi пропала. Ищу камеру…"
     }
 
     /** Повтор через 2, 4, 8, 10, 10… с, пока камера подключена. */
@@ -463,44 +601,54 @@ class CameraController(private val context: Context, private val scope: Coroutin
         retryAt = System.currentTimeMillis() + seconds * 1000
     }
 
-    private fun startStreams(session: CameraSession) {
+    private fun startStreams(session: CameraSession, onEnded: () -> Unit) {
         jobs += scope.launch {
             session.properties.collect { apply(it) }
         }
         jobs += scope.launch {
             session.ended.await()
-            if (device != null) retryLater("Связь с камерой оборвалась")
+            onEnded()
         }
-        jobs += scope.launch(Dispatchers.Default) {
+        // следующий кадр запрашиваем, пока текущий декодируется: по Wi-Fi запрос идёт 25–35 мс,
+        // и подряд с декодированием выходило 21 кадр/с вместо 25. Не успеваем показать — показываем свежий.
+        val frames = Channel<ByteArray>(Channel.CONFLATED)
+        jobs += scope.launch(Dispatchers.IO) {
             var errors = 0
             var lastArrival = 0L
-            while (isActive) {
-                try {
-                    val t0 = System.nanoTime()
-                    val jpeg = session.nextLiveViewFrame()
-                    val t1 = System.nanoTime()
-                    errors = 0
-                    val bitmap = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size) ?: continue
-                    val bins = if (histogramOn) histogramOf(bitmap) else null
-                    val t2 = System.nanoTime()
-                    withContext(Dispatchers.Main) { show(bitmap.asImageBitmap(), jpeg, bins) }
-                    val t3 = System.nanoTime()
-                    if (lastArrival != 0L && t1 - lastArrival > 100_000_000L) {
-                        Log.i("ZVFrames", "пауза %.0f мс: запрос %.0f мс (ожиданий %d), декодирование %.0f мс, показ %.0f мс".format(
-                            (t1 - lastArrival) / 1e6, (t1 - t0) / 1e6, session.lastLiveViewWaits, (t2 - t1) / 1e6, (t3 - t2) / 1e6))
+            try {
+                while (isActive) {
+                    try {
+                        val t0 = System.nanoTime()
+                        val jpeg = session.nextLiveViewFrame()
+                        val t1 = System.nanoTime()
+                        errors = 0
+                        if (lastArrival != 0L && t1 - lastArrival > 100_000_000L) {
+                            Log.i("ZVFrames", "пауза %.0f мс: запрос %.0f мс (ожиданий %d)".format(
+                                (t1 - lastArrival) / 1e6, (t1 - t0) / 1e6, session.lastLiveViewWaits))
+                        }
+                        lastArrival = t1
+                        frames.send(jpeg)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: TransportException) {
+                        if (e.disconnected) break
+                        errors++
+                        delay(minOf(100L * errors, 1000L))
+                    } catch (e: Exception) {
+                        // временный сбой (таймаут, неожиданный ответ) — не бросаем live view, пробуем дальше
+                        errors++
+                        delay(minOf(100L * errors, 1000L))
                     }
-                    lastArrival = t1
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: TransportException) {
-                    if (e.disconnected) break
-                    errors++
-                    delay(minOf(100L * errors, 1000L))
-                } catch (e: Exception) {
-                    // временный сбой (таймаут, неожиданный ответ) — не бросаем live view, пробуем дальше
-                    errors++
-                    delay(minOf(100L * errors, 1000L))
                 }
+            } finally {
+                frames.close()
+            }
+        }
+        jobs += scope.launch(Dispatchers.Default) {
+            for (jpeg in frames) {
+                val bitmap = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size) ?: continue
+                val bins = if (histogramOn) histogramOf(bitmap) else null
+                withContext(Dispatchers.Main) { show(bitmap.asImageBitmap(), jpeg, bins) }
             }
         }
     }
@@ -544,9 +692,34 @@ class CameraController(private val context: Context, private val scope: Coroutin
         lastJpeg = jpeg
         if (bins != null) histogram = bins
         val now = System.currentTimeMillis()
+        if (lastFrameAt != 0L) frameGaps.addLast(now to now - lastFrameAt)
         lastFrameAt = now
         frameTimes.addLast(now)
         tickFrameStats()
+    }
+
+    /** Числа для строки состояния и подсказки о кадрах; пересчитываются дважды в секунду. */
+    private fun tickShownStats() {
+        val now = System.currentTimeMillis()
+        while (frameGaps.isNotEmpty() && now - frameGaps.first().first > 10_000) frameGaps.removeFirst()
+        shownFps = fps.roundToInt()
+        // кадры перестали приходить — пауза растёт и сейчас
+        val open = if (lastFrameAt != 0L && frame != null) now - lastFrameAt else 0L
+        frameGapMs = maxOf(frameGaps.maxOfOrNull { it.second } ?: 0L, open).toInt()
+    }
+
+    data class ConnectionDetails(val cameraHost: String?, val localHost: String?, val signalDbm: Int?)
+
+    /** Для подсказки о подключении: адреса камеры и планшета, сигнал Wi-Fi планшета. */
+    fun connectionDetails(): ConnectionDetails {
+        val wifi = transport as? PtpIpTransport
+        val signal = runCatching {
+            val connectivity = context.getSystemService(ConnectivityManager::class.java)
+            val caps = connectivity.getNetworkCapabilities(connectivity.activeNetwork)
+            caps?.takeIf { it.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) }?.signalStrength
+                ?.takeIf { it != NetworkCapabilities.SIGNAL_STRENGTH_UNSPECIFIED }
+        }.getOrNull()
+        return ConnectionDetails(wifi?.host, wifi?.localHost, signal)
     }
 
     /** fps за последние 2 с и признак «кадры не приходят» (больше 1,5 с). */
@@ -572,6 +745,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
         jobs.clear()
         session?.close()
         transport?.close()
+        transportKind = null
         session = null
         transport = null
         coalescer = null
@@ -584,7 +758,11 @@ class CameraController(private val context: Context, private val scope: Coroutin
         lastJpeg = null
         histogram = null
         frameTimes.clear()
+        frameGaps.clear()
+        lastFrameAt = 0L
         fps = 0.0
+        shownFps = 0
+        frameGapMs = 0
         isFrameStale = false
         recordingStartedAt = null
         isApplyingPreset = false

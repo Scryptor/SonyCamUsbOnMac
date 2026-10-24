@@ -2,6 +2,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-feature android:name="android.hardware.usb.host" android:required="true" />
+    <!-- Wi-Fi: камера в режиме PC Remote по сети (PTP/IP) -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- уровень сигнала Wi-Fi в подсказке о подключении -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <application
         android:label="ZV-E10 Viewer"
