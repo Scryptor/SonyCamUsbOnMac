@@ -97,7 +97,7 @@ private struct WhiteBalanceFineTune: View {
                         .fill(LinearGradient(colors: [.green.opacity(0.45), .pink.opacity(0.45)], startPoint: .top, endPoint: .bottom))
                         .blendMode(.screen))
                 Circle().fill(.white).frame(width: 9, height: 9)
-                    .position(pad ?? CGPoint(x: fraction(ab) * size, y: fraction(gm) * size))
+                    .position(pad ?? CGPoint(x: fraction(ab) * size, y: (1 - fraction(gm)) * size))
             }
             .frame(width: size, height: size)
             .gesture(DragGesture(minimumDistance: 0)
@@ -105,7 +105,7 @@ private struct WhiteBalanceFineTune: View {
                 .onEnded { _ in
                     if let pad, let ab, let gm {
                         request(.wbShiftAB, ab, fraction: pad.x / size)
-                        request(.wbShiftGM, gm, fraction: pad.y / size)
+                        request(.wbShiftGM, gm, fraction: 1 - pad.y / size)
                     }
                     pad = nil
                 })
@@ -114,6 +114,7 @@ private struct WhiteBalanceFineTune: View {
     }
 
     /// Положение значения на оси: 0 — минимум диапазона, 1 — максимум.
+    /// По горизонтали B слева, A справа; по вертикали G сверху, M снизу (больше значение — A и G).
     private func fraction(_ property: SonyProperty?) -> CGFloat {
         guard let range = property?.range, range.max > range.min, let v = property?.current.intValue else { return 0.5 }
         return CGFloat(v - range.min) / CGFloat(range.max - range.min)

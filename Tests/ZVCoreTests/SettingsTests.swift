@@ -44,14 +44,22 @@ private func props() throws -> [UInt16: SonyProperty] {
     #expect(ValueFormatter.label(.dro, 0x13) == "DRO 3")
     #expect(ValueFormatter.label(.pictureProfile, 10) == "PP10")
     #expect(ValueFormatter.label(.exposureProgram, 0x0007_8053) == "Видео M")
+    // сверено с меню камеры пользователя
+    #expect(ValueFormatter.label(.movieFileFormat, 8) == "XAVC S 4K")
+    #expect(ValueFormatter.label(.movieFileFormat, 9) == "XAVC S HD")
+    #expect(ValueFormatter.label(.movieRecordingSetting, 0x21) == "25p 100M")
+    #expect(ValueFormatter.label(.movieRecordingSetting, 0x24) == "25p 60M")
+    #expect(ValueFormatter.label(.aspectRatio, 4) == "1:1")
 }
 
 @Test func miscLabels() {
     #expect(ValueFormatter.label(.colorTemperature, 5200) == "5200 K")
     #expect(ValueFormatter.label(.wbShiftAB, 192) == "0")
-    #expect(ValueFormatter.label(.wbShiftAB, 194) == "+0.5")
-    #expect(ValueFormatter.label(.wbShiftGM, 193) == "+0.25")
-    #expect(ValueFormatter.label(.wbShiftGM, 188) == "\u{2212}1")
+    // направление проверено по цвету кадра: больше 192 — A (теплее) и G (зеленее)
+    #expect(ValueFormatter.label(.wbShiftAB, 194) == "A0.5")
+    #expect(ValueFormatter.label(.wbShiftAB, 188) == "B1")
+    #expect(ValueFormatter.label(.wbShiftGM, 193) == "G0.25")
+    #expect(ValueFormatter.label(.wbShiftGM, 188) == "M1")
     #expect(ValueFormatter.label(.battery, -1) == "—")
     #expect(ValueFormatter.label(.battery, 24) == "24%")
     #expect(ValueFormatter.label(.cardRemaining, 9176) == "2 ч 32 мин")
@@ -60,7 +68,7 @@ private func props() throws -> [UInt16: SonyProperty] {
 
 @Test func unknownValueFallsBackToNumber() {
     #expect(ValueFormatter.label(.whiteBalance, 0x000E) == "#14")
-    #expect(ValueFormatter.label(.movieFileFormat, 8) == "#8")
+    #expect(ValueFormatter.label(.movieFileFormat, 99) == "#99")
     #expect(ValueFormatter.label(.iso, nil) == "—")
 }
 

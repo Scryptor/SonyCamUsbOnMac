@@ -20,8 +20,11 @@ public enum ValueFormatter {
             return value == 0 ? "±0.0" : sign(value) + String(format: "%.1f", Double(abs(value)) / 1000)
         case .colorTemperature: return "\(value) K"
         case .wbShiftAB, .wbShiftGM:
+            // проверено по цвету кадра: больше 192 — A (теплее) и G (зеленее), меньше — B и M
             let shift = Double(value - 192) / 4
-            return shift == 0 ? "0" : sign(value - 192) + trimmed(abs(shift))
+            if shift == 0 { return "0" }
+            let letter = id == .wbShiftAB ? (shift > 0 ? "A" : "B") : (shift > 0 ? "G" : "M")
+            return letter + trimmed(abs(shift))
         case .battery: return value < 0 ? "—" : "\(value)%"
         case .cardRemaining:
             let hours = value / 3600
@@ -115,6 +118,9 @@ public enum ValueFormatter {
             0x58011: "Спорт", 0x58012: "Закат", 0x58013: "Ночная сцена", 0x58014: "Пейзаж", 0x58015: "Макро",
             0x58016: "Сумерки с рук", 0x58017: "Ночной портрет", 0x58018: "Без смаза",
         ],
+        // сверено с меню камеры: 8 и 0x21 подтвердил пользователь, 9 и 0x24 — единственные другие варианты в списке камеры
+        .movieFileFormat: [8: "XAVC S 4K", 9: "XAVC S HD"],
+        .movieRecordingSetting: [0x21: "25p 100M", 0x24: "25p 60M"],
         .imageSize: [1: "L", 2: "M", 3: "S"],
         .aspectRatio: [1: "3:2", 2: "16:9", 3: "4:3", 4: "1:1"],
         .fileFormat: [1: "RAW", 2: "RAW+JPEG", 3: "JPEG"],
