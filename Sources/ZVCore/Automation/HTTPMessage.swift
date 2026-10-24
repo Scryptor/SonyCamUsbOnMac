@@ -15,6 +15,9 @@ public struct HTTPRequest: Equatable, Sendable {
         case invalid
     }
 
+    /// Самое большое допустимое тело запроса.
+    public static let maxBody = 64 * 1024
+
     public static func parse(_ data: Data) -> ParseResult {
         let separator = Data("\r\n\r\n".utf8)
         guard let headerEnd = data.range(of: separator) else {
@@ -31,7 +34,8 @@ public struct HTTPRequest: Equatable, Sendable {
             headers[line[..<colon].lowercased()] = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
         }
         let length = Int(headers["content-length"] ?? "0") ?? -1
-        guard length >= 0 else { return .invalid }
+        // API принимает только маленькие JSON-команды: огромное тело не буферизуем
+        guard length >= 0, length <= maxBody else { return .invalid }
         let bodyStart = headerEnd.upperBound
         guard data.endIndex - bodyStart >= length else { return .incomplete }
 
@@ -40,8 +44,10 @@ public struct HTTPRequest: Equatable, Sendable {
         var query: [String: String] = [:]
         if parts.count == 2 {
             for pair in parts[1].split(separator: "&") {
-                let kv = pair.split(separator: "=", maxSplits: 1).map { String($0).removingPercentEncoding ?? String($0) }
-                query[kv[0]] = kv.count > 1 ? kv[1] : ""
+                let kv = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+                    .map { String($0).removingPercentEncoding ?? String($0) }
+                guard let key = kv.first, !key.isEmpty else { continue }
+                query[key] = kv.count > 1 ? kv[1] : ""
             }
         }
         let request = HTTPRequest(method: String(requestLine[0]), path: String(parts.first ?? ""), query: query,

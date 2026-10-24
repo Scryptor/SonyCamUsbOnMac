@@ -30,6 +30,12 @@ public enum PresetCatalog {
         .metering, .dro, .focusMode, .focusArea, .creativeStyle, .pictureProfile,
     ]
 
+    /// Настройка → от какой она зависит.
+    public static let dependency: [SettingID: SettingID] = [
+        .colorTemperature: .whiteBalance, .wbShiftAB: .whiteBalance, .wbShiftGM: .whiteBalance,
+        .exposureComp: .iso,
+    ]
+
     /// Снимок текущих значений; берутся только настройки, которые камера сейчас даёт менять.
     public static func capture(name: String, from properties: [UInt16: SonyProperty]) -> Preset {
         var values: [SettingID: Int64] = [:]
@@ -49,7 +55,11 @@ extension CameraSession {
         var connected = true
         for id in PresetCatalog.order {
             guard let value = preset.values[id] else { continue }
-            guard connected else {
+            // температура и сдвиги хранятся в камере отдельно для каждого режима ББ, экспокоррекция
+            // работает только с ISO AUTO: если базовая настройка не применилась, зависимые не трогаем
+            let base = PresetCatalog.dependency[id]
+            let baseFailed = base.map { preset.values[$0] != nil && !result.applied.contains($0) } ?? false
+            guard connected, !baseFailed else {
                 result.skipped.append(id)
                 continue
             }

@@ -91,7 +91,8 @@ public actor CameraSession {
             case PTPResponseCode.ok:
                 if let jpeg = LiveViewFrame.jpeg(from: reply.data) { return jpeg }
                 try await Task.sleep(for: .milliseconds(20))
-            case PTPResponseCode.accessDenied:
+            case PTPResponseCode.accessDenied, PTPResponseCode.deviceBusy:
+                // кадр ещё не готов или камера занята (например, переключает режим) — ждём и повторяем
                 try await Task.sleep(for: .milliseconds(20))
             case PTPResponseCode.invalidObjectHandle:
                 try await Task.sleep(for: .milliseconds(50))

@@ -4,6 +4,7 @@ public enum PTPResponseCode {
     public static let ok: UInt16 = 0x2001
     public static let invalidObjectHandle: UInt16 = 0x2009
     public static let accessDenied: UInt16 = 0x200F
+    public static let deviceBusy: UInt16 = 0x2019
 }
 
 public enum PTPCommand {
