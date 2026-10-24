@@ -1,7 +1,7 @@
 import Foundation
 
 /// Настройки камеры, которые показывает программа.
-public enum SettingID: CaseIterable, Hashable, Sendable {
+public enum SettingID: String, CaseIterable, Hashable, Sendable, Codable, CodingKeyRepresentable {
     case exposureProgram, shutter, aperture, iso, exposureComp, metering, dro
     case focusMode, focusArea
     case whiteBalance, colorTemperature, wbShiftAB, wbShiftGM, creativeStyle, pictureProfile
@@ -90,7 +90,7 @@ public enum SettingID: CaseIterable, Hashable, Sendable {
     }
 }
 
-public enum SettingGroup: CaseIterable, Sendable {
+public enum SettingGroup: String, CaseIterable, Sendable, Codable {
     case exposure, focus, color, video, photo, camera
 
     public var title: String {
