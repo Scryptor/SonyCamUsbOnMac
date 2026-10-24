@@ -102,6 +102,7 @@ scripts/make-dmg.sh      # build/ZV-E10-Viewer.dmg
 - `Sources/ZVCamera` — связь с камерой через ImageCaptureCore.
 - `Sources/ZVViewer` — само приложение на SwiftUI.
 - `Sources/zv-probe` — утилита командной строки для опытов с камерой: `info`, `props`, `lv`, `set`, `rec`.
+- `Resources/AppIcon.icon` — иконка в формате Icon Composer. `scripts/make-icon.sh` пересобирает из неё `Assets.car` и `AppIcon.icns`, для этого нужен Xcode 26.
 - `docs/superpowers` — описание проекта и план разработки.
 
 ### Как программа говорит с камерой
