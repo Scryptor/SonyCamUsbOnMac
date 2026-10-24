@@ -1,5 +1,10 @@
 import Foundation
 
+public enum SetResult: Equatable, Sendable {
+    case confirmed
+    case notApplied(actual: Int64?)
+}
+
 /// Сеанс работы с камерой Sony в режиме PC Remote.
 public actor CameraSession {
     private let transport: PTPTransport
@@ -52,6 +57,68 @@ public actor CameraSession {
         let reply = try await call(SonyOp.getAllExtPropInfo)
         properties = try SonyPropertyParser.parse(reply.data)
         snapshotContinuation.yield(properties)
+    }
+
+    // MARK: - Изменение настроек, запись, live view
+
+    /// Записывает значение и ждёт, пока камера подтвердит его чтением.
+    public func set(_ code: UInt16, to value: Int64) async throws -> SetResult {
+        guard isReady else { throw SessionError.notReady }
+        guard let property = properties[code], property.isWritable else { throw SessionError.notWritable(code) }
+        guard Self.allows(property, value) else { throw SessionError.valueNotAllowed(code, value) }
+        try await call(SonyOp.setExtPropValue, [UInt32(code)], outData: PTPValue.encode(value, type: property.dataType))
+        let actual = try await waitFor(code) { $0 == value }
+        return actual == value ? .confirmed : .notApplied(actual: actual)
+    }
+
+    /// Нажимает и отпускает кнопку записи; возвращает, идёт ли запись после этого.
+    public func toggleRecording() async throws -> Bool {
+        guard isReady else { throw SessionError.notReady }
+        let before = properties[SonyProp.movieRecordingState]?.current.intValue
+        let button = [UInt32(SonyProp.movieRecButton)]
+        try await call(SonyOp.controlDevice, button, outData: PTPValue.encode(2, type: PTPType.uint16))
+        try await call(SonyOp.controlDevice, button, outData: PTPValue.encode(1, type: PTPType.uint16))
+        let after = try await waitFor(SonyProp.movieRecordingState) { $0 != before }
+        return after == 1
+    }
+
+    /// Следующий кадр live view (JPEG). Пока кадр не готов, камера отвечает AccessDenied — ждём и повторяем.
+    public func nextLiveViewFrame() async throws -> Data {
+        while true {
+            try Task.checkCancellation()
+            let reply = try await rawSend(SonyOp.getObject, [Sony.liveViewHandle])
+            switch reply.code {
+            case PTPResponseCode.ok:
+                if let jpeg = LiveViewFrame.jpeg(from: reply.data) { return jpeg }
+                try await Task.sleep(for: .milliseconds(20))
+            case PTPResponseCode.accessDenied:
+                try await Task.sleep(for: .milliseconds(20))
+            case PTPResponseCode.invalidObjectHandle:
+                try await Task.sleep(for: .milliseconds(50))
+            default:
+                throw SessionError.operationFailed(operation: SonyOp.getObject, code: reply.code)
+            }
+        }
+    }
+
+    static func allows(_ property: SonyProperty, _ value: Int64) -> Bool {
+        if !property.settableValues.isEmpty { return property.settableValues.contains(value) }
+        guard let range = property.range, range.step > 0 else { return false }
+        return value >= range.min && value <= range.max && (value - range.min) % range.step == 0
+    }
+
+    /// Перечитывает свойства, пока условие не выполнится или не выйдет время подтверждения.
+    private func waitFor(_ code: UInt16, until done: (Int64?) -> Bool) async throws -> Int64? {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timing.confirmTimeout)
+        var current = properties[code]?.current.intValue
+        while clock.now < deadline {
+            try await Task.sleep(for: timing.pollInterval)
+            try await refresh()
+            current = properties[code]?.current.intValue
+            if done(current) { break }
+        }
+        return current
     }
 
     // MARK: - Внутреннее
