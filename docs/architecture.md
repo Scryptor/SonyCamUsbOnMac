@@ -218,7 +218,7 @@ mkdir -p /tmp/zv-e2e && scripts/e2e.py /tmp/zv-e2e
 4. Коммит, тег `vX.Y.Z`, `git push origin main vX.Y.Z`.
 5. `gh release create vX.Y.Z build/ZV-E10-Viewer.dmg --title "ZV-E10 Viewer X.Y.Z" --notes-file <файл>`.
 
-Сборка только под Apple Silicon (arm64). Подписи разработчика и нотаризации нет: программа подписана ad-hoc, установка описана в [README](../README.md#установка).
+Сборка только под Apple Silicon (arm64). Подписи разработчика и нотаризации нет: программа подписана ad-hoc, установка описана в [README](../README.md#установка-на-mac).
 
 ## Утилита zv-probe
 
