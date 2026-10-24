@@ -2,6 +2,8 @@
 
 Лёгкая программа для macOS: живое видео с камеры Sony ZV-E10 по USB и управление её настройками с компьютера. Замена Imaging Edge Desktop (Remote) без лишнего: открыл — сразу картинка, основные настройки в один клик.
 
+**Документация:** [руководство пользователя](docs/user-guide.md) · [протокол камеры](docs/protocol.md) · [устройство кода](docs/architecture.md) · [API автоматизации](docs/automation-api.md)
+
 ![Главный экран](docs/screenshots/1-main.png)
 
 ## Что умеет
