@@ -4,3 +4,4 @@ build/
 .playwright-mcp/
 .DS_Store
 spike/ptp-probe/.build/
+spike/ptp-probe/out/
