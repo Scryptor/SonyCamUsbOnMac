@@ -35,6 +35,7 @@ final class FakeCamera: PTPTransport, @unchecked Sendable {
     private var _applyWrites = true
     private var _liveViewReplies: [PTPReply] = []
     private var _disconnectOnNext: UInt16?
+    private var _busyOnNextPress: UInt16?
     private var _capturedFiles: [(String, Data)] = []
     private var memory: [(String, Data)] = []
 
@@ -65,6 +66,11 @@ final class FakeCamera: PTPTransport, @unchecked Sendable {
     var disconnectOnNext: UInt16? {
         get { locked { _disconnectOnNext } }
         set { locked { _disconnectOnNext = newValue } }
+    }
+    /// Следующее нажатие этой кнопки (0x9207, значение 2) камера отклонит с DeviceBusy.
+    var busyOnNextPress: UInt16? {
+        get { locked { _busyOnNextPress } }
+        set { locked { _busyOnNextPress = newValue } }
     }
 
     func emit(_ event: PTPEvent) { eventContinuation.yield(event) }
@@ -104,6 +110,10 @@ final class FakeCamera: PTPTransport, @unchecked Sendable {
                 }
                 return PTPReply(code: ok)
             case SonyOp.controlDevice:
+                if let busy = _busyOnNextPress, params.first == UInt32(busy), outData == Data([0x02, 0x00]) {
+                    _busyOnNextPress = nil
+                    return PTPReply(code: PTPResponseCode.deviceBusy)
+                }
                 // отпускание кнопки записи переключает состояние записи
                 if params.first == UInt32(SonyProp.movieRecButton), outData == Data([0x01, 0x00]),
                    let i = props.firstIndex(where: { $0.code == SonyProp.movieRecordingState }) {

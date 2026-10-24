@@ -46,6 +46,19 @@ private func photoCamera() -> FakeCamera {
     #expect(presses.map(\.outData) == [Data([2, 0]), Data([2, 0]), Data([1, 0]), Data([1, 0])])
 }
 
+@Test func captureReleasesButtonsWhenShutterFails() async throws {
+    let cam = photoCamera()
+    cam.busyOnNextPress = SonyProp.shutterFullPress
+    let s = try await readySession(cam)
+    await #expect(throws: SessionError.operationFailed(operation: SonyOp.controlDevice, code: PTPResponseCode.deviceBusy)) {
+        try await s.capturePhoto(download: true)
+    }
+    // полунажатие не должно остаться висеть: оба спуска отпущены
+    let presses = cam.sent.filter { $0.op == 0x9207 }
+    #expect(presses.map { $0.params[0] } == [0xD2C1, 0xD2C2, 0xD2C2, 0xD2C1])
+    #expect(presses.map(\.outData) == [Data([2, 0]), Data([2, 0]), Data([1, 0]), Data([1, 0])])
+}
+
 @Test func captureWithoutDownloadOnlyPressesShutter() async throws {
     let cam = photoCamera()
     cam.capturedFiles = [("DSC00002.JPG", Data([0xFF, 0xD8]))]

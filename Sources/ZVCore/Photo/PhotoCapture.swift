@@ -21,13 +21,20 @@ extension CameraSession {
         let release = PTPValue.encode(1, type: PTPType.uint16)
 
         try await call(SonyOp.controlDevice, half, outData: press)
-        if properties[SonyProp.focusMode]?.current.intValue != 1 {
-            // в автофокусе даём камере до секунды навестись (FocusFound 2 или 3 — готово)
-            _ = try await waitFor(SonyProp.focusFound, timeout: .seconds(1)) { $0 == 2 || $0 == 3 }
+        do {
+            if properties[SonyProp.focusMode]?.current.intValue != 1 {
+                // в автофокусе даём камере до секунды навестись (FocusFound 2 или 3 — готово)
+                _ = try await waitFor(SonyProp.focusFound, timeout: .seconds(1)) { $0 == 2 || $0 == 3 }
+            }
+            try await call(SonyOp.controlDevice, full, outData: press)
+            try await call(SonyOp.controlDevice, full, outData: release)
+            try await call(SonyOp.controlDevice, half, outData: release)
+        } catch {
+            // спуск не должен остаться нажатым: отпускаем обе кнопки, ошибки отпускания уже не важны
+            _ = try? await call(SonyOp.controlDevice, full, outData: release)
+            _ = try? await call(SonyOp.controlDevice, half, outData: release)
+            throw error
         }
-        try await call(SonyOp.controlDevice, full, outData: press)
-        try await call(SonyOp.controlDevice, full, outData: release)
-        try await call(SonyOp.controlDevice, half, outData: release)
         guard download else { return [] }
 
         var files: [CapturedObject] = []
