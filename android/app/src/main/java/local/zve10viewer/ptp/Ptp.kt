@@ -166,8 +166,11 @@ class TransportException(message: String, val disconnected: Boolean = false) : E
 
 /** Канал до камеры: отправка PTP-операций и поток событий от камеры. */
 interface PtpTransport {
-    /** outData — только само значение, без контейнера: транспорт оборачивает его сам. */
-    fun send(operation: Int, params: List<Long> = emptyList(), outData: ByteArray? = null): PtpReply
+    /**
+     * outData — только само значение, без контейнера: транспорт оборачивает его сам.
+     * timeoutMs — сколько ждать ответа; null — сколько принято у транспорта.
+     */
+    fun send(operation: Int, params: List<Long> = emptyList(), outData: ByteArray? = null, timeoutMs: Int? = null): PtpReply
     val events: kotlinx.coroutines.flow.Flow<PtpEvent>
     fun close()
 }

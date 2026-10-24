@@ -172,7 +172,7 @@ class FakeCamera : PtpTransport {
 
     private fun prop(code: Int) = props.firstOrNull { it.code == code }
 
-    override fun send(operation: Int, params: List<Long>, outData: ByteArray?): PtpReply {
+    override fun send(operation: Int, params: List<Long>, outData: ByteArray?, timeoutMs: Int?): PtpReply {
         sent += Triple(operation, params, outData)
         val ok = PtpResponseCode.OK
         return when (operation) {

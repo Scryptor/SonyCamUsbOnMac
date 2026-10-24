@@ -12,13 +12,15 @@ android {
         applicationId = "local.zve10viewer"
         minSdk = 29
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 3
+        versionName = "0.1.2"
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
+            // ключ отладки этого Mac: релизная сборка ставится поверх отладочной без удаления и потери настроек
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
     compileOptions {

@@ -9,6 +9,7 @@ import local.zve10viewer.ptp.PtpReply
 import local.zve10viewer.ptp.PtpResponseCode
 import local.zve10viewer.ptp.PtpTransport
 import local.zve10viewer.ptp.PtpValue
+import local.zve10viewer.ptp.TransportException
 import local.zve10viewer.session.CameraSession
 import local.zve10viewer.session.SessionException
 import local.zve10viewer.session.SessionTiming
@@ -154,6 +155,16 @@ class CoreTest {
         session.close()
     }
 
+    @Test fun silentCameraGetsOpenSessionAgain() = runTest {
+        // после перезапуска программы камера какое-то время молчит на первую команду
+        val camera = FakeTransport(silentOpenSessions = 2)
+        val session = CameraSession(camera, SessionTiming(settleMs = 1, pollMs = 1))
+        session.start(this)
+        assertEquals(3, camera.sent.count { it.first == SonyOp.OPEN_SESSION })
+        assertEquals("ZV-E10", session.deviceInfo?.model)
+        session.close()
+    }
+
     @Test fun cameraOutsidePcRemoteIsReported() = runTest {
         val camera = FakeTransport(deviceInfo = fixture("deviceinfo").also { stripSonyOps(it) })
         val session = CameraSession(camera, SessionTiming(settleMs = 1, pollMs = 1))
@@ -180,12 +191,19 @@ class CoreTest {
 }
 
 /** Камера-заглушка: отвечает дампами настоящей камеры и записывает, что ей отправили. */
-private class FakeTransport(private val deviceInfo: ByteArray = fixture("deviceinfo")) : PtpTransport {
+private class FakeTransport(
+    private val deviceInfo: ByteArray = fixture("deviceinfo"),
+    private var silentOpenSessions: Int = 0,
+) : PtpTransport {
     val sent = mutableListOf<Triple<Int, List<Long>, ByteArray?>>()
     override val events: Flow<PtpEvent> = emptyFlow()
 
-    override fun send(operation: Int, params: List<Long>, outData: ByteArray?): PtpReply {
+    override fun send(operation: Int, params: List<Long>, outData: ByteArray?, timeoutMs: Int?): PtpReply {
         sent += Triple(operation, params, outData)
+        if (operation == SonyOp.OPEN_SESSION && silentOpenSessions > 0) {
+            silentOpenSessions--
+            throw TransportException("камера не ответила")
+        }
         val ok = PtpResponseCode.OK
         return when (operation) {
             SonyOp.GET_DEVICE_INFO -> PtpReply(ok, data = deviceInfo)

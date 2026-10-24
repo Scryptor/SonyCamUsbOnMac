@@ -72,7 +72,19 @@ class CameraSession(private val transport: PtpTransport, private val timing: Ses
     suspend fun start(scope: CoroutineScope) {
         // на Mac сессию PTP открывал ImageCaptureCore, здесь — сами, и первой командой:
         // внутри сессии у каждой команды свой номер транзакции, и чужие ответы легко отсеять
-        val open = raw(SonyOp.OPEN_SESSION, listOf(1L))
+        // после перезапуска программы камера какое-то время молчит: ждём недолго и повторяем,
+        // а не держим пользователя на полном тайм-ауте
+        var open: PtpReply? = null
+        for (attempt in 1..4) {
+            open = try {
+                raw(SonyOp.OPEN_SESSION, listOf(1L), timeoutMs = 1500)
+            } catch (e: TransportException) {
+                if (e.disconnected || attempt == 4) throw e
+                null
+            }
+            if (open != null) break
+        }
+        open!!
         if (open.code != PtpResponseCode.OK && open.code != PtpResponseCode.SESSION_ALREADY_OPEN) {
             throw SessionException.OperationFailed(SonyOp.OPEN_SESSION, open.code)
         }
@@ -240,10 +252,10 @@ class CameraSession(private val transport: PtpTransport, private val timing: Ses
     }
 
     /** Отправка без проверки кода ответа; разрыв связи закрывает сеанс. */
-    private suspend fun raw(operation: Int, params: List<Long> = emptyList(), outData: ByteArray? = null): PtpReply =
+    private suspend fun raw(operation: Int, params: List<Long> = emptyList(), outData: ByteArray? = null, timeoutMs: Int? = null): PtpReply =
         withContext(Dispatchers.IO) {
             try {
-                transport.send(operation, params, outData)
+                transport.send(operation, params, outData, timeoutMs)
             } catch (e: TransportException) {
                 if (e.disconnected) close()
                 throw e

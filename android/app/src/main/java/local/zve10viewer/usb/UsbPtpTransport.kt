@@ -26,7 +26,7 @@ import kotlin.concurrent.thread
 class UsbPtpTransport(
     private val connection: UsbDeviceConnection,
     private val usbInterface: UsbInterface,
-    private val timeoutMs: Int = 8000,
+    private val defaultTimeoutMs: Int = 8000,
 ) : PtpTransport {
     private val bulkIn: UsbEndpoint
     private val bulkOut: UsbEndpoint
@@ -71,11 +71,15 @@ class UsbPtpTransport(
         }
         // Get Device Status (0x67): после сброса камера какое-то время отвечает «занята»
         val status = ByteArray(32)
+        val started = System.currentTimeMillis()
+        var code = -1
         for (attempt in 0 until 20) {
             val n = connection.controlTransfer(0xA1, 0x67, 0, usbInterface.id, status, status.size, 500)
-            if (n >= 4 && le16(status, 2) == 0x2001) break
+            code = if (n >= 4) le16(status, 2) else -1
+            if (code == 0x2001) break
             Thread.sleep(100)
         }
+        Log.i(TAG, "сброс: состояние камеры 0x%04X через %d мс".format(code, System.currentTimeMillis() - started))
         // остатки старых ответов: читаем, пока два раза подряд ничего не придёт
         var quiet = 0
         repeat(64) {
@@ -88,15 +92,16 @@ class UsbPtpTransport(
     }
 
     @Synchronized
-    override fun send(operation: Int, params: List<Long>, outData: ByteArray?): PtpReply {
+    override fun send(operation: Int, params: List<Long>, outData: ByteArray?, timeoutMs: Int?): PtpReply {
         if (closed) throw TransportException("связь закрыта", disconnected = true)
+        val timeout = timeoutMs ?: defaultTimeoutMs
         // вне сессии (GetDeviceInfo, OpenSession) transaction id — 0, внутри — по порядку с 1
         val transactionId = if (sessionOpen) nextTransactionId++ else 0
-        write(PtpContainer.command(operation, transactionId, params))
-        if (outData != null) write(PtpContainer.data(operation, transactionId, outData))
+        write(PtpContainer.command(operation, transactionId, params), timeout)
+        if (outData != null) write(PtpContainer.data(operation, transactionId, outData), timeout)
         var data = ByteArray(0)
         while (true) {
-            val container = readContainer()
+            val container = readContainer(timeout)
             // остатки прошлых обменов (оборванное подключение) отсеиваем по номеру транзакции и коду
             if (container.transactionId != transactionId ||
                 (container.type == PtpContainer.DATA && container.code != operation)) {
@@ -127,7 +132,7 @@ class UsbPtpTransport(
         eventChannel.close()
     }
 
-    private fun write(bytes: ByteArray) {
+    private fun write(bytes: ByteArray, timeoutMs: Int) {
         var offset = 0
         while (offset < bytes.size) {
             val n = connection.bulkTransfer(bulkOut, bytes, offset, bytes.size - offset, timeoutMs)
@@ -142,7 +147,7 @@ class UsbPtpTransport(
     }
 
     /** Читает один контейнер целиком: первый пакет несёт длину, остальное дочитывается кусками. */
-    private fun readContainer(): Container {
+    private fun readContainer(timeoutMs: Int): Container {
         var n: Int
         var empty = 0
         while (true) {

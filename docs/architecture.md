@@ -10,6 +10,7 @@
 - [Утилита zv-probe](#утилита-zv-probe)
 - [Соглашения](#соглашения)
 - [Частые доработки](#частые-доработки)
+- [Приложение для Android](#приложение-для-android)
 
 ## Общая схема
 
@@ -263,3 +264,39 @@ swift run zv-probe rec                       # начать запись и че
 Подробности — в [Протоколе камеры](protocol.md#другие-камеры-sony).
 
 **Новая команда API.** Случай в `AutomationAction` с разбором из JSON и тестом в `AutomationTests`, выполнение — в `AutomationServer.perform`, описание — в [API автоматизации](automation-api.md).
+
+## Приложение для Android
+
+Папка `android/` — отдельный Gradle-проект: Kotlin, Jetpack Compose, minSdk 29, без сторонних библиотек кроме AndroidX. Логика та же, что в `ZVCore`, перенесена один в один, — те же имена настроек, подписи, пресеты, тайминги.
+
+| Папка `app/src/main/java/local/zve10viewer/` | Что внутри | Аналог на Mac |
+|---|---|---|
+| `ptp/` | `ByteReader`, `PtpValue`, контейнеры PTP, `PtpTransport` | `ZVCore/PTP` |
+| `sony/` | коды Sony, `DeviceInfo`, свойства из `0x9209`, кадр превью, `ObjectInfo` | `ZVCore/Sony` |
+| `session/` | `CameraSession` на корутинах | `ZVCore/Session` |
+| `settings/` | настройки, подписи, раскладка Fn, пресеты, `WriteCoalescer`, имена файлов, гистограмма | `ZVCore/Settings`, `Presets`, `Photo` |
+| `usb/` | `UsbPtpTransport` — PTP поверх Android USB host | `ZVCamera` |
+| `CameraController`, `Storage` | состояние программы, настройки, сохранение в MediaStore | `ZVViewer/CameraController`, `Prefs` |
+| `ui/` | экраны на Compose | `ZVViewer` |
+
+Тесты — `app/src/test`: 21 тест на JVM на тех же дампах камеры, плюс `FakeCamera`, которая хранит свойства и применяет записи.
+
+```bash
+cd android
+export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home   # если JDK 17 не по умолчанию
+./gradlew :app:testDebugUnitTest :app:assembleDebug
+scripts/adb_install.py <устройство> app/build/outputs/apk/debug/app-debug.apk
+```
+
+Вспомогательные скрипты в `android/scripts`:
+
+- `adb_install.py` — ставит APK и сам нажимает подтверждение установки HyperOS/MIUI;
+- `adb_tap.py` — ждёт на экране кнопку с нужной надписью и нажимает её;
+- `adb_ui.py` — тексты на экране программы с координатами.
+
+Так программу можно проверять на планшете без рук: Compose отдаёт тексты системе специальных возможностей, и `uiautomator` их видит. Автоскрытие элементов (3 с) мешает таким проверкам — на время проверки его удобно выключить в настройках.
+
+Релизная сборка подписывается ключом отладки (`~/.android/debug.keystore`): так она ставится поверх отладочной без потери настроек. Для настоящего публичного выпуска стоит завести отдельный ключ и хранить его.
+
+Чем подключение по USB на Android отличается от ImageCaptureCore на Mac — в [Протоколе камеры](protocol.md#usb-напрямую-android).
+
