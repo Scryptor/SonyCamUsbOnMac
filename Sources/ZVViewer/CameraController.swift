@@ -60,6 +60,7 @@ final class CameraController {
 
     @ObservationIgnored private var reviewTask: Task<Void, Never>?
     @ObservationIgnored private var temperatureTask: Task<Void, Never>?
+    @ObservationIgnored private var recordingModeTask: Task<Void, Never>?
 
     /// Последний кадр как пришёл с камеры (для API автоматизации).
     @ObservationIgnored private(set) var lastJPEG: Data?
@@ -150,7 +151,74 @@ final class CameraController {
         case .whiteBalance: return ValueFormatter.whiteBalanceLabel(whiteBalance: whiteBalance, colorTemperature: kelvin)
         case .colorTemperature:
             return WhiteBalanceTemperature.caption(WhiteBalanceTemperature.reading(whiteBalance: whiteBalance, colorTemperature: kelvin))
+        case .movieRecordingSetting:
+            return RecordingModes.label(format: property(.movieFileFormat)?.current.intValue,
+                                        setting: property(.movieRecordingSetting)?.current.intValue)
         default: return ValueFormatter.label(id, property(id))
+        }
+    }
+
+    // MARK: - Лента значений
+
+    /// Режимы записи обоих форматов — «4K 25p 100M», «HD 100p 100M»…
+    var recordingModes: [RecordingMode] {
+        guard let format = property(.movieFileFormat), let setting = property(.movieRecordingSetting) else { return [] }
+        let formats = SettingOptions.options(.movieFileFormat, format).map(\.value)
+        return RecordingModes.options(formats: formats.isEmpty ? format.current.intValue.map { [$0] } ?? [] : formats,
+                                      format: format.current.intValue,
+                                      allowed: SettingOptions.options(.movieRecordingSetting, setting).map(\.value))
+    }
+
+    /// Значения для ленты. У параметров записи — режимы обоих форматов (значение — `RecordingMode.code`).
+    func stripOptions(_ id: SettingID) -> [SettingOption] {
+        if id == .movieRecordingSetting { return recordingModes.map { SettingOption(value: $0.code, label: $0.label) } }
+        return property(id).map { SettingOptions.options(id, $0) } ?? []
+    }
+
+    /// Текущее значение в ленте — в той же кодировке, что `stripOptions`.
+    func stripCurrent(_ id: SettingID) -> Int64? {
+        guard id == .movieRecordingSetting else { return property(id)?.current.intValue }
+        guard let format = property(.movieFileFormat)?.current.intValue,
+              let setting = property(.movieRecordingSetting)?.current.intValue else { return nil }
+        return RecordingMode(format: format, setting: setting).code
+    }
+
+    /// Выбор в ленте: обычная настройка — запись значения, режим записи — формат и параметры вместе.
+    func choose(_ id: SettingID, _ value: Int64) {
+        if id == .movieRecordingSetting, value > 0xFF {
+            setRecordingMode(RecordingMode(code: value))
+        } else {
+            request(id, value)
+        }
+    }
+
+    /// Формат и параметры записи. Параметры камера принимает только для текущего формата: если формат другой,
+    /// сначала он, и ждём, пока камера подтвердит его и откроет нужные параметры.
+    func setRecordingMode(_ mode: RecordingMode) {
+        recordingModeTask?.cancel()
+        if property(.movieFileFormat)?.current.intValue == mode.format {
+            request(.movieRecordingSetting, mode.setting)
+            return
+        }
+        guard isWritable(.movieFileFormat) else { return }
+        request(.movieFileFormat, mode.format)
+        pending.insert(.movieRecordingSetting)
+        recordingModeTask = Task { [weak self] in
+            for _ in 0..<50 {
+                try? await Task.sleep(for: .milliseconds(100))
+                guard let self, !Task.isCancelled else { return }
+                guard self.property(.movieFileFormat)?.current.intValue == mode.format,
+                      let setting = self.property(.movieRecordingSetting),
+                      SettingOptions.options(.movieRecordingSetting, setting).contains(where: { $0.value == mode.setting }),
+                      self.isWritable(.movieRecordingSetting) else { continue }
+                if setting.current.intValue == mode.setting {
+                    self.pending.remove(.movieRecordingSetting)
+                } else {
+                    self.request(.movieRecordingSetting, mode.setting)
+                }
+                return
+            }
+            self?.pending.remove(.movieRecordingSetting)
         }
     }
 
@@ -186,6 +254,13 @@ final class CameraController {
     /// Шаг по списку значений (стрелки, колесо): считаем от последнего запроса, а не от подтверждённого значения,
     /// иначе быстрые шаги упирались бы в ожидание камеры.
     func requestStep(_ id: SettingID, offset: Int) {
+        if id == .movieRecordingSetting {
+            let modes = recordingModes
+            guard let current = stripCurrent(id), let index = modes.firstIndex(where: { $0.code == current }) else { return }
+            let target = min(max(index + offset, 0), modes.count - 1)
+            if target != index { setRecordingMode(modes[target]) }
+            return
+        }
         guard let property = property(id),
               let target = SettingOptions.neighbour(id, property, offset: offset, from: targets[id.code]) else { return }
         request(id, target)

@@ -88,10 +88,13 @@ object SettingCatalog {
     val fnTopRow: List<FnSlot> = listOf(SettingID.shutter, SettingID.aperture, SettingID.iso, SettingID.whiteBalance,
         SettingID.exposureComp, SettingID.focusMode).map { FnSlot.Setting(it) }
 
-    /** В фоторежиме видео-настройки (профиль, стиль) уступают место формату и соотношению сторон снимка. */
+    /**
+     * В фоторежиме видео-настройки (профиль, стиль) уступают место формату и соотношению сторон снимка.
+     * В видеорежиме вместо DRO — режим записи (формат, частота, битрейт одним выбором); DRO — во «Всех настройках».
+     */
     fun fnBottomRow(mode: CaptureMode): List<FnSlot> = when (mode) {
         CaptureMode.video -> listOf(SettingID.focusArea, SettingID.metering, SettingID.pictureProfile,
-            SettingID.creativeStyle, SettingID.dro).map { FnSlot.Setting(it) } + FnSlot.AllSettings
+            SettingID.creativeStyle, SettingID.movieRecordingSetting).map { FnSlot.Setting(it) } + FnSlot.AllSettings
         CaptureMode.photo -> listOf(SettingID.focusArea, SettingID.metering, SettingID.dro,
             SettingID.fileFormat, SettingID.aspectRatio).map { FnSlot.Setting(it) } + FnSlot.AllSettings
     }
@@ -99,8 +102,9 @@ object SettingCatalog {
     private val infoLine = listOf(SettingID.shutter, SettingID.aperture, SettingID.iso, SettingID.whiteBalance,
         SettingID.exposureComp, SettingID.focusMode)
 
+    /** В конце строки значений — формат снимка в фоторежиме и режим записи в видеорежиме. */
     fun infoLine(mode: CaptureMode): List<SettingID> =
-        if (mode == CaptureMode.photo) infoLine + SettingID.fileFormat else infoLine
+        infoLine + if (mode == CaptureMode.photo) SettingID.fileFormat else SettingID.movieRecordingSetting
 }
 
 data class SettingOption(val value: Long, val label: String)

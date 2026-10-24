@@ -132,7 +132,7 @@ final class AutomationServer {
             controller.setColorTemperature(value)
         case let .request(id, value):
             guard controller.isWritable(id) else { return "\(id.rawValue) is not writable now" }
-            controller.request(id, value)
+            controller.choose(id, value)
         case let .openAllSettings(group): screen.openAllSettings(group)
         case let .editRow(id): screen.editing = id
         case .toggleHistogram: screen.toggleHistogram()
@@ -232,9 +232,11 @@ final class AutomationServer {
                 "pending": controller.pending.contains(id),
             ]
             if let value = property?.current.intValue { item["value"] = value }
-            if let property {
-                item["options"] = SettingOptions.options(id, property).map { ["value": $0.value, "label": $0.label] }
+            if property != nil {
+                // у параметров записи — режимы обоих форматов, value — код режима (формат × 256 + параметры)
+                item["options"] = controller.stripOptions(id).map { ["value": $0.value, "label": $0.label] }
             }
+            if id == .movieRecordingSetting, let mode = controller.stripCurrent(id) { item["mode"] = mode }
             return item
         }
         var ui: [String: Any] = [

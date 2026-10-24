@@ -3,6 +3,11 @@ import Foundation
 public struct SettingOption: Equatable, Sendable {
     public let value: Int64
     public let label: String
+
+    public init(value: Int64, label: String) {
+        self.value = value
+        self.label = label
+    }
 }
 
 public enum SettingOptions {

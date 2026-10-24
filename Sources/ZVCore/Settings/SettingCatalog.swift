@@ -11,9 +11,10 @@ public enum SettingCatalog {
         .setting(.shutter), .setting(.aperture), .setting(.iso),
         .setting(.whiteBalance), .setting(.exposureComp), .setting(.focusMode),
     ]
+    /// Видеорежим: вместо DRO — режим записи (формат, частота, битрейт одним выбором); DRO — во «Всех настройках».
     public static let fnBottomRow: [FnSlot] = [
         .setting(.focusArea), .setting(.metering), .setting(.pictureProfile),
-        .setting(.creativeStyle), .setting(.dro), .allSettings,
+        .setting(.creativeStyle), .setting(.movieRecordingSetting), .allSettings,
     ]
     public static let infoLine: [SettingID] = [.shutter, .aperture, .iso, .whiteBalance, .exposureComp, .focusMode]
 
@@ -26,7 +27,8 @@ public enum SettingCatalog {
         }
     }
 
+    /// В конце строки значений — формат снимка в фоторежиме и режим записи в видеорежиме.
     public static func infoLine(for mode: CaptureMode) -> [SettingID] {
-        mode == .photo ? infoLine + [.fileFormat] : infoLine
+        infoLine + [mode == .photo ? .fileFormat : .movieRecordingSetting]
     }
 }

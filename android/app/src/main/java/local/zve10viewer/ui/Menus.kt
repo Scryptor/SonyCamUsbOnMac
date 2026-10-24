@@ -131,9 +131,8 @@ private fun Tile(controller: CameraController, screen: ScreenState, slot: FnSlot
 /** Лента значений выбранной настройки; у баланса белого рядом — тонкая настройка. */
 @Composable
 fun ValueStrip(controller: CameraController, id: SettingID) {
-    val property = controller.property(id)
-    val options = property?.let { SettingOptions.options(id, it) } ?: emptyList()
-    val current = property?.current?.intValue
+    val options = controller.stripOptions(id)
+    val current = controller.stripCurrent(id)
     Row(
         Modifier.fillMaxWidth().background(Panel, RoundedCornerShape(16.dp)).padding(10.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -153,7 +152,7 @@ fun ValueStrip(controller: CameraController, id: SettingID) {
                     Text(option.label, color = if (isCurrent) Color.Black else Color.White, fontSize = 18.sp,
                         fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal,
                         modifier = Modifier.background(if (isCurrent) Color.White else Color.Transparent, RoundedCornerShape(9.dp))
-                            .clickable { controller.request(id, option.value) }
+                            .clickable { controller.choose(id, option.value) }
                             .padding(horizontal = 16.dp, vertical = 14.dp))
                 }
             }

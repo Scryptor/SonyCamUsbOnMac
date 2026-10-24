@@ -39,6 +39,9 @@ import local.zve10viewer.settings.CaptureMode
 import local.zve10viewer.settings.FileNaming
 import local.zve10viewer.settings.LumaHistogram
 import local.zve10viewer.settings.PresetCatalog
+import local.zve10viewer.settings.RecordingMode
+import local.zve10viewer.settings.RecordingModes
+import local.zve10viewer.settings.SettingOption
 import local.zve10viewer.settings.SettingID
 import local.zve10viewer.settings.SettingOptions
 import local.zve10viewer.settings.ValueFormatter
@@ -159,6 +162,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
     private val jobs = mutableListOf<Job>()
     private var reviewJob: Job? = null
     private var temperatureJob: Job? = null
+    private var recordingModeJob: Job? = null
     private var statusJob: Job? = null
     private val frameTimes = ArrayDeque<Long>()
     private var lastFrameAt = 0L
@@ -190,7 +194,67 @@ class CameraController(private val context: Context, private val scope: Coroutin
         return when (id) {
             SettingID.whiteBalance -> ValueFormatter.whiteBalanceLabel(whiteBalance, kelvin)
             SettingID.colorTemperature -> WhiteBalanceTemperature.caption(WhiteBalanceTemperature.reading(whiteBalance, kelvin))
+            SettingID.movieRecordingSetting -> RecordingModes.label(property(SettingID.movieFileFormat)?.current?.intValue,
+                property(SettingID.movieRecordingSetting)?.current?.intValue)
             else -> ValueFormatter.label(id, property(id))
+        }
+    }
+
+    /** Режимы записи обоих форматов — «4K 25p 100M», «HD 100p 100M»… */
+    val recordingModes: List<RecordingMode>
+        get() {
+            val format = property(SettingID.movieFileFormat) ?: return emptyList()
+            val setting = property(SettingID.movieRecordingSetting) ?: return emptyList()
+            val formats = SettingOptions.options(SettingID.movieFileFormat, format).map { it.value }
+            return RecordingModes.options(formats.ifEmpty { listOfNotNull(format.current.intValue) }, format.current.intValue,
+                SettingOptions.options(SettingID.movieRecordingSetting, setting).map { it.value })
+        }
+
+    /** Значения для ленты. У параметров записи — режимы обоих форматов (значение — `RecordingMode.code`). */
+    fun stripOptions(id: SettingID): List<SettingOption> =
+        if (id == SettingID.movieRecordingSetting) recordingModes.map { SettingOption(it.code, it.label) }
+        else property(id)?.let { SettingOptions.options(id, it) } ?: emptyList()
+
+    /** Текущее значение в ленте — в той же кодировке, что `stripOptions`. */
+    fun stripCurrent(id: SettingID): Long? {
+        if (id != SettingID.movieRecordingSetting) return property(id)?.current?.intValue
+        val format = property(SettingID.movieFileFormat)?.current?.intValue ?: return null
+        val setting = property(SettingID.movieRecordingSetting)?.current?.intValue ?: return null
+        return RecordingMode(format, setting).code
+    }
+
+    /** Выбор в ленте: обычная настройка — запись значения, режим записи — формат и параметры вместе. */
+    fun choose(id: SettingID, value: Long) {
+        if (id == SettingID.movieRecordingSetting && value > 0xFF) setRecordingMode(RecordingMode.of(value)) else request(id, value)
+    }
+
+    /**
+     * Формат и параметры записи. Параметры камера принимает только для текущего формата: если формат другой,
+     * сначала он, и ждём, пока камера подтвердит его и откроет нужные параметры.
+     */
+    fun setRecordingMode(mode: RecordingMode) {
+        recordingModeJob?.cancel()
+        if (property(SettingID.movieFileFormat)?.current?.intValue == mode.format) {
+            request(SettingID.movieRecordingSetting, mode.setting)
+            return
+        }
+        if (!isWritable(SettingID.movieFileFormat)) return
+        request(SettingID.movieFileFormat, mode.format)
+        pending = pending + SettingID.movieRecordingSetting
+        recordingModeJob = scope.launch {
+            repeat(50) {
+                delay(100)
+                val setting = property(SettingID.movieRecordingSetting)
+                val ready = property(SettingID.movieFileFormat)?.current?.intValue == mode.format && setting != null &&
+                    SettingOptions.options(SettingID.movieRecordingSetting, setting).any { it.value == mode.setting } &&
+                    isWritable(SettingID.movieRecordingSetting)
+                if (ready) {
+                    if (setting?.current?.intValue == mode.setting) pending = pending - SettingID.movieRecordingSetting
+                    else request(SettingID.movieRecordingSetting, mode.setting)
+                    return@launch
+                }
+            }
+            pending = pending - SettingID.movieRecordingSetting
         }
     }
 
@@ -227,6 +291,14 @@ class CameraController(private val context: Context, private val scope: Coroutin
 
     /** Шаг по списку значений: считаем от последнего запроса, иначе быстрые шаги упирались бы в ожидание камеры. */
     fun requestStep(id: SettingID, offset: Int) {
+        if (id == SettingID.movieRecordingSetting) {
+            val modes = recordingModes
+            val index = modes.indexOfFirst { it.code == stripCurrent(id) }
+            if (index < 0) return
+            val target = (index + offset).coerceIn(0, modes.size - 1)
+            if (target != index) setRecordingMode(modes[target])
+            return
+        }
         val property = property(id) ?: return
         val target = SettingOptions.neighbour(property, offset, targets[id.code]) ?: return
         request(id, target)

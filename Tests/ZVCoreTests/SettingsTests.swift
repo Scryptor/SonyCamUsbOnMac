@@ -108,8 +108,9 @@ private func props() throws -> [UInt16: SonyProperty] {
 @Test func catalogLayout() {
     #expect(SettingCatalog.fnTopRow == [.setting(.shutter), .setting(.aperture), .setting(.iso),
                                         .setting(.whiteBalance), .setting(.exposureComp), .setting(.focusMode)])
+    // в видеорежиме — режим записи (формат, частота, битрейт) вместо DRO: DRO остаётся во «Всех настройках»
     #expect(SettingCatalog.fnBottomRow == [.setting(.focusArea), .setting(.metering), .setting(.pictureProfile),
-                                           .setting(.creativeStyle), .setting(.dro), .allSettings])
+                                           .setting(.creativeStyle), .setting(.movieRecordingSetting), .allSettings])
     #expect(SettingCatalog.infoLine == [.shutter, .aperture, .iso, .whiteBalance, .exposureComp, .focusMode])
     #expect(SettingGroup.allCases.map(\.title) == ["Экспозиция", "Фокус", "Цвет и картинка", "Видео", "Фото", "Камера"])
     #expect(SettingID.allCases.allSatisfy { id in SettingGroup.allCases.filter { $0.settings.contains(id) }.count == 1 })

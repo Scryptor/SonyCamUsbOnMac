@@ -96,7 +96,8 @@ open "/Applications/ZV-E10 Viewer.app" --args --automation
 | `value` | значение в кодировке камеры (число); нет поля, если камера его не отдала |
 | `writable` | можно ли менять прямо сейчас |
 | `pending` | запрошено новое значение, камера его ещё не подтвердила |
-| `options` | допустимые значения: `[{"value": …, "label": …}]`; пустой список, если менять нельзя |
+| `options` | допустимые значения: `[{"value": …, "label": …}]`; пустой список, если менять нельзя. У `movieRecordingSetting` — режимы записи обоих форматов («4K 25p 100M», «HD 100p 100M»…), `value` — код режима: формат × 256 + параметры |
+| `mode` | только у `movieRecordingSetting`: код текущего режима записи в той же кодировке |
 
 Идентификаторы настроек: `exposureProgram`, `shutter`, `aperture`, `iso`, `exposureComp`, `metering`, `dro`, `focusMode`, `focusArea`, `whiteBalance`, `colorTemperature`, `wbShiftAB`, `wbShiftGM`, `creativeStyle`, `pictureProfile`, `movieFileFormat`, `movieRecordingSetting`, `imageSize`, `aspectRatio`, `fileFormat`, `jpegQuality`, `battery`, `cardRemaining`, `overheat`.
 
@@ -128,7 +129,7 @@ open "/Applications/ZV-E10 Viewer.app" --args --automation
 
 | Команда | Параметры | Что делает |
 |---|---|---|
-| `request` | `setting`, `value` (число) | поставить значение; 409, если настройку сейчас нельзя менять. Значение должно быть из `options`, иначе камера его не получит. `colorTemperature` работает как ползунок: вне режима «Цвет. темп.» камера сначала переключается в него |
+| `request` | `setting`, `value` (число) | поставить значение; 409, если настройку сейчас нельзя менять. Значение должно быть из `options`, иначе камера его не получит. `colorTemperature` работает как ползунок: вне режима «Цвет. темп.» камера сначала переключается в него. `movieRecordingSetting` с кодом режима из `options` сам переключит формат видео, если нужно |
 | `step` | `offset` (число, например 1 или −1) | сдвинуть выбранную в меню Fn настройку на соседнее значение |
 | `switchMode` | `mode`: `"photo"` или `"video"` | переключить камеру в фото или видео с той же буквой режима; 409, если режим сейчас менять нельзя |
 

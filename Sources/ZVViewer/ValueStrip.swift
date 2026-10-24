@@ -7,9 +7,8 @@ struct ValueStrip: View {
     let controller: CameraController
 
     var body: some View {
-        let property = controller.property(id)
-        let options = property.map { SettingOptions.options(id, $0) } ?? []
-        let current = property?.current.intValue
+        let options = controller.stripOptions(id)
+        let current = controller.stripCurrent(id)
         HStack(spacing: 16) {
             if options.isEmpty {
                 Text("Камера сейчас не даёт менять «\(id.title)»")
@@ -20,7 +19,7 @@ struct ValueStrip: View {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 4) {
                             ForEach(options, id: \.value) { option in
-                                Button(option.label) { controller.request(id, option.value) }
+                                Button(option.label) { controller.choose(id, option.value) }
                                     .buttonStyle(.plain)
                                     .font(.body.monospacedDigit().weight(option.value == current ? .bold : .regular))
                                     .padding(.horizontal, 10)

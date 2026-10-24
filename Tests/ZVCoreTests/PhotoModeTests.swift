@@ -103,5 +103,6 @@ private func photoCamera() -> FakeCamera {
                                                         .setting(.fileFormat), .setting(.aspectRatio), .allSettings])
     #expect(SettingCatalog.fnBottomRow(for: .video) == SettingCatalog.fnBottomRow)
     #expect(SettingCatalog.infoLine(for: .photo) == SettingCatalog.infoLine + [.fileFormat])
-    #expect(SettingCatalog.infoLine(for: .video) == SettingCatalog.infoLine)
+    // в видеорежиме в строке значений — режим записи, как формат снимка в фоторежиме
+    #expect(SettingCatalog.infoLine(for: .video) == SettingCatalog.infoLine + [.movieRecordingSetting])
 }
