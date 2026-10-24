@@ -108,9 +108,9 @@ public actor CameraSession {
     }
 
     /// Перечитывает свойства, пока условие не выполнится или не выйдет время подтверждения.
-    private func waitFor(_ code: UInt16, until done: (Int64?) -> Bool) async throws -> Int64? {
+    func waitFor(_ code: UInt16, timeout: Duration? = nil, until done: (Int64?) -> Bool) async throws -> Int64? {
         let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: timing.confirmTimeout)
+        let deadline = clock.now.advanced(by: timeout ?? timing.confirmTimeout)
         var current = properties[code]?.current.intValue
         while clock.now < deadline {
             try await Task.sleep(for: timing.pollInterval)

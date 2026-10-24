@@ -35,6 +35,8 @@ final class FakeCamera: PTPTransport, @unchecked Sendable {
     private var _applyWrites = true
     private var _liveViewReplies: [PTPReply] = []
     private var _disconnectOnNext: UInt16?
+    private var _capturedFiles: [(String, Data)] = []
+    private var memory: [(String, Data)] = []
 
     init(props: [Prop], deviceInfo: Data? = nil) {
         self.props = props
@@ -54,6 +56,11 @@ final class FakeCamera: PTPTransport, @unchecked Sendable {
     var liveViewReplies: [PTPReply] {
         get { locked { _liveViewReplies } }
         set { locked { _liveViewReplies = newValue } }
+    }
+    /// Что камера «снимет» при следующем нажатии спуска (имя файла и содержимое).
+    var capturedFiles: [(String, Data)] {
+        get { locked { _capturedFiles } }
+        set { locked { _capturedFiles = newValue } }
     }
     var disconnectOnNext: UInt16? {
         get { locked { _disconnectOnNext } }
@@ -102,15 +109,56 @@ final class FakeCamera: PTPTransport, @unchecked Sendable {
                    let i = props.firstIndex(where: { $0.code == SonyProp.movieRecordingState }) {
                     props[i].current = props[i].current == 0 ? 1 : 0
                 }
+                // отпускание спуска — снимок готов в памяти камеры
+                if params.first == UInt32(SonyProp.shutterFullPress), outData == Data([0x01, 0x00]), !_capturedFiles.isEmpty {
+                    memory = _capturedFiles
+                    _capturedFiles = []
+                    setMemoryCount()
+                }
                 return PTPReply(code: ok)
+            case SonyOp.getObjectInfo:
+                if params.first == Sony.capturedObjectHandle, let first = memory.first {
+                    return PTPReply(code: ok, data: Self.objectInfo(filename: first.0, size: first.1.count, format: 0x3801))
+                }
+                return PTPReply(code: PTPResponseCode.invalidObjectHandle)
             case SonyOp.getAllExtPropInfo:
                 return PTPReply(code: ok, data: encodedProps())
             case SonyOp.getObject:
+                if params.first == Sony.capturedObjectHandle {
+                    guard !memory.isEmpty else { return PTPReply(code: PTPResponseCode.invalidObjectHandle) }
+                    let file = memory.removeFirst()
+                    setMemoryCount()
+                    return PTPReply(code: ok, data: file.1)
+                }
                 guard !_liveViewReplies.isEmpty else { return PTPReply(code: PTPResponseCode.accessDenied) }
                 return _liveViewReplies.removeFirst()
             default:
                 return PTPReply(code: 0x2005)
             }
+        }
+    }
+
+    /// ObjectInfo (как ответ GetObjectInfo) с заданным именем, размером и форматом.
+    static func objectInfo(filename: String, size: Int, format: UInt16) -> Data {
+        var d = Data()
+        d.appendLE(UInt32(0x0001_0001))      // StorageID
+        d.appendLE(format)                   // ObjectFormat
+        d.appendLE(UInt16(0))                // ProtectionStatus
+        d.appendLE(UInt32(size))             // ObjectCompressedSize
+        d.appendLE(UInt16(0))                // ThumbFormat
+        for _ in 0..<7 { d.appendLE(UInt32(0)) }  // ThumbCompressedSize … ParentObject
+        d.appendLE(UInt16(0))                // AssociationType
+        d.appendLE(UInt32(0))                // AssociationDesc
+        d.appendLE(UInt32(0))                // SequenceNumber
+        d.append(ptpString(filename))
+        for _ in 0..<3 { d.append(ptpString("")) }  // даты и ключевые слова
+        return d
+    }
+
+    /// 0xD215: больше 0x8000 — в памяти камеры есть снимок по адресу 0xFFFFC001.
+    private func setMemoryCount() {
+        if let i = props.firstIndex(where: { $0.code == SonyProp.objectInMemory }) {
+            props[i].current = memory.isEmpty ? 0 : Int64(0x8000 + memory.count)
         }
     }
 

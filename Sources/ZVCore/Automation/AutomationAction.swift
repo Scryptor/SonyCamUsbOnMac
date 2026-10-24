@@ -17,9 +17,17 @@ public enum AutomationAction: Equatable, Sendable, Decodable {
     case deletePreset(Int)
     /// Запись ролика на карту — только с явным подтверждением.
     case toggleRecording(confirm: Bool)
+    case switchMode(CaptureMode)
+    /// Снимок пишет файл (на карту и/или на Mac) — только с явным подтверждением.
+    case capture(confirm: Bool)
+    case grabFrame
+    case toggleControls
+    case dismissReview
+    case setPreference(String, String)
+    case openShot(Int)
 
     private enum Keys: String, CodingKey {
-        case action, key, setting, offset, value, group, name, index, confirm
+        case action, key, setting, offset, value, group, name, index, confirm, mode
     }
 
     public init(from decoder: Decoder) throws {
@@ -40,6 +48,13 @@ public enum AutomationAction: Equatable, Sendable, Decodable {
         case "renamePreset": self = .renamePreset(try c.decode(Int.self, forKey: .index), try c.decode(String.self, forKey: .name))
         case "deletePreset": self = .deletePreset(try c.decode(Int.self, forKey: .index))
         case "toggleRecording": self = .toggleRecording(confirm: try c.decodeIfPresent(Bool.self, forKey: .confirm) ?? false)
+        case "switchMode": self = .switchMode(try c.decode(CaptureMode.self, forKey: .mode))
+        case "capture": self = .capture(confirm: try c.decodeIfPresent(Bool.self, forKey: .confirm) ?? false)
+        case "grabFrame": self = .grabFrame
+        case "toggleControls": self = .toggleControls
+        case "dismissReview": self = .dismissReview
+        case "setPreference": self = .setPreference(try c.decode(String.self, forKey: .key), try c.decode(String.self, forKey: .value))
+        case "openShot": self = .openShot(try c.decode(Int.self, forKey: .index))
         default:
             throw DecodingError.dataCorruptedError(forKey: .action, in: c, debugDescription: "неизвестная команда \(action)")
         }

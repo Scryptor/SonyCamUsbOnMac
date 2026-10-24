@@ -3,6 +3,7 @@ import Foundation
 /// Коды операций PTP, которые нужны для работы с Sony.
 public enum SonyOp {
     public static let getDeviceInfo: UInt16 = 0x1001
+    public static let getObjectInfo: UInt16 = 0x1008
     public static let getObject: UInt16 = 0x1009
     public static let connect: UInt16 = 0x9201
     public static let getExtDeviceInfo: UInt16 = 0x9202
@@ -25,10 +26,14 @@ public enum SonyProp {
     public static let colorTemp: UInt16 = 0xD20F
     public static let gmShift: UInt16 = 0xD210
     public static let aspectRatio: UInt16 = 0xD211
+    public static let focusFound: UInt16 = 0xD213
+    public static let objectInMemory: UInt16 = 0xD215
     public static let batteryLevel: UInt16 = 0xD218
     public static let abShift: UInt16 = 0xD21C
     public static let movieRecordingState: UInt16 = 0xD21D
     public static let iso: UInt16 = 0xD21E
+    /// Куда сохранять снимок: 0x01 — только компьютер, 0x10 — только карта, 0x11 — оба.
+    public static let stillImageStoreDestination: UInt16 = 0xD222
     public static let focusArea: UInt16 = 0xD22C
     public static let pictureProfile: UInt16 = 0xD23F
     public static let creativeStyle: UInt16 = 0xD240
@@ -39,6 +44,8 @@ public enum SonyProp {
     public static let jpegQuality: UInt16 = 0xD252
     public static let fileFormat: UInt16 = 0xD253
     public static let priorityMode: UInt16 = 0xD25A
+    public static let shutterHalfPress: UInt16 = 0xD2C1
+    public static let shutterFullPress: UInt16 = 0xD2C2
     public static let movieRecButton: UInt16 = 0xD2C8
 }
 
@@ -46,5 +53,7 @@ public enum Sony {
     public static let vendorID = 0x054C
     public static let protocolVersion: UInt32 = 0x12C
     public static let liveViewHandle: UInt32 = 0xFFFF_C002
+    /// Снимок в памяти камеры (когда 0xD215 > 0x8000).
+    public static let capturedObjectHandle: UInt32 = 0xFFFF_C001
     public static let propertyChangedEvent: UInt16 = 0xC203
 }

@@ -36,11 +36,14 @@ public struct SessionTiming: Sendable {
     public var settle: Duration
     public var confirmTimeout: Duration
     public var pollInterval: Duration
+    /// Сколько ждать, пока снимок появится в памяти камеры.
+    public var captureTimeout: Duration
 
-    public init(settle: Duration, confirmTimeout: Duration, pollInterval: Duration) {
+    public init(settle: Duration, confirmTimeout: Duration, pollInterval: Duration, captureTimeout: Duration = .seconds(10)) {
         self.settle = settle
         self.confirmTimeout = confirmTimeout
         self.pollInterval = pollInterval
+        self.captureTimeout = captureTimeout
     }
 
     /// Камере нужно ~3 с после рукопожатия, прежде чем она начнёт применять настройки.
