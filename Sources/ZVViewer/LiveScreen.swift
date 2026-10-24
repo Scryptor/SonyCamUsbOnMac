@@ -14,6 +14,13 @@ struct LiveScreen: View {
                 Image(decorative: frame, scale: 1)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
+                    .opacity(controller.isFrameStale ? 0.45 : 1)
+                if controller.isFrameStale {
+                    Label("Нет картинки с камеры…", systemImage: "exclamationmark.triangle")
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
+                }
             } else {
                 ProgressView().controlSize(.large)
             }

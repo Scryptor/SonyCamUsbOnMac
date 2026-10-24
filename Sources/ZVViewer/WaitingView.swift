@@ -5,6 +5,8 @@ struct WaitingView: View {
     enum Kind { case searching, notPCRemote }
 
     let kind: Kind
+    /// Почему не удалось подключиться (если пробовали).
+    var message: String?
 
     private let cameraSteps = [
         "1. На камере: MENU → Network → Smartphone Connect → Smartphone Connection: Off",
@@ -24,7 +26,7 @@ struct WaitingView: View {
             if kind == .searching {
                 HStack(spacing: 10) {
                     ProgressView().controlSize(.small)
-                    Text("Ищу камеру…").foregroundStyle(.secondary)
+                    Text(message ?? "Ищу камеру…").foregroundStyle(.secondary)
                 }
                 .padding(.top, 8)
             }

@@ -32,7 +32,7 @@ struct RootView: View {
     var body: some View {
         switch controller.phase {
         case .searching:
-            WaitingView(kind: .searching)
+            WaitingView(kind: .searching, message: controller.connectionMessage)
         case .notPCRemote:
             WaitingView(kind: .notPCRemote)
         case .connecting, .settling, .ready:

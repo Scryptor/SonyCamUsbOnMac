@@ -39,8 +39,16 @@ final class CameraController {
     @ObservationIgnored private var targets: [UInt16: Int64] = [:]
     @ObservationIgnored private var tasks: [Task<Void, Never>] = []
     @ObservationIgnored private var frameTimes: [Date] = []
+    @ObservationIgnored private var lastFrameAt: Date?
     @ObservationIgnored private var statusTask: Task<Void, Never>?
     @ObservationIgnored private let presetsKey = "presets"
+    @ObservationIgnored private var tracker = ConnectionTracker<ObjectIdentifier>()
+    @ObservationIgnored private var devices: [ObjectIdentifier: ICCameraDevice] = [:]
+
+    /// Почему сейчас нет связи (показывается на экране ожидания).
+    private(set) var connectionMessage: String?
+    /// Камера на связи, но кадры давно не приходят.
+    private(set) var isFrameStale = false
 
     init() {
         presets = Self.loadPresets(key: presetsKey)
@@ -49,11 +57,16 @@ final class CameraController {
         Task { [weak self] in
             for await event in events {
                 switch event {
-                case let .appeared(device):
-                    self?.connect(device)
-                case let .disappeared(device):
-                    if device === self?.device { self?.disconnect() }
+                case let .appeared(device): self?.handleAppeared(device)
+                case let .disappeared(device): self?.handleDisappeared(device)
                 }
+            }
+        }
+        // fps и «нет кадров» пересчитываются и без новых кадров
+        Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(500))
+                self?.tickFrameStats()
             }
         }
     }
@@ -147,52 +160,108 @@ final class CameraController {
 
     // MARK: - Подключение
 
+    private func handleAppeared(_ device: ICCameraDevice) {
+        let id = ObjectIdentifier(device)
+        devices[id] = device
+        perform(tracker.appeared(id))
+    }
+
+    private func handleDisappeared(_ device: ICCameraDevice) {
+        let id = ObjectIdentifier(device)
+        let action = tracker.disappeared(id)
+        devices[id] = nil
+        perform(action)
+    }
+
+    private func perform(_ action: ConnectionTracker<ObjectIdentifier>.Action) {
+        switch action {
+        case .none:
+            break
+        case let .connect(id):
+            if let device = devices[id] { connect(device) }
+        case let .disconnect(next):
+            teardown()
+            connectionMessage = nil
+            if let next, let device = devices[next] { connect(device) }
+        case let .retry(id, delay):
+            teardown()
+            connectionMessage = "Не удалось подключиться к камере. Повтор через \(delay.components.seconds) с…"
+            tasks.append(Task { [weak self] in
+                try? await Task.sleep(for: delay)
+                guard !Task.isCancelled, let self, self.tracker.current == id, let device = self.devices[id] else { return }
+                self.connect(device)
+            })
+        }
+    }
+
     private func connect(_ device: ICCameraDevice) {
-        guard self.device == nil else { return }
+        let id = ObjectIdentifier(device)
         self.device = device
         phase = .connecting
+        // транспорт становится делегатом устройства ещё до открытия сессии: колбэки ICC идут живому объекту
+        let transport = ICCameraTransport(device: device)
+        let session = CameraSession(transport: transport)
+        self.transport = transport
+        self.session = session
+        coalescer = WriteCoalescer { [weak self] code, value in
+            let result = try? await session.set(code, to: value)
+            await self?.writeFinished(code, value, result)
+        }
         tasks.append(Task { [weak self] in
             do {
                 try await device.openSession()
-                let transport = ICCameraTransport(device: device)
-                let session = CameraSession(transport: transport)
-                guard let self else { return }
-                self.transport = transport
-                self.session = session
-                self.coalescer = WriteCoalescer { [weak self] code, value in
-                    let result = try? await session.set(code, to: value)
-                    await self?.writeFinished(code, value, result)
-                }
                 try await session.start()
+                guard let self, !Task.isCancelled else { return }
                 self.deviceInfo = await session.deviceInfo
                 self.phase = .settling
-                self.startStreams(session)
+                self.startStreams(session, deviceID: id)
                 try await session.waitUntilReady()
+                guard !Task.isCancelled else { return }
                 self.phase = .ready
+                self.connectionMessage = nil
+                self.tracker.connected(id)
+            } catch is CancellationError {
+                return
             } catch SessionError.notPCRemote {
-                guard let self else { return }
-                self.deviceInfo = await self.session?.deviceInfo
+                guard let self, !Task.isCancelled else { return }
+                self.deviceInfo = await session.deviceInfo
                 self.phase = .notPCRemote
             } catch {
-                self?.retry(device)
+                // отменённая попытка (камеру отключили, начали заново) — не повторяем
+                guard let self, !Task.isCancelled else { return }
+                self.perform(self.tracker.failed(id))
             }
         })
     }
 
-    private func startStreams(_ session: CameraSession) {
+    private func startStreams(_ session: CameraSession, deviceID: ObjectIdentifier) {
         tasks.append(Task { [weak self] in
             for await snapshot in session.snapshots {
                 self?.apply(snapshot)
             }
-            // поток закончился — камера отключилась или сеанс оборвался
-            self?.disconnect()
+            // поток закончился сам — сеанс оборвался; если камера ещё на месте, переподключимся с паузой
+            guard let self, !Task.isCancelled else { return }
+            self.perform(self.tracker.failed(deviceID))
         })
         tasks.append(Task.detached(priority: .userInitiated) { [weak self] in
+            var failures = 0
             while !Task.isCancelled {
-                guard let jpeg = try? await session.nextLiveViewFrame() else { break }
-                guard let image = Self.decode(jpeg) else { continue }
-                let bins = Self.histogram(of: image)
-                await self?.show(image, jpeg: jpeg, histogram: bins)
+                do {
+                    let jpeg = try await session.nextLiveViewFrame()
+                    failures = 0
+                    guard let image = Self.decode(jpeg) else { continue }
+                    let bins = Self.histogram(of: image)
+                    guard !Task.isCancelled else { break }
+                    await self?.show(image, jpeg: jpeg, histogram: bins)
+                } catch TransportError.disconnected {
+                    break
+                } catch is CancellationError {
+                    break
+                } catch {
+                    // временный сбой (таймаут, неожиданный ответ) — не бросаем live view, пробуем дальше
+                    failures += 1
+                    try? await Task.sleep(for: .milliseconds(min(100 * failures, 1000)))
+                }
             }
         })
     }
@@ -210,9 +279,18 @@ final class CameraController {
         lastJPEG = jpeg
         self.histogram = histogram
         let now = Date()
+        lastFrameAt = now
         frameTimes.append(now)
+        tickFrameStats()
+    }
+
+    /// fps за последние 2 с и признак «кадры не приходят» (больше 1,5 с).
+    private func tickFrameStats() {
+        let now = Date()
         frameTimes.removeAll { now.timeIntervalSince($0) > 2 }
         fps = Double(frameTimes.count) / 2
+        let live = phase == .settling || phase == .ready
+        isFrameStale = live && frame != nil && (lastFrameAt.map { now.timeIntervalSince($0) > 1.5 } ?? false)
     }
 
     private func writeFinished(_ code: UInt16, _ value: Int64, _ result: SetResult?) {
@@ -225,7 +303,8 @@ final class CameraController {
         if let id = SettingID.allCases.first(where: { $0.code == code }) { pending.remove(id) }
     }
 
-    private func disconnect() {
+    /// Останавливает всё, что связано с текущей камерой, и закрывает сессию.
+    private func teardown() {
         tasks.forEach { $0.cancel() }
         tasks.removeAll()
         let transport = self.transport
@@ -238,22 +317,16 @@ final class CameraController {
         pending = []
         frame = nil
         lastJPEG = nil
+        lastFrameAt = nil
+        frameTimes = []
         histogram = []
         fps = 0
+        isFrameStale = false
         properties = [:]
         deviceInfo = nil
         isRecording = false
         isApplyingPreset = false
         phase = .searching
-    }
-
-    /// Камера на месте, но сеанс не поднялся (например, была занята) — пробуем ещё раз через 2 с.
-    private func retry(_ device: ICCameraDevice) {
-        disconnect()
-        Task { [weak self] in
-            try? await Task.sleep(for: .seconds(2))
-            self?.connect(device)
-        }
     }
 
     nonisolated private static func decode(_ jpeg: Data) -> CGImage? {

@@ -85,7 +85,7 @@ private struct WhiteBalanceFineTune: View {
     @ViewBuilder private var shiftPad: some View {
         let ab = controller.property(.wbShiftAB)
         let gm = controller.property(.wbShiftGM)
-        let size: CGFloat = 64
+        let size: CGFloat = 80
         VStack(spacing: 2) {
             Text("A–B \(ValueFormatter.label(.wbShiftAB, ab))  G–M \(ValueFormatter.label(.wbShiftGM, gm))")
                 .font(.caption)
@@ -102,13 +102,23 @@ private struct WhiteBalanceFineTune: View {
             .frame(width: size, height: size)
             .gesture(DragGesture(minimumDistance: 0)
                 .onChanged { pad = CGPoint(x: min(max($0.location.x, 0), size), y: min(max($0.location.y, 0), size)) }
-                .onEnded { _ in
+                .onEnded { drag in
+                    // пишем только ось, вдоль которой тянули: иначе почти любое движение задевает и вторую
+                    let axes = ShiftPad.axes(dx: drag.translation.width, dy: drag.translation.height)
                     if let pad, let ab, let gm {
-                        request(.wbShiftAB, ab, fraction: pad.x / size)
-                        request(.wbShiftGM, gm, fraction: 1 - pad.y / size)
+                        if axes.ab { request(.wbShiftAB, ab, fraction: pad.x / size) }
+                        if axes.gm { request(.wbShiftGM, gm, fraction: 1 - pad.y / size) }
                     }
                     pad = nil
                 })
+            .disabled(ab?.isWritable != true || gm?.isWritable != true)
+            Button("Сброс") {
+                if ab?.current.intValue != 192 { controller.request(.wbShiftAB, 192) }
+                if gm?.current.intValue != 192 { controller.request(.wbShiftGM, 192) }
+            }
+            .buttonStyle(.plain)
+            .font(.caption)
+            .foregroundStyle(.secondary)
             .disabled(ab?.isWritable != true || gm?.isWritable != true)
         }
     }

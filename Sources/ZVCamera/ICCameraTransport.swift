@@ -48,11 +48,26 @@ public final class ICCameraTransport: NSObject, PTPTransport, ICCameraDeviceDele
         }
     }
 
+    /// Закрывает сессию (не дольше 3 с) и отвязывается от устройства. ICDevice.delegate — assign, а не weak:
+    /// если не отвязаться, следующий колбэк ICC придёт в освобождённый объект.
     public func close() async {
-        guard device.hasOpenSession, !isRemoved else { return }
-        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
-            device.requestCloseSession(options: [:]) { _ in done.resume() }
+        if device.hasOpenSession, !isRemoved {
+            await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+                let once = Once()
+                device.requestCloseSession(options: [:]) { _ in if once.claim() { done.resume() } }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3) { if once.claim() { done.resume() } }
+            }
         }
+        await MainActor.run { detach() }
+        eventContinuation.finish()
+    }
+
+    private func detach() {
+        if (device.delegate as AnyObject?) === self { device.delegate = nil }
+    }
+
+    deinit {
+        if (device.delegate as AnyObject?) === self { device.delegate = nil }
     }
 
     private func markRemoved() {
@@ -95,7 +110,7 @@ public final class ICCameraTransport: NSObject, PTPTransport, ICCameraDeviceDele
 }
 
 /// Гарантирует, что continuation возобновится ровно один раз: либо ответ, либо таймаут.
-private final class Once: @unchecked Sendable {
+final class Once: @unchecked Sendable {
     private let lock = NSLock()
     private var used = false
 
