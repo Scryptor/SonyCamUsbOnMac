@@ -33,21 +33,61 @@ func waitForCamera(_ discovery: CameraDiscovery, seconds: Int) async -> ICCamera
 
 @MainActor
 func run() async -> Int32 {
-    let args = Array(CommandLine.arguments.dropFirst())
+    var args = Array(CommandLine.arguments.dropFirst())
+    let usage = "usage: zv-probe [--wifi <адрес>] info | props | lv <кадров> <путь.jpg> | set <код hex> <значение> | rec\n"
+        + "       zv-probe wifi-find | wifi-pair <адрес>"
+    // по Wi-Fi: поиск камеры и сопряжение (на камере в это время включено PC Remote Function → Pairing)
+    if args.first == "wifi-find" {
+        let cameras = await WiFiDiscovery.search()
+        if cameras.isEmpty { return fail("камера в сети не найдена") }
+        cameras.forEach { print($0.host) }
+        return 0
+    }
+    if args.first == "wifi-pair", args.count >= 2 {
+        let transport = PTPIPTransport(host: args[1], identity: PTPIPIdentity.load())
+        do {
+            print("камера: \(try await transport.connect(initTimeout: .seconds(90)))")
+            await transport.close()
+            return 0
+        } catch {
+            return fail("сопряжение не удалось: \(error)")
+        }
+    }
+    var wifiHost: String?
+    if args.first == "--wifi", args.count >= 2 {
+        wifiHost = args[1]
+        args.removeFirst(2)
+    }
     guard let command = args.first, ["info", "props", "lv", "set", "rec"].contains(command) else {
-        return fail("usage: zv-probe info | props | lv <кадров> <путь.jpg> | set <код hex> <значение> | rec")
+        return fail(usage)
     }
-    let discovery = CameraDiscovery()
-    discovery.start()
-    guard let device = await waitForCamera(discovery, seconds: 30) else { return fail("камера не найдена за 30 с") }
-    do {
-        try await device.openSession()
-    } catch {
-        return fail("не удалось открыть сессию: \(error)")
+    let transport: PTPTransport
+    if let wifiHost {
+        let wifi = PTPIPTransport(host: wifiHost, identity: PTPIPIdentity.load())
+        do {
+            try await wifi.connect()
+        } catch {
+            return fail("не удалось подключиться по Wi-Fi: \(error)")
+        }
+        transport = wifi
+    } else {
+        let discovery = CameraDiscovery()
+        discovery.start()
+        guard let device = await waitForCamera(discovery, seconds: 30) else { return fail("камера не найдена за 30 с") }
+        do {
+            try await device.openSession()
+        } catch {
+            return fail("не удалось открыть сессию: \(error)")
+        }
+        transport = ICCameraTransport(device: device)
     }
-    let transport = ICCameraTransport(device: device)
     let session = CameraSession(transport: transport)
-    defer { Task { await transport.close() } }
+    defer {
+        Task {
+            if let usb = transport as? ICCameraTransport { await usb.close() }
+            if let wifi = transport as? PTPIPTransport { await wifi.close() }
+        }
+    }
     do {
         if command == "info" {
             do { try await session.start() } catch SessionError.notPCRemote {}
