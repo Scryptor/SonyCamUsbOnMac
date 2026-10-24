@@ -245,6 +245,7 @@ final class AutomationServer {
             "histogram": screen.histogramOn,
         ]
         if let editing = screen.editing { ui["editing"] = editing.rawValue }
+        if let info = screen.pillInfo { ui["info"] = info.rawValue }
         ui["controlsHidden"] = screen.controlsHidden
         ui["manualHidden"] = screen.manualHidden
         var result: [String: Any] = [
