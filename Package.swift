@@ -11,6 +11,7 @@ let package = Package(
         .target(name: "ZVCore"),
         .target(name: "ZVCamera", dependencies: ["ZVCore"]),
         .executableTarget(name: "zv-probe", dependencies: ["ZVCore", "ZVCamera"]),
+        .executableTarget(name: "ZVViewer", dependencies: ["ZVCore", "ZVCamera"]),
         .testTarget(name: "ZVCoreTests", dependencies: ["ZVCore"], resources: [.copy("Fixtures")]),
     ],
     swiftLanguageModes: [.v5]
