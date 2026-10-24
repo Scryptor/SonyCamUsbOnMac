@@ -96,6 +96,10 @@ class CoreTest {
         assertEquals("G0.25", ValueFormatter.label(SettingID.wbShiftGM, 193))
         assertEquals("M1", ValueFormatter.label(SettingID.wbShiftGM, 188))
         assertEquals("2 ч 32 мин", ValueFormatter.label(SettingID.cardRemaining, 9176))
+        assertEquals("25p 100M", ValueFormatter.label(SettingID.movieRecordingSetting, 0x21))
+        // список XAVC S HD, который ZV-E10 предлагает в режиме PAL
+        assertEquals(listOf("50p 50M", "50p 25M", "25p 50M", "25p 16M", "100p 100M", "100p 60M"),
+            listOf(4L, 0x19L, 5L, 0x1BL, 0x1DL, 0x1FL).map { ValueFormatter.label(SettingID.movieRecordingSetting, it) })
         assertEquals("#14", ValueFormatter.label(SettingID.whiteBalance, 0x000E))
         assertEquals("—", ValueFormatter.label(SettingID.iso, null))
     }

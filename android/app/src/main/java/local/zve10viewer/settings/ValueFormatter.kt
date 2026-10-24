@@ -122,7 +122,14 @@ object ValueFormatter {
             0x58015L to "Макро", 0x58016L to "Сумерки с рук", 0x58017L to "Ночной портрет", 0x58018L to "Без смаза",
         ),
         SettingID.movieFileFormat to mapOf(8L to "XAVC S 4K", 9L to "XAVC S HD"),
-        SettingID.movieRecordingSetting to mapOf(0x21L to "25p 100M", 0x24L to "25p 60M"),
+        // по таблице Sony Camera Remote SDK (Recording Setting Movie); 4K 0x21/0x24 и весь список HD (PAL) сверены с камерой
+        SettingID.movieRecordingSetting to mapOf(
+            0x01L to "60p 50M", 0x02L to "30p 50M", 0x03L to "24p 50M", 0x04L to "50p 50M", 0x05L to "25p 50M",
+            0x18L to "60p 25M", 0x19L to "50p 25M", 0x1AL to "30p 16M", 0x1BL to "25p 16M",
+            0x1CL to "120p 100M", 0x1DL to "100p 100M", 0x1EL to "120p 60M", 0x1FL to "100p 60M",
+            0x20L to "30p 100M", 0x21L to "25p 100M", 0x22L to "24p 100M",
+            0x23L to "30p 60M", 0x24L to "25p 60M", 0x25L to "24p 60M",
+        ),
         SettingID.imageSize to mapOf(1L to "L", 2L to "M", 3L to "S"),
         SettingID.aspectRatio to mapOf(1L to "3:2", 2L to "16:9", 3L to "4:3", 4L to "1:1"),
         SettingID.fileFormat to mapOf(1L to "RAW", 2L to "RAW+JPEG", 3L to "JPEG"),

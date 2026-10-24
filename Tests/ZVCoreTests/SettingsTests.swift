@@ -49,6 +49,9 @@ private func props() throws -> [UInt16: SonyProperty] {
     #expect(ValueFormatter.label(.movieFileFormat, 9) == "XAVC S HD")
     #expect(ValueFormatter.label(.movieRecordingSetting, 0x21) == "25p 100M")
     #expect(ValueFormatter.label(.movieRecordingSetting, 0x24) == "25p 60M")
+    // список XAVC S HD, который ZV-E10 предлагает в режиме PAL
+    #expect([4, 0x19, 5, 0x1B, 0x1D, 0x1F].map { ValueFormatter.label(.movieRecordingSetting, $0) }
+        == ["50p 50M", "50p 25M", "25p 50M", "25p 16M", "100p 100M", "100p 60M"])
     #expect(ValueFormatter.label(.aspectRatio, 4) == "1:1")
 }
 

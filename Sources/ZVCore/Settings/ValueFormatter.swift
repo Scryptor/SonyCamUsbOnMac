@@ -120,7 +120,14 @@ public enum ValueFormatter {
         ],
         // сверено с меню камеры: 8 и 0x21 подтвердил пользователь, 9 и 0x24 — единственные другие варианты в списке камеры
         .movieFileFormat: [8: "XAVC S 4K", 9: "XAVC S HD"],
-        .movieRecordingSetting: [0x21: "25p 100M", 0x24: "25p 60M"],
+        // по таблице Sony Camera Remote SDK (Recording Setting Movie); 4K 0x21/0x24 и весь список HD (PAL) сверены с камерой
+        .movieRecordingSetting: [
+            0x01: "60p 50M", 0x02: "30p 50M", 0x03: "24p 50M", 0x04: "50p 50M", 0x05: "25p 50M",
+            0x18: "60p 25M", 0x19: "50p 25M", 0x1A: "30p 16M", 0x1B: "25p 16M",
+            0x1C: "120p 100M", 0x1D: "100p 100M", 0x1E: "120p 60M", 0x1F: "100p 60M",
+            0x20: "30p 100M", 0x21: "25p 100M", 0x22: "24p 100M",
+            0x23: "30p 60M", 0x24: "25p 60M", 0x25: "24p 60M",
+        ],
         .imageSize: [1: "L", 2: "M", 3: "S"],
         .aspectRatio: [1: "3:2", 2: "16:9", 3: "4:3", 4: "1:1"],
         .fileFormat: [1: "RAW", 2: "RAW+JPEG", 3: "JPEG"],
