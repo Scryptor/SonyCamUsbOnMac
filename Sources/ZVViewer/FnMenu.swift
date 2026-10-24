@@ -4,14 +4,13 @@ import ZVCore
 /// Меню Fn: лента значений над сеткой 2×6, как в самой камере.
 struct FnMenu: View {
     let controller: CameraController
-    @Binding var selected: SettingID
-    let onAllSettings: () -> Void
+    let screen: ScreenState
 
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 6), count: 6)
 
     var body: some View {
         VStack(spacing: 10) {
-            ValueStrip(id: selected, controller: controller)
+            ValueStrip(id: screen.selected, controller: controller)
             LazyVGrid(columns: columns, spacing: 6) {
                 ForEach(SettingCatalog.fnTopRow + SettingCatalog.fnBottomRow, id: \.self) { slot in
                     tile(slot)
@@ -24,22 +23,22 @@ struct FnMenu: View {
         // клики по промежуткам внутри меню не должны его закрывать
         .contentShape(Rectangle())
         .onTapGesture {}
-        .onScrollWheelStep { controller.requestStep(selected, offset: $0) }
+        .onScrollWheelStep { controller.requestStep(screen.selected, offset: $0) }
     }
 
     @ViewBuilder private func tile(_ slot: FnSlot) -> some View {
         switch slot {
         case let .setting(id):
-            let enabled = controller.phase == .ready && controller.property(id)?.isWritable == true
-            Button { selected = id } label: {
+            let enabled = controller.isWritable(id)
+            Button { screen.selected = id } label: {
                 TileLabel(title: id.shortTitle, value: ValueFormatter.label(id, controller.property(id)),
-                          isSelected: id == selected, isPending: controller.pending.contains(id))
+                          isSelected: id == screen.selected, isPending: controller.pending.contains(id))
             }
             .buttonStyle(.plain)
             .disabled(!enabled)
             .opacity(enabled ? 1 : 0.4)
         case .allSettings:
-            Button(action: onAllSettings) {
+            Button { screen.openAllSettings(nil) } label: {
                 TileLabel(title: "Все", value: "⚙︎", isSelected: false, isPending: false)
             }
             .buttonStyle(.plain)

@@ -4,23 +4,19 @@ import ZVCore
 /// Все настройки по группам поверх видео. Клик по изменяемой строке открывает ленту значений.
 struct AllSettingsPanel: View {
     let controller: CameraController
-    @State private var group: SettingGroup = .exposure
-    @State private var editing: SettingID?
+    let screen: ScreenState
 
     var body: some View {
         HStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Все настройки").font(.headline).padding(.bottom, 8)
                 ForEach(SettingGroup.allCases, id: \.self) { g in
-                    Button {
-                        group = g
-                        editing = nil
-                    } label: {
+                    Button { screen.openAllSettings(g) } label: {
                         Text(g.title)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 7)
-                            .background(g == group ? Color.accentColor : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+                            .background(g == screen.group ? Color.accentColor : Color.clear, in: RoundedRectangle(cornerRadius: 8))
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -32,7 +28,7 @@ struct AllSettingsPanel: View {
             Divider()
             ScrollView {
                 VStack(spacing: 0) {
-                    ForEach(group.settings, id: \.self) { id in
+                    ForEach(screen.group.settings, id: \.self) { id in
                         row(id)
                     }
                 }
@@ -47,9 +43,9 @@ struct AllSettingsPanel: View {
 
     @ViewBuilder private func row(_ id: SettingID) -> some View {
         let property = controller.property(id)
-        let writable = controller.phase == .ready && property?.isWritable == true
+        let writable = controller.isWritable(id)
         Button {
-            if writable { editing = editing == id ? nil : id }
+            if writable { screen.editing = screen.editing == id ? nil : id }
         } label: {
             HStack {
                 Text(id.title)
@@ -63,7 +59,7 @@ struct AllSettingsPanel: View {
         }
         .buttonStyle(.plain)
         .foregroundStyle(writable ? Color.primary : Color.secondary)
-        if editing == id {
+        if screen.editing == id {
             ValueStrip(id: id, controller: controller).padding(.bottom, 8)
         }
         Divider()

@@ -1,12 +1,10 @@
 import SwiftUI
 import ZVCore
 
-/// Основной экран: видео с камеры, статус, строка значений, кнопка записи и меню Fn поверх кадра.
+/// Основной экран: видео, статус, строка значений, кнопка записи, пресеты, гистограмма и меню поверх кадра.
 struct LiveScreen: View {
     let controller: CameraController
-    @State private var fnOpen = false
-    @State private var allSettingsOpen = false
-    @State private var selected: SettingID = .shutter
+    let screen: ScreenState
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -19,23 +17,27 @@ struct LiveScreen: View {
             } else {
                 ProgressView().controlSize(.large)
             }
-            VStack {
-                HStack {
+            VStack(alignment: .leading) {
+                HStack(alignment: .top) {
+                    TopBar(controller: controller, screen: screen)
                     Spacer()
                     StatusPill(controller: controller)
                 }
                 Spacer()
-                if fnOpen {
-                    FnMenu(controller: controller, selected: $selected) {
-                        fnOpen = false
-                        allSettingsOpen = true
-                    }
-                } else if !allSettingsOpen {
-                    InfoLine(controller: controller) { id in
-                        if let id { selected = id }
-                        fnOpen = true
-                    }
+                if screen.histogramOn && !controller.histogram.isEmpty && !screen.fnOpen {
+                    HistogramView(bins: controller.histogram)
                 }
+                HStack {
+                    Spacer()
+                    if screen.fnOpen {
+                        FnMenu(controller: controller, screen: screen)
+                    } else if !screen.allSettingsOpen {
+                        InfoLine(controller: controller) { screen.openFn($0) }
+                    }
+                    Spacer()
+                }
+                // справа по центру — кнопка записи: меню Fn не должно под неё заходить
+                .padding(.trailing, screen.fnOpen ? 96 : 0)
             }
             .padding(16)
             HStack {
@@ -43,16 +45,16 @@ struct LiveScreen: View {
                 RecordButton(controller: controller)
             }
             .padding(.trailing, 20)
-            if allSettingsOpen {
+            if screen.allSettingsOpen {
                 GeometryReader { geo in
-                    AllSettingsPanel(controller: controller)
+                    AllSettingsPanel(controller: controller, screen: screen)
                         .frame(width: geo.size.width * 0.6, height: geo.size.height * 0.78)
                         .position(x: geo.size.width / 2, y: geo.size.height / 2)
                 }
             }
         }
         .contentShape(Rectangle())
-        .onTapGesture { closeOverlays() }
+        .onTapGesture { screen.closeOverlays() }
         .environment(\.colorScheme, .dark)
         .focusable()
         .focusEffectDisabled()
@@ -60,12 +62,17 @@ struct LiveScreen: View {
         .onAppear { focused = true }
         // F в любой раскладке: латинская f и русская а на той же клавише
         .onKeyPress(characters: CharacterSet(charactersIn: "fFаА")) { _ in
-            fnOpen.toggle()
+            screen.toggleFn()
+            return .handled
+        }
+        .onKeyPress(characters: CharacterSet(charactersIn: "123456789")) { press in
+            guard let digit = Int(press.characters), controller.presets.indices.contains(digit - 1) else { return .ignored }
+            controller.applyPreset(digit - 1)
             return .handled
         }
         .onKeyPress(.escape) {
-            guard fnOpen || allSettingsOpen else { return .ignored }
-            closeOverlays()
+            guard screen.fnOpen || screen.allSettingsOpen else { return .ignored }
+            screen.closeOverlays()
             return .handled
         }
         .onKeyPress(.leftArrow) { step(-1) }
@@ -73,14 +80,9 @@ struct LiveScreen: View {
     }
 
     private func step(_ offset: Int) -> KeyPress.Result {
-        guard fnOpen else { return .ignored }
-        controller.requestStep(selected, offset: offset)
+        guard screen.fnOpen else { return .ignored }
+        controller.requestStep(screen.selected, offset: offset)
         return .handled
-    }
-
-    private func closeOverlays() {
-        fnOpen = false
-        allSettingsOpen = false
     }
 }
 

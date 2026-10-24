@@ -1,0 +1,206 @@
+import AppKit
+import Foundation
+import Network
+import ZVCore
+
+/// Локальный API для автоматических тестов: состояние, команды, скриншот окна, кадр с камеры.
+/// Включается только флагом запуска `--automation` (или ZV_AUTOMATION=1), слушает 127.0.0.1, требует токен.
+@MainActor
+final class AutomationServer {
+    private let controller: CameraController
+    private let screen: ScreenState
+    private let token = (0..<4).map { _ in String(format: "%08x", UInt32.random(in: .min ... .max)) }.joined()
+    private var listener: NWListener?
+
+    static var isRequested: Bool {
+        CommandLine.arguments.contains("--automation") || ProcessInfo.processInfo.environment["ZV_AUTOMATION"] == "1"
+    }
+
+    init(controller: CameraController, screen: ScreenState) {
+        self.controller = controller
+        self.screen = screen
+    }
+
+    func start() throws {
+        let port = UInt16(ProcessInfo.processInfo.environment["ZV_AUTOMATION_PORT"] ?? "") ?? 47811
+        let parameters = NWParameters.tcp
+        parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!)
+        parameters.allowLocalEndpointReuse = true
+        let listener = try NWListener(using: parameters)
+        listener.newConnectionHandler = { [weak self] connection in
+            Task { @MainActor in self?.serve(connection) }
+        }
+        listener.start(queue: .main)
+        self.listener = listener
+        try writeInfo(port: port)
+    }
+
+    /// Порт и токен — в файл, доступный только текущему пользователю.
+    private func writeInfo(port: UInt16) throws {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("ZV-E10 Viewer", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let file = dir.appendingPathComponent("automation.json")
+        let info = try JSONSerialization.data(withJSONObject: ["port": Int(port), "token": token])
+        FileManager.default.createFile(atPath: file.path, contents: info, attributes: [.posixPermissions: 0o600])
+    }
+
+    // MARK: - Соединения
+
+    private func serve(_ connection: NWConnection) {
+        connection.start(queue: .main)
+        receive(connection, buffer: Data())
+    }
+
+    private func receive(_ connection: NWConnection, buffer: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 1 << 20) { [weak self] data, _, isComplete, error in
+            Task { @MainActor in
+                guard let self else { return }
+                var buffer = buffer
+                if let data { buffer.append(data) }
+                switch HTTPRequest.parse(buffer) {
+                case let .complete(request, _):
+                    self.reply(connection, await self.route(request))
+                case .incomplete where !isComplete && error == nil:
+                    self.receive(connection, buffer: buffer)
+                default:
+                    self.reply(connection, Self.json(400, ["error": "bad request"]))
+                }
+            }
+        }
+    }
+
+    private func reply(_ connection: NWConnection, _ response: Data) {
+        connection.send(content: response, completion: .contentProcessed { _ in connection.cancel() })
+    }
+
+    // MARK: - Маршруты
+
+    private func route(_ request: HTTPRequest) async -> Data {
+        guard request.headers["x-zv-token"] == token || request.query["token"] == token else {
+            return Self.json(401, ["error": "token required"])
+        }
+        switch (request.method, request.path) {
+        case ("GET", "/state"):
+            return Self.json(200, state())
+        case ("POST", "/action"):
+            do {
+                let action = try JSONDecoder().decode(AutomationAction.self, from: request.body)
+                if let problem = perform(action) { return Self.json(409, ["error": problem]) }
+                return Self.json(200, ["ok": true])
+            } catch {
+                return Self.json(400, ["error": "\(error)"])
+            }
+        case ("GET", "/screenshot"):
+            guard let png = screenshot() else { return Self.json(409, ["error": "no window"]) }
+            return HTTPResponse.encode(status: 200, contentType: "image/png", body: png)
+        case ("GET", "/frame"):
+            guard let jpeg = controller.lastJPEG else { return Self.json(409, ["error": "no frame"]) }
+            return HTTPResponse.encode(status: 200, contentType: "image/jpeg", body: jpeg)
+        default:
+            return Self.json(404, ["error": "not found"])
+        }
+    }
+
+    /// Выполняет команду так же, как это сделали бы кнопки. Возвращает текст проблемы или nil.
+    private func perform(_ action: AutomationAction) -> String? {
+        switch action {
+        case let .key(key):
+            switch key.lowercased() {
+            case "f": screen.toggleFn()
+            case "escape": screen.closeOverlays()
+            case "left", "right":
+                guard screen.fnOpen else { return "Fn menu is closed" }
+                controller.requestStep(screen.selected, offset: key.lowercased() == "left" ? -1 : 1)
+            default:
+                guard let digit = Int(key), (1...9).contains(digit) else { return "unknown key \(key)" }
+                guard controller.presets.indices.contains(digit - 1) else { return "no preset \(digit)" }
+                controller.applyPreset(digit - 1)
+            }
+        case let .openFn(id): screen.openFn(id)
+        case .closeOverlays: screen.closeOverlays()
+        case let .select(id):
+            guard controller.isWritable(id) else { return "\(id.rawValue) is not writable now" }
+            screen.selected = id
+        case let .step(offset):
+            controller.requestStep(screen.selected, offset: offset)
+        case let .request(id, value):
+            guard controller.isWritable(id) else { return "\(id.rawValue) is not writable now" }
+            controller.request(id, value)
+        case let .openAllSettings(group): screen.openAllSettings(group)
+        case let .editRow(id): screen.editing = id
+        case .toggleHistogram: screen.toggleHistogram()
+        case let .savePreset(name):
+            guard controller.phase == .ready else { return "camera not ready" }
+            controller.savePreset(name: name)
+        case let .applyPreset(index):
+            guard controller.presets.indices.contains(index) else { return "no preset \(index)" }
+            controller.applyPreset(index)
+        case let .renamePreset(index, name): controller.renamePreset(index, to: name)
+        case let .deletePreset(index): controller.deletePreset(index)
+        case let .toggleRecording(confirm):
+            guard confirm else { return "recording writes a clip to the card: pass \"confirm\": true" }
+            controller.toggleRecording()
+        }
+        return nil
+    }
+
+    private func state() -> [String: Any] {
+        let settings: [[String: Any]] = SettingID.allCases.map { id in
+            let property = controller.property(id)
+            var item: [String: Any] = [
+                "id": id.rawValue,
+                "code": String(format: "0x%04X", id.code),
+                "title": id.title,
+                "label": ValueFormatter.label(id, property),
+                "writable": controller.isWritable(id),
+                "pending": controller.pending.contains(id),
+            ]
+            if let value = property?.current.intValue { item["value"] = value }
+            if let property {
+                item["options"] = SettingOptions.options(id, property).map { ["value": $0.value, "label": $0.label] }
+            }
+            return item
+        }
+        var ui: [String: Any] = [
+            "fnOpen": screen.fnOpen,
+            "allSettingsOpen": screen.allSettingsOpen,
+            "selected": screen.selected.rawValue,
+            "group": screen.group.rawValue,
+            "histogram": screen.histogramOn,
+        ]
+        if let editing = screen.editing { ui["editing"] = editing.rawValue }
+        var result: [String: Any] = [
+            "phase": controller.phase.rawValue,
+            "model": controller.deviceInfo?.model ?? NSNull(),
+            "firmware": controller.deviceInfo?.firmware ?? NSNull(),
+            "recording": controller.isRecording,
+            "fps": (controller.fps * 10).rounded() / 10,
+            "histogramBins": controller.histogram.count,
+            "applyingPreset": controller.isApplyingPreset,
+            "presetStatus": controller.presetStatus ?? NSNull(),
+            "presets": controller.presets.map { preset in
+                ["name": preset.name,
+                 "values": Dictionary(uniqueKeysWithValues: preset.values.map { ($0.key.rawValue, $0.value) })] as [String: Any]
+            },
+            "ui": ui,
+            "settings": settings,
+        ]
+        if let frame = controller.frame { result["frameSize"] = [frame.width, frame.height] }
+        return result
+    }
+
+    /// Снимок собственного окна (без разрешения на запись экрана).
+    private func screenshot() -> Data? {
+        guard let window = NSApp.windows.first(where: { $0.isVisible && $0.title == "ZV-E10 Viewer" }) ?? NSApp.mainWindow,
+              let view = window.contentView,
+              let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return nil }
+        view.cacheDisplay(in: view.bounds, to: rep)
+        return rep.representation(using: .png, properties: [:])
+    }
+
+    private static func json(_ status: Int, _ object: [String: Any]) -> Data {
+        let body = (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])) ?? Data("{}".utf8)
+        return HTTPResponse.encode(status: status, contentType: "application/json; charset=utf-8", body: body)
+    }
+}
