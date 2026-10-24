@@ -171,7 +171,7 @@ for sid in ["aperture", "iso", "whiteBalance"]:
 check("скриншот с пресетом", shot("07-presets"))
 act(action="applyPreset", index=idx)
 s, ok = wait(lambda s: not s["applyingPreset"] and all(setting(s, k).get("value") == saved.get(k) for k in changes), timeout=20)
-check("пресет вернул изменённые настройки", ok, s["presetStatus"] or "")
+check("пресет вернул изменённые настройки", ok, s["status"] or "")
 act(action="renamePreset", index=idx, name="Тест 2")
 check("пресет переименован", state()["presets"][idx]["name"] == "Тест 2")
 act(action="deletePreset", index=idx)

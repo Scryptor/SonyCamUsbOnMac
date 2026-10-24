@@ -52,7 +52,7 @@ struct TopBar: View {
             .padding(5)
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
 
-            if let status = controller.presetStatus {
+            if let status = controller.statusMessage {
                 HStack(spacing: 6) {
                     if controller.isApplyingPreset { ProgressView().controlSize(.mini) }
                     Text(status)

@@ -141,6 +141,53 @@ final class AutomationServer {
         case let .toggleRecording(confirm):
             guard confirm else { return "recording writes a clip to the card: pass \"confirm\": true" }
             controller.toggleRecording()
+        case let .switchMode(mode):
+            guard controller.isWritable(.exposureProgram) else { return "mode switch not available now" }
+            controller.switchMode(mode)
+        case let .capture(confirm):
+            guard confirm else { return "a shot writes files (card and/or Mac): pass \"confirm\": true" }
+            guard controller.mode == .photo else { return "camera is not in photo mode" }
+            guard !controller.isCapturing else { return "already capturing" }
+            controller.capturePhoto()
+        case .grabFrame:
+            guard controller.lastJPEG != nil else { return "no frame" }
+            controller.grabFrame()
+        case .toggleControls:
+            screen.toggleControls()
+        case .dismissReview:
+            controller.dismissReview()
+        case let .setPreference(key, value):
+            if let problem = setPreference(key, value) { return problem }
+        case let .openShot(index):
+            guard controller.shots.indices.contains(index) else { return "no shot \(index)" }
+            controller.openShot(index)
+        }
+        return nil
+    }
+
+    /// Те же настройки, что в окне ⌘, — по строковому ключу.
+    private func setPreference(_ key: String, _ value: String) -> String? {
+        switch key {
+        case "destination":
+            guard let d = Prefs.Destination(rawValue: value) else { return "destination: macAndCard | macOnly | cardOnly" }
+            Prefs.destination = d
+            controller.applyDestinationPreference()
+        case "folder":
+            Prefs.folderURL = URL(fileURLWithPath: (value as NSString).expandingTildeInPath, isDirectory: true)
+        case "reviewEnabled":
+            guard let b = Bool(value) else { return "reviewEnabled: true | false" }
+            Prefs.reviewEnabled = b
+        case "reviewSeconds":
+            guard let n = Int(value), (1...10).contains(n) else { return "reviewSeconds: 1…10" }
+            Prefs.reviewSeconds = n
+        case "reviewSource":
+            guard let r = Prefs.ReviewSource(rawValue: value) else { return "reviewSource: downloaded | camera" }
+            Prefs.reviewSource = r
+        case "autoHide":
+            guard let b = Bool(value) else { return "autoHide: true | false" }
+            Prefs.autoHide = b
+        default:
+            return "unknown preference \(key)"
         }
         return nil
     }
@@ -170,6 +217,8 @@ final class AutomationServer {
             "histogram": screen.histogramOn,
         ]
         if let editing = screen.editing { ui["editing"] = editing.rawValue }
+        ui["controlsHidden"] = screen.controlsHidden
+        ui["manualHidden"] = screen.manualHidden
         var result: [String: Any] = [
             "phase": controller.phase.rawValue,
             "model": controller.deviceInfo?.model ?? NSNull(),
@@ -178,7 +227,21 @@ final class AutomationServer {
             "fps": (controller.fps * 10).rounded() / 10,
             "histogramBins": controller.histogram.count,
             "applyingPreset": controller.isApplyingPreset,
-            "presetStatus": controller.presetStatus ?? NSNull(),
+            "status": controller.statusMessage ?? NSNull(),
+            "mode": controller.mode.rawValue,
+            "capturing": controller.isCapturing,
+            "recordingSeconds": controller.recordingStartedAt.map { Int(Date().timeIntervalSince($0)) } ?? NSNull(),
+            "review": controller.review.map { review -> [String: Any] in
+                ["title": review.title, "source": review.source, "timed": review.endsAt != nil,
+                 "hasImage": review.image != nil, "files": review.urls.map(\.path)]
+            } ?? NSNull(),
+            "shots": controller.shots.map { ["title": $0.title, "files": $0.urls.map(\.path)] as [String: Any] },
+            "prefs": [
+                "destination": Prefs.destination.rawValue, "folder": Prefs.folderURL.path,
+                "reviewEnabled": Prefs.reviewEnabled, "reviewSeconds": Prefs.reviewSeconds,
+                "reviewSource": Prefs.reviewSource.rawValue, "autoHide": Prefs.autoHide,
+            ] as [String: Any],
+            "cameraDestination": controller.properties[SonyProp.stillImageStoreDestination]?.current.intValue ?? NSNull(),
             "presets": controller.presets.map { preset in
                 ["name": preset.name,
                  "values": Dictionary(uniqueKeysWithValues: preset.values.map { ($0.key.rawValue, $0.value) })] as [String: Any]

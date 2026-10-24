@@ -39,6 +39,7 @@ public enum SonyProp {
     public static let creativeStyle: UInt16 = 0xD240
     public static let movieFileFormat: UInt16 = 0xD241
     public static let movieRecordingSetting: UInt16 = 0xD242
+    public static let cardRemainingShots: UInt16 = 0xD249
     public static let cardRemainingTime: UInt16 = 0xD24A
     public static let overheat: UInt16 = 0xD251
     public static let jpegQuality: UInt16 = 0xD252

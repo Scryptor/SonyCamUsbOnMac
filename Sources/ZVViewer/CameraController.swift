@@ -26,8 +26,34 @@ final class CameraController {
     private(set) var isRecording = false
     private(set) var presets: [Preset] = []
     private(set) var isApplyingPreset = false
-    /// Короткое сообщение о результате применения пресета.
-    private(set) var presetStatus: String?
+    /// Короткое сообщение: пресет применён, снимок сохранён и т.п.
+    private(set) var statusMessage: String?
+    /// Когда началась запись (для таймера «● REC»).
+    private(set) var recordingStartedAt: Date?
+    private(set) var isCapturing = false
+    /// Что показывается поверх видео после снимка или при открытии снимка из ленты.
+    private(set) var review: Review?
+    /// Снимки и стоп-кадры этой сессии, новые сначала.
+    private(set) var shots: [Shot] = []
+
+    struct Shot: Identifiable {
+        let id = UUID()
+        let urls: [URL]
+        let thumbnail: CGImage?
+        var title: String { urls.map(\.lastPathComponent).joined(separator: " + ") }
+    }
+
+    struct Review {
+        var image: CGImage?
+        var title: String
+        var detail: String
+        var urls: [URL]
+        var source: String
+        /// nil — показывается, пока не закроют (снимок открыт из ленты).
+        var endsAt: Date?
+    }
+
+    @ObservationIgnored private var reviewTask: Task<Void, Never>?
 
     /// Последний кадр как пришёл с камеры (для API автоматизации).
     @ObservationIgnored private(set) var lastJPEG: Data?
@@ -74,7 +100,7 @@ final class CameraController {
     func property(_ id: SettingID) -> SonyProperty? { properties[id.code] }
 
     func isWritable(_ id: SettingID) -> Bool {
-        phase == .ready && !isApplyingPreset && property(id)?.isWritable == true
+        phase == .ready && !isApplyingPreset && !isCapturing && property(id)?.isWritable == true
     }
 
     func request(_ id: SettingID, _ value: Int64) {
@@ -99,6 +125,161 @@ final class CameraController {
         }
     }
 
+    // MARK: - Фото и видео
+
+    var mode: CaptureMode {
+        property(.exposureProgram)?.current.intValue.map(CaptureMode.init(exposureProgram:)) ?? .video
+    }
+
+    /// Переключает камеру между фото и видео, сохраняя букву режима (M ↔ видео M и т.п.).
+    func switchMode(_ target: CaptureMode) {
+        guard let p = property(.exposureProgram), let current = p.current.intValue,
+              let value = CaptureMode.counterpart(of: current, to: target, settable: p.settableValues) else { return }
+        request(.exposureProgram, value)
+    }
+
+    /// Пользователь поменял «куда сохранять» — переносим это в камеру (PC Remote → Still Img. Save Dest.).
+    func applyDestinationPreference() {
+        guard phase == .ready, let session else { return }
+        let want = Prefs.destination.cameraValue
+        guard properties[SonyProp.stillImageStoreDestination]?.current.intValue != want else { return }
+        Task { _ = try? await session.set(SonyProp.stillImageStoreDestination, to: want) }
+    }
+
+    func capturePhoto() {
+        guard phase == .ready, mode == .photo, !isCapturing, !isApplyingPreset, let session else { return }
+        isCapturing = true
+        let destination = Prefs.destination
+        let folder = Prefs.folderURL
+        let cameraFrame = frame
+        let reviewOn = Prefs.reviewEnabled
+        let source: Prefs.ReviewSource = destination.savesToMac ? Prefs.reviewSource : .camera
+        if reviewOn {
+            // кадр с камеры есть сразу; загруженный снимок появится после скачивания
+            showReview(Review(image: cameraFrame, title: "Снимок", detail: source == .camera ? "" : "Загружаю…",
+                              urls: [], source: "Кадр с камеры", endsAt: nil), timed: source == .camera)
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.isCapturing = false }
+            do {
+                if self.properties[SonyProp.stillImageStoreDestination]?.current.intValue != destination.cameraValue {
+                    _ = try await session.set(SonyProp.stillImageStoreDestination, to: destination.cameraValue)
+                }
+                let objects = try await session.capturePhoto(download: destination.savesToMac)
+                guard destination.savesToMac else {
+                    self.showStatus("Снимок сохранён на карту камеры")
+                    return
+                }
+                guard !objects.isEmpty else { throw CaptureFailure.noFile }
+                let urls = try await Self.save(objects, to: folder)
+                let preview = await Self.previews(of: urls)
+                let shot = Shot(urls: urls, thumbnail: preview.thumbnail)
+                self.shots.insert(shot, at: 0)
+                let megabytes = Double(objects.reduce(0) { $0 + $1.data.count }) / 1_048_576
+                let detail = String(format: "%.1f МБ · «%@»", megabytes, FileManager.default.displayName(atPath: folder.path))
+                self.showStatus("Сохранено: \(shot.title)")
+                if reviewOn, self.review != nil {
+                    let downloaded = source == .downloaded && preview.image != nil
+                    self.showReview(Review(image: downloaded ? preview.image : cameraFrame, title: shot.title, detail: detail,
+                                           urls: urls, source: downloaded ? "Загруженный снимок" : "Кадр с камеры", endsAt: nil),
+                                    timed: true)
+                }
+            } catch {
+                self.dismissReview()
+                self.showStatus("Снимок не удался: \(error)")
+            }
+        }
+    }
+
+    /// Стоп-кадр из видео: сохраняет текущий кадр live view, запись не прерывается.
+    func grabFrame() {
+        guard phase == .ready || phase == .settling, let jpeg = lastJPEG else { return }
+        let folder = Prefs.folderURL
+        let thumbnail = frame
+        Task { [weak self] in
+            do {
+                let name = FileNaming.frameGrab(at: Date())
+                let urls = try await Self.save([CapturedObject(filename: name, data: jpeg)], to: folder)
+                self?.shots.insert(Shot(urls: urls, thumbnail: thumbnail), at: 0)
+                self?.showStatus("Кадр сохранён: \(urls[0].lastPathComponent)")
+            } catch {
+                self?.showStatus("Не удалось сохранить кадр: \(error)")
+            }
+        }
+    }
+
+    /// Открывает снимок из ленты поверх видео (пока не закроют).
+    func openShot(_ index: Int) {
+        guard shots.indices.contains(index) else { return }
+        let shot = shots[index]
+        Task { [weak self] in
+            let preview = await Self.previews(of: shot.urls)
+            self?.showReview(Review(image: preview.image ?? shot.thumbnail, title: shot.title,
+                                    detail: shot.urls.first.map { "«\($0.deletingLastPathComponent().lastPathComponent)»" } ?? "",
+                                    urls: shot.urls, source: "Снимок из ленты", endsAt: nil), timed: false)
+        }
+    }
+
+    func dismissReview() {
+        reviewTask?.cancel()
+        review = nil
+    }
+
+    private func showReview(_ value: Review, timed: Bool) {
+        reviewTask?.cancel()
+        var value = value
+        guard timed else {
+            review = value
+            return
+        }
+        let seconds = Prefs.reviewSeconds
+        value.endsAt = Date().addingTimeInterval(TimeInterval(seconds))
+        review = value
+        reviewTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(seconds))
+            if !Task.isCancelled { self?.review = nil }
+        }
+    }
+
+    enum CaptureFailure: Error, CustomStringConvertible {
+        case noFile
+        var description: String { "камера не отдала файл" }
+    }
+
+    /// Пишет файлы в папку, не затирая существующие (DSC01234 (2).JPG и т.д.).
+    nonisolated private static func save(_ objects: [CapturedObject], to folder: URL) async throws -> [URL] {
+        try await Task.detached(priority: .userInitiated) {
+            let fm = FileManager.default
+            try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+            return try objects.map { object in
+                let name = FileNaming.unique(object.filename) { fm.fileExists(atPath: folder.appendingPathComponent($0).path) }
+                let url = folder.appendingPathComponent(name)
+                try object.data.write(to: url, options: .atomic)
+                return url
+            }
+        }.value
+    }
+
+    /// Картинка для просмотра (до 2048 px) и миниатюра для ленты. JPEG предпочтительнее RAW: быстрее.
+    nonisolated private static func previews(of urls: [URL]) async -> (image: CGImage?, thumbnail: CGImage?) {
+        await Task.detached(priority: .userInitiated) {
+            let sorted = urls.sorted { a, _ in ["jpg", "jpeg"].contains(a.pathExtension.lowercased()) }
+            for url in sorted {
+                guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { continue }
+                func thumb(_ size: Int) -> CGImage? {
+                    CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                        kCGImageSourceCreateThumbnailFromImageAlways: true,
+                        kCGImageSourceCreateThumbnailWithTransform: true,
+                        kCGImageSourceThumbnailMaxPixelSize: size,
+                    ] as CFDictionary)
+                }
+                if let image = thumb(2048) { return (image, thumb(160)) }
+            }
+            return (nil, nil)
+        }.value
+    }
+
     // MARK: - Пресеты
 
     func savePreset(name: String? = nil) {
@@ -113,7 +294,7 @@ final class CameraController {
         guard presets.indices.contains(index), phase == .ready, !isApplyingPreset, let session else { return }
         let preset = presets[index]
         isApplyingPreset = true
-        presetStatus = "Применяю «\(preset.name)»…"
+        statusMessage = "Применяю «\(preset.name)»…"
         Task { [weak self] in
             let result = await session.apply(preset)
             guard let self else { return }
@@ -150,11 +331,11 @@ final class CameraController {
     }
 
     private func showStatus(_ text: String) {
-        presetStatus = text
+        statusMessage = text
         statusTask?.cancel()
         statusTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(5))
-            if !Task.isCancelled { self?.presetStatus = nil }
+            if !Task.isCancelled { self?.statusMessage = nil }
         }
     }
 
@@ -268,7 +449,10 @@ final class CameraController {
 
     private func apply(_ snapshot: [UInt16: SonyProperty]) {
         properties = snapshot
-        isRecording = snapshot[SonyProp.movieRecordingState]?.current.intValue == 1
+        let recording = snapshot[SonyProp.movieRecordingState]?.current.intValue == 1
+        if recording, recordingStartedAt == nil { recordingStartedAt = Date() }
+        if !recording { recordingStartedAt = nil }
+        isRecording = recording
         for (code, target) in targets where snapshot[code]?.current.intValue == target {
             clearTarget(code)
         }
@@ -325,7 +509,11 @@ final class CameraController {
         properties = [:]
         deviceInfo = nil
         isRecording = false
+        recordingStartedAt = nil
         isApplyingPreset = false
+        isCapturing = false
+        reviewTask?.cancel()
+        review = nil
         phase = .searching
     }
 

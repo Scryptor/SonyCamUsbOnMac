@@ -12,7 +12,7 @@ struct FnMenu: View {
         VStack(spacing: 10) {
             ValueStrip(id: screen.selected, controller: controller)
             LazyVGrid(columns: columns, spacing: 6) {
-                ForEach(SettingCatalog.fnTopRow + SettingCatalog.fnBottomRow, id: \.self) { slot in
+                ForEach(SettingCatalog.fnTopRow + SettingCatalog.fnBottomRow(for: controller.mode), id: \.self) { slot in
                     tile(slot)
                 }
             }

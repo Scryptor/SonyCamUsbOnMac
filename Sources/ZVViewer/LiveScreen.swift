@@ -1,29 +1,138 @@
 import SwiftUI
 import ZVCore
 
-/// Основной экран: видео, статус, строка значений, кнопка записи, пресеты, гистограмма и меню поверх кадра.
+/// Основной экран: видео, статус, строка значений, кнопки справа, пресеты, гистограмма, лента снимков
+/// и меню поверх кадра. Элементы прячутся сами (3 с без мыши) или клавишей H.
 struct LiveScreen: View {
     let controller: CameraController
     let screen: ScreenState
     @FocusState private var focused: Bool
+    @State private var showHiddenHint = false
+
+    private var showControls: Bool { !screen.controlsHidden || screen.fnOpen || screen.allSettingsOpen }
 
     var body: some View {
         ZStack {
             Color.black
-            if let frame = controller.frame {
-                Image(decorative: frame, scale: 1)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .opacity(controller.isFrameStale ? 0.45 : 1)
-                if controller.isFrameStale {
-                    Label("Нет картинки с камеры…", systemImage: "exclamationmark.triangle")
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 8)
-                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
+            video
+            if showControls {
+                controls.transition(.opacity)
+            } else if let started = controller.recordingStartedAt {
+                VStack {
+                    HStack {
+                        Spacer()
+                        RecBadge(startedAt: started)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
+                    }
+                    Spacer()
                 }
-            } else {
-                ProgressView().controlSize(.large)
+                .padding(16)
             }
+            if screen.allSettingsOpen {
+                GeometryReader { geo in
+                    AllSettingsPanel(controller: controller, screen: screen)
+                        .frame(width: geo.size.width * 0.6, height: geo.size.height * 0.78)
+                        .position(x: geo.size.width / 2, y: geo.size.height / 2)
+                }
+            }
+            if let review = controller.review {
+                ReviewOverlay(review: review) { controller.dismissReview() }
+            }
+            if showHiddenHint {
+                VStack {
+                    Spacer()
+                    Text("Элементы скрыты · H — показать")
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+                        .padding(.bottom, 24)
+                }
+                .transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: showControls)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            screen.closeOverlays()
+            screen.noteActivity()
+        }
+        .onContinuousHover { _ in screen.noteActivity() }
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(500))
+                screen.tickAutoHide(enabled: Prefs.autoHide,
+                                    busy: screen.fnOpen || screen.allSettingsOpen || controller.review != nil)
+            }
+        }
+        .environment(\.colorScheme, .dark)
+        .focusable()
+        .focusEffectDisabled()
+        .focused($focused)
+        .onAppear { focused = true }
+        // буквенные клавиши — в обеих раскладках: f/а, h/р, s/ы на одних и тех же клавишах
+        .onKeyPress(characters: CharacterSet(charactersIn: "fFаА")) { _ in
+            screen.toggleFn()
+            screen.noteActivity()
+            return .handled
+        }
+        .onKeyPress(characters: CharacterSet(charactersIn: "hHрР")) { _ in
+            screen.toggleControls()
+            flashHiddenHint()
+            return .handled
+        }
+        .onKeyPress(characters: CharacterSet(charactersIn: "sSыЫ")) { _ in
+            guard controller.mode == .video else { return .ignored }
+            controller.grabFrame()
+            return .handled
+        }
+        .onKeyPress(.space) {
+            if controller.review != nil {
+                controller.dismissReview()
+                return .handled
+            }
+            guard controller.mode == .photo else { return .ignored }
+            controller.capturePhoto()
+            return .handled
+        }
+        .onKeyPress(characters: CharacterSet(charactersIn: "123456789")) { press in
+            guard let digit = Int(press.characters), controller.presets.indices.contains(digit - 1) else { return .ignored }
+            controller.applyPreset(digit - 1)
+            return .handled
+        }
+        .onKeyPress(.escape) {
+            if controller.review != nil {
+                controller.dismissReview()
+                return .handled
+            }
+            guard screen.fnOpen || screen.allSettingsOpen else { return .ignored }
+            screen.closeOverlays()
+            return .handled
+        }
+        .onKeyPress(.leftArrow) { step(-1) }
+        .onKeyPress(.rightArrow) { step(1) }
+    }
+
+    @ViewBuilder private var video: some View {
+        if let frame = controller.frame {
+            Image(decorative: frame, scale: 1)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .opacity(controller.isFrameStale ? 0.45 : 1)
+            if controller.isFrameStale {
+                Label("Нет картинки с камеры…", systemImage: "exclamationmark.triangle")
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
+            }
+        } else {
+            ProgressView().controlSize(.large)
+        }
+    }
+
+    private var controls: some View {
+        ZStack {
             VStack(alignment: .leading) {
                 HStack(alignment: .top) {
                     TopBar(controller: controller, screen: screen)
@@ -31,8 +140,15 @@ struct LiveScreen: View {
                     StatusPill(controller: controller)
                 }
                 Spacer()
-                if screen.histogramOn && !controller.histogram.isEmpty && !screen.fnOpen {
-                    HistogramView(bins: controller.histogram)
+                if !screen.fnOpen {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if screen.histogramOn && !controller.histogram.isEmpty {
+                            HistogramView(bins: controller.histogram)
+                        }
+                        if !controller.shots.isEmpty {
+                            ShotsStrip(controller: controller)
+                        }
+                    }
                 }
                 HStack {
                     Spacer()
@@ -43,53 +159,34 @@ struct LiveScreen: View {
                     }
                     Spacer()
                 }
-                // справа по центру — кнопка записи: меню Fn не должно под неё заходить
+                // справа по центру — кнопки: меню Fn не должно под них заходить
                 .padding(.trailing, screen.fnOpen ? 96 : 0)
             }
             .padding(16)
             HStack {
                 Spacer()
-                RecordButton(controller: controller)
+                RightColumn(controller: controller)
             }
             .padding(.trailing, 20)
-            if screen.allSettingsOpen {
-                GeometryReader { geo in
-                    AllSettingsPanel(controller: controller, screen: screen)
-                        .frame(width: geo.size.width * 0.6, height: geo.size.height * 0.78)
-                        .position(x: geo.size.width / 2, y: geo.size.height / 2)
-                }
-            }
         }
-        .contentShape(Rectangle())
-        .onTapGesture { screen.closeOverlays() }
-        .environment(\.colorScheme, .dark)
-        .focusable()
-        .focusEffectDisabled()
-        .focused($focused)
-        .onAppear { focused = true }
-        // F в любой раскладке: латинская f и русская а на той же клавише
-        .onKeyPress(characters: CharacterSet(charactersIn: "fFаА")) { _ in
-            screen.toggleFn()
-            return .handled
-        }
-        .onKeyPress(characters: CharacterSet(charactersIn: "123456789")) { press in
-            guard let digit = Int(press.characters), controller.presets.indices.contains(digit - 1) else { return .ignored }
-            controller.applyPreset(digit - 1)
-            return .handled
-        }
-        .onKeyPress(.escape) {
-            guard screen.fnOpen || screen.allSettingsOpen else { return .ignored }
-            screen.closeOverlays()
-            return .handled
-        }
-        .onKeyPress(.leftArrow) { step(-1) }
-        .onKeyPress(.rightArrow) { step(1) }
     }
 
     private func step(_ offset: Int) -> KeyPress.Result {
         guard screen.fnOpen else { return .ignored }
         controller.requestStep(screen.selected, offset: offset)
         return .handled
+    }
+
+    private func flashHiddenHint() {
+        guard screen.manualHidden else {
+            showHiddenHint = false
+            return
+        }
+        withAnimation { showHiddenHint = true }
+        Task {
+            try? await Task.sleep(for: .seconds(2))
+            withAnimation { showHiddenHint = false }
+        }
     }
 }
 
@@ -98,12 +195,24 @@ private struct StatusPill: View {
 
     var body: some View {
         HStack(spacing: 14) {
+            if let started = controller.recordingStartedAt {
+                RecBadge(startedAt: started)
+            }
             HStack(spacing: 6) {
                 Circle().fill(controller.phase == .ready ? .green : .orange).frame(width: 8, height: 8)
                 Text("\(controller.deviceInfo?.model ?? "Камера") · USB")
             }
             Text(ValueFormatter.label(.exposureProgram, controller.property(.exposureProgram)))
-            Text("Карта: \(ValueFormatter.label(.cardRemaining, controller.property(.cardRemaining)))")
+            if controller.mode == .video {
+                Text("Карта: \(ValueFormatter.label(.cardRemaining, controller.property(.cardRemaining)))")
+            } else if Prefs.destination != .macOnly, let card = controller.properties[SonyProp.cardRemainingShots],
+                      card.enabled != 0, let shots = card.current.intValue {
+                // при сохранении «только на Mac» карта не используется — счётчик не показываем
+                Text("Карта: \(shots) кадров")
+            }
+            if controller.mode == .photo, Prefs.destination.savesToMac {
+                Text("Mac: \(FileManager.default.displayName(atPath: Prefs.folderURL.path))")
+            }
             Text("Батарея: \(ValueFormatter.label(.battery, controller.property(.battery)))")
         }
         .font(.callout)
@@ -121,7 +230,7 @@ private struct InfoLine: View {
 
     var body: some View {
         HStack(spacing: 22) {
-            ForEach(SettingCatalog.infoLine, id: \.self) { id in
+            ForEach(SettingCatalog.infoLine(for: controller.mode), id: \.self) { id in
                 Button { onOpen(id) } label: {
                     VStack(spacing: 2) {
                         Text(id.shortTitle.uppercased())
@@ -146,26 +255,5 @@ private struct InfoLine: View {
         .padding(.vertical, 10)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
         .opacity(controller.phase == .ready ? 1 : 0.5)
-    }
-}
-
-private struct RecordButton: View {
-    let controller: CameraController
-
-    var body: some View {
-        Button(action: controller.toggleRecording) {
-            ZStack {
-                Circle().strokeBorder(.white.opacity(0.9), lineWidth: 4).frame(width: 64, height: 64)
-                if controller.isRecording {
-                    RoundedRectangle(cornerRadius: 6).fill(.red).frame(width: 26, height: 26)
-                } else {
-                    Circle().fill(.red).frame(width: 46, height: 46)
-                }
-            }
-        }
-        .buttonStyle(.plain)
-        .disabled(controller.phase != .ready)
-        .opacity(controller.phase == .ready ? 1 : 0.4)
-        .help(controller.isRecording ? "Остановить запись" : "Начать запись")
     }
 }

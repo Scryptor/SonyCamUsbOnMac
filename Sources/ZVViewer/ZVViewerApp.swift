@@ -22,6 +22,9 @@ struct ZVViewerApp: App {
                 }
         }
         .windowResizability(.contentMinSize)
+        Settings {
+            SettingsView(controller: controller)
+        }
     }
 }
 
