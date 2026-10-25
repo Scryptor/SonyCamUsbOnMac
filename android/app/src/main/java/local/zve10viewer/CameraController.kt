@@ -640,6 +640,22 @@ class CameraController(private val context: Context, private val scope: Coroutin
             return SlowMotion(capture, setting?.let(RecordingModes::frameRate))
         }
 
+    /** Строка состояния: показывать ли её и приколота ли она (тогда не прячется вместе с элементами). */
+    var statusBarOn by mutableStateOf(prefs.statusBarOn)
+        private set
+    var statusBarPinned by mutableStateOf(prefs.statusBarPinned)
+        private set
+
+    fun toggleStatusBar() {
+        statusBarOn = !statusBarOn
+        prefs.statusBarOn = statusBarOn
+    }
+
+    fun toggleStatusBarPin() {
+        statusBarPinned = !statusBarPinned
+        prefs.statusBarPinned = statusBarPinned
+    }
+
     /** Где гистограмма (доли свободного места); null — на месте по умолчанию. */
     var histogramPlacement by mutableStateOf(prefs.histogramPlacement)
         private set

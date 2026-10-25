@@ -61,7 +61,12 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.offset
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -308,6 +313,8 @@ private fun LiveScreen(controller: CameraController, screen: ScreenState) {
     }
     // связь пропала — подсказки к ней больше нет
     DisposableEffect(Unit) { onDispose { screen.pillInfo = null } }
+    // строку состояния убрали — и подсказку под ней
+    LaunchedEffect(controller.statusBarOn) { if (!controller.statusBarOn) screen.pillInfo = null }
     // автоскрытие: через заданное в настройках время без касаний, если не открыто меню, панель или просмотр снимка
     LaunchedEffect(Unit) {
         while (true) {
@@ -366,7 +373,19 @@ private fun LiveScreen(controller: CameraController, screen: ScreenState) {
         AnimatedVisibility(showControls, enter = fadeIn(), exit = fadeOut()) {
             Controls(controller, screen, feedback)
         }
-        if (!showControls) {
+        // строка состояния — своим слоем: со всеми элементами или, приколотая, и когда они скрыты — на том же месте
+        val statusPinned = controller.statusBarOn && controller.statusBarPinned
+        AnimatedVisibility(controller.statusBarOn && (showControls || controller.statusBarPinned), enter = fadeIn(), exit = fadeOut()) {
+            Box(Modifier.fillMaxSize().padding(18.dp)) {
+                // поверх кнопок справа: подсказка может их накрыть
+                Column(Modifier.align(Alignment.TopEnd), horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    StatusPill(controller, screen)
+                    screen.pillInfo?.let { PillInfoCard(controller, it) }
+                }
+            }
+        }
+        // приколотая строка уже показывает «● REC» с таймером — отдельная плашка не нужна
+        if (!showControls && !statusPinned) {
             controller.recordingStartedAt?.let { started ->
                 RecBadge(started, Modifier.align(Alignment.TopEnd).padding(20.dp)
                     .background(Panel, RoundedCornerShape(12.dp)).padding(horizontal = 14.dp, vertical = 8.dp))
@@ -466,11 +485,6 @@ private fun Controls(controller: CameraController, screen: ScreenState, feedback
                     .background(Panel, RoundedCornerShape(10.dp)).padding(horizontal = 12.dp, vertical = 7.dp))
             }
         }
-        // поверх кнопок справа: подсказка может их накрыть
-        Column(Modifier.align(Alignment.TopEnd).zIndex(1f), horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            StatusPill(controller, screen)
-            screen.pillInfo?.let { PillInfoCard(controller, it) }
-        }
         RightColumn(controller, feedback, Modifier.align(Alignment.CenterEnd).padding(end = 4.dp))
         if (!screen.fnOpen && controller.shots.isNotEmpty()) {
             Box(Modifier.align(Alignment.BottomStart).padding(bottom = 76.dp)
@@ -492,14 +506,49 @@ private fun Controls(controller: CameraController, screen: ScreenState, feedback
 
 @Composable
 private fun StatusPill(controller: CameraController, screen: ScreenState) {
+    Row(Modifier.background(Panel, RoundedCornerShape(14.dp)).padding(start = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+        // булавка — своё касание: ни панель отладки, ни подсказки не открывает
+        PinButton(controller.statusBarPinned) { controller.toggleStatusBarPin() }
+        StatusPillTexts(controller, screen)
+    }
+}
+
+/** Булавка в начале строки состояния: приколотая строка не прячется вместе с элементами. */
+@Composable
+private fun PinButton(pinned: Boolean, onClick: () -> Unit) {
+    Box(Modifier.size(30.dp).clip(CircleShape).background(PanelLight).clickable(onClick = onClick), contentAlignment = Alignment.Center) {
+        Canvas(Modifier.size(18.dp)) {
+            val u = size.width / 24f
+            // канцелярская кнопка остриём вниз, наклонённая на 45°
+            rotate(45f) {
+                val body = Path().apply {
+                    moveTo(8.5f * u, 2.5f * u)
+                    lineTo(15.5f * u, 2.5f * u)
+                    lineTo(14.5f * u, 5f * u)
+                    lineTo(16.5f * u, 11f * u)
+                    lineTo(19f * u, 13f * u)
+                    lineTo(5f * u, 13f * u)
+                    lineTo(7.5f * u, 11f * u)
+                    lineTo(9.5f * u, 5f * u)
+                    close()
+                }
+                if (pinned) drawPath(body, Accent) else drawPath(body, Color.White, style = Stroke(1.6f * u, join = StrokeJoin.Round))
+                drawLine(if (pinned) Accent else Color.White, Offset(12f * u, 13f * u), Offset(12f * u, 21.5f * u), 1.8f * u, StrokeCap.Round)
+            }
+        }
+    }
+}
+
+@Composable
+private fun StatusPillTexts(controller: CameraController, screen: ScreenState) {
     Row(
-        Modifier.background(Panel, RoundedCornerShape(14.dp))
+        Modifier
             // долгое нажатие — панель отладки; короткие по надписям — подсказки, как раньше
             .onLongPress {
                 screen.pillInfo = null
                 screen.debugOpen = true
             }
-            .padding(horizontal = 16.dp, vertical = 10.dp),
+            .padding(start = 12.dp, end = 16.dp, top = 10.dp, bottom = 10.dp),
         horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically,
     ) {
         controller.recordingStartedAt?.let { RecBadge(it) }
@@ -680,6 +729,22 @@ private fun TopBar(controller: CameraController, screen: ScreenState) {
                 listOf(0.5f, 0.85f, 0.65f).forEachIndexed { i, h ->
                     drawRect(Color.White, Offset(w * (i * 2 - 0.5f + 1), size.height * (1 - h)), Size(w, size.height * h))
                 }
+            }
+        }
+        // строка состояния справа вверху: показать или убрать
+        Box(
+            Modifier.size(44.dp).background(if (controller.statusBarOn) Accent else PanelLight, RoundedCornerShape(9.dp))
+                .clickable { controller.toggleStatusBar() },
+            contentAlignment = Alignment.Center,
+        ) {
+            Canvas(Modifier.size(22.dp)) {
+                val stroke = 2.dp.toPx()
+                val top = size.height * 0.15f
+                val frame = Size(size.width - stroke, size.height * 0.7f - stroke)
+                val corner = CornerRadius(3.dp.toPx())
+                // рамка экрана с полосой сверху
+                drawRoundRect(Color.White, Offset(stroke / 2, top + stroke / 2), frame, corner, style = Stroke(stroke))
+                drawRoundRect(Color.White, Offset(stroke / 2, top + stroke / 2), Size(frame.width, frame.height * 0.32f), corner)
             }
         }
         controller.presets.forEachIndexed { index, preset ->
