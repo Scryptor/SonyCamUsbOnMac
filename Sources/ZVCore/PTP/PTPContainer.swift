@@ -24,6 +24,13 @@ public struct PTPReply: Equatable, Sendable {
     public let code: UInt16
     public let params: [UInt32]
     public let data: Data
+    /// Сколько шёл сам обмен с камерой — от отправки запроса до ответа, без ожидания своей очереди среди транзакций;
+    /// nil — транспорт не мерил. В сравнение ответов не входит.
+    public var elapsed: TimeInterval?
+
+    public static func == (a: PTPReply, b: PTPReply) -> Bool {
+        a.code == b.code && a.params == b.params && a.data == b.data
+    }
 
     public init(code: UInt16, params: [UInt32] = [], data: Data = Data()) {
         self.code = code

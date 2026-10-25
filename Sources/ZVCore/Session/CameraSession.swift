@@ -98,7 +98,9 @@ public actor CameraSession {
             try Task.checkCancellation()
             let sent = clock.now
             let reply = try await rawSend(SonyOp.getObject, [Sony.liveViewHandle])
-            let took = clock.now - sent
+            // время самого обмена — без ожидания очереди за другой транзакцией (скачивание снимка идёт секунды,
+            // и кадр за ним — не признак слабого канала); транспорт без своих замеров — по часам сеанса
+            let took = reply.elapsed.map { Duration.seconds($0) } ?? (clock.now - sent)
             switch reply.code {
             case PTPResponseCode.ok:
                 if let jpeg = LiveViewFrame.jpeg(from: reply.data) {

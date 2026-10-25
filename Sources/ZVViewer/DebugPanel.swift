@@ -234,7 +234,8 @@ enum DebugReport {
             var value: [String] = []
             switch property.current {
             case let .int(v): value.append(v > 9 || v < 0 ? "\(v) (0x\(String(UInt64(bitPattern: v), radix: 16, uppercase: true)))" : "\(v)")
-            case let .string(text): value.append("«\(text)»")
+            // текст — не показываем и не копируем (в нём может оказаться что угодно), кроме часов камеры 0xD223
+            case let .string(text): value.append(code == 0xD223 ? "«\(text)»" : "текст, \(text.count) симв.")
             case let .array(values): value.append("[" + values.map(String.init).joined(separator: ", ") + "]")
             case .unsupported: value.append("тип не разобран")
             }

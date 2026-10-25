@@ -102,3 +102,12 @@ private func packet(_ type: UInt32, _ payload: [UInt8]) -> Data {
     #expect(!PTPIP.isCameraAccessPoint("192.168.1.194"))
     #expect(!PTPIP.isCameraAccessPoint("192.168.122.10"))
 }
+
+@Test func readerRejectsAnAbsurdLength() {
+    // сбившийся поток: «длина» в гигабайт — не ждать её вечно, а считать поток сломанным
+    var reader = PTPIPPacketReader()
+    var bytes = Data()
+    bytes.append(contentsOf: [0x00, 0x00, 0x00, 0x40, 0x07, 0x00, 0x00, 0x00])
+    reader.feed(bytes)
+    #expect(throws: PTPIPError.self) { try reader.next() }
+}

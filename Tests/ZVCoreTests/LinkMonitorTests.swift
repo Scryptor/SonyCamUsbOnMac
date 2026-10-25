@@ -52,7 +52,8 @@ private func run(_ monitor: inout LinkMonitor, from start: Date, until seconds: 
     #expect(monitor.outageSince == start)
     let pings = actions.filter { $0.action == .ping }.map(\.t)
     #expect(pings.first == 2.5)
-    #expect(pings.allSatisfy { $0 <= 10.5 })
+    // и после первого ответа пингуем дальше — до самого сброса
+    #expect(pings.contains(11.5) && pings.allSatisfy { $0 <= 13.5 })
     let close = actions.first { if case .close = $0.action { return true } else { return false } }
     #expect(close?.action == .close(.resetAfterOutage))
     #expect(close.map { $0.t >= 13 && $0.t <= 13.75 } == true)
@@ -155,4 +156,14 @@ private func run(_ monitor: inout LinkMonitor, from start: Date, until seconds: 
     monitor.eventReceived(at: start.addingTimeInterval(20.1))
     #expect(!monitor.isOutage)
     #expect(monitor.tick(now: start.addingTimeInterval(21)).allSatisfy { $0 != .close(.cameraSilent) })
+}
+
+@Test func linkMonitorCancelsTheResetWhenTheLinkDropsAgain() {
+    let start = Date(timeIntervalSinceReferenceDate: 1000)
+    var monitor = LinkMonitor(now: start)
+    monitor.operationStarted(at: start)
+    // ping ответил один раз (на 4,5 с) и снова молчит: RST ушёл бы в пустоту — не сбрасываем
+    let actions = run(&monitor, from: start, until: 20, ping: { $0 == 4.5 })
+    #expect(!actions.contains { $0.action == .close(.resetAfterOutage) })
+    #expect(monitor.isOutage)
 }

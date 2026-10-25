@@ -118,6 +118,8 @@ final class CameraController {
     @ObservationIgnored private var linkRTT: TimeInterval?
     @ObservationIgnored private var qualityPolicy = LiveViewQualityPolicy(now: Date())
     @ObservationIgnored private var qualityWriting = false
+    /// Когда в последний раз просили камеру вернуть высокое при выключенной адаптации: кадры меняются не сразу.
+    @ObservationIgnored private var forcedHighAt: Date?
     @ObservationIgnored private var reconnectTask: Task<Void, Never>?
     @ObservationIgnored private var reconnectAttempt = 0
     /// Пока идёт сеанс, macOS не усыпляет программу (App Nap душил превью до 6–12 к/с), систему и экран.
@@ -724,6 +726,8 @@ final class CameraController {
                 guard !Task.isCancelled else { return }
                 self.phase = .ready
                 self.connectionMessage = nil
+                // сеанс готов — восстановление кончилось, даже если кадров пока нет (иначе карточка висела бы)
+                self.finishReconnect()
                 self.startQuality(session)
                 onReady()
             } catch is CancellationError {
@@ -944,7 +948,9 @@ final class CameraController {
         note("сеанс по Wi-Fi оборвался: \(loss.map(Self.lossTitle) ?? "сеанс закончился")")
         lastLoss = (loss, Date())
         let quiet = (frame != nil || reconnectingSince != nil) && (loss?.reconnectsAtOnce ?? true) && Prefs.wifiEnabled
-        guard quiet else {
+        // попытки подключаются, а сеанс снова и снова падает до первого кадра — тоже не дольше минуты
+        let expired = reconnectingSince.map { Date().timeIntervalSince($0) >= WiFiPolicy.reconnectWindow } ?? false
+        guard quiet, !expired else {
             giveUpReconnect()
             return
         }
@@ -963,8 +969,9 @@ final class CameraController {
         reconnectTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(delay))
             guard let self, !Task.isCancelled, self.reconnectingSince != nil else { return }
-            // пока ждали, Wi-Fi выключили в настройках — восстанавливать незачем
-            guard Prefs.wifiEnabled else {
+            // пока ждали, Wi-Fi выключили в настройках или вышла минута — восстанавливать незачем
+            let expired = self.reconnectingSince.map { Date().timeIntervalSince($0) >= WiFiPolicy.reconnectWindow } ?? true
+            guard Prefs.wifiEnabled, !expired else {
                 self.giveUpReconnect()
                 return
             }
@@ -984,6 +991,16 @@ final class CameraController {
         }
     }
 
+    /// Сеанс после обрыва снова работает: первый кадр или готовность — что раньше.
+    private func finishReconnect() {
+        guard let since = reconnectingSince else { return }
+        let seconds = Date().timeIntervalSince(since)
+        reconnects += 1
+        lastRecoverySeconds = seconds
+        reconnectingSince = nil
+        note(String(format: "сеанс восстановлен за %.1f с", seconds))
+    }
+
     /// Тихо восстановить сеанс не вышло (или и не стоило): обычное ожидание — экран «Подключите камеру»,
     /// поиск в сети с растущей паузой, а если камера ждёт на кабеле — она.
     private func giveUpReconnect() {
@@ -999,8 +1016,13 @@ final class CameraController {
     private func suspendSession() {
         tasks.forEach { $0.cancel() }
         tasks.removeAll()
-        let close = closeTransport
-        Task { await close?() }
+        // старое соединение — сбросом (RST): камера, застрявшая на передаче, освобождается сразу и примет новое
+        if let old = wifiTransport {
+            Task { await old.closeAbortively() }
+        } else {
+            let close = closeTransport
+            Task { await close?() }
+        }
         closeTransport = nil
         wifiTransport = nil
         recordingModeTask?.cancel()
@@ -1063,8 +1085,11 @@ final class CameraController {
         let wanted: LiveViewQuality?
         if Prefs.wifiAdaptiveQuality {
             wanted = qualityPolicy.decide(now: Date(), outage: linkOutageSince != nil)
+        } else if current == .low, forcedHighAt.map({ Date().timeIntervalSince($0) > 5 }) ?? true {
+            forcedHighAt = Date()
+            wanted = .high
         } else {
-            wanted = current == .low ? .high : nil
+            wanted = nil
         }
         guard let wanted, wanted != current else { return }
         let predicted = qualityPolicy.predictedHighFPS(now: Date(), window: 5)
@@ -1150,13 +1175,8 @@ final class CameraController {
         frame = image
         lastJPEG = sample.jpeg
         let now = Date()
-        if let since = reconnectingSince, session != nil {
-            // первый кадр нового сеанса после обрыва — сеанс восстановлен
-            reconnects += 1
-            lastRecoverySeconds = now.timeIntervalSince(since)
-            reconnectingSince = nil
-            note(String(format: "сеанс восстановлен за %.1f с до первого кадра", now.timeIntervalSince(since)))
-        }
+        // первый кадр нового сеанса после обрыва — сеанс восстановлен
+        if session != nil { finishReconnect() }
         recentFrames.append((now, sample.bytes, sample.seconds, sample.waits))
         framesTotal += 1
         recentFrames.removeAll { now.timeIntervalSince($0.at) > 5 }

@@ -13,7 +13,9 @@ final class PTPIPChannel: @unchecked Sendable {
     private var waiter: (id: Int, since: Date, continuation: CheckedContinuation<PTPIPPacket, Error>)?
     private var waiterSeq = 0
     private var failure: Error?
-    private var lastRx = Date()
+    private var lastRx = MonotonicTime.now()
+    /// С какого момента считать тишину заново: кончился провал связи — тишина до него в тайм-аут не идёт.
+    private var idleFrom = Date.distantPast
     /// Связь пропала: ожидание пакета не истекает, пока она не вернётся или транспорт не закроют.
     private var paused = false
 
@@ -31,6 +33,13 @@ final class PTPIPChannel: @unchecked Sendable {
     func setPaused(_ value: Bool) {
         lock.lock()
         paused = value
+        lock.unlock()
+    }
+
+    /// Провал связи кончился: тайм-аут ожидания считается с этого момента, а не с последнего байта до провала.
+    func restartIdleClock() {
+        lock.lock()
+        idleFrom = MonotonicTime.now()
         lock.unlock()
     }
 
@@ -125,7 +134,7 @@ final class PTPIPChannel: @unchecked Sendable {
             }
             waiterSeq += 1
             let id = waiterSeq
-            waiter = (id, Date(), continuation)
+            waiter = (id, MonotonicTime.now(), continuation)
             lock.unlock()
             if let timeout { check(id, after: timeout.seconds, idle: timeout.seconds) }
         }
@@ -155,7 +164,7 @@ final class PTPIPChannel: @unchecked Sendable {
             lock.unlock()
             return
         }
-        let quiet = Date().timeIntervalSince(max(lastRx, current.since))
+        let quiet = MonotonicTime.now().timeIntervalSince(max(lastRx, current.since, idleFrom))
         if paused || quiet < idle {
             let pause = paused
             lock.unlock()
@@ -181,7 +190,7 @@ final class PTPIPChannel: @unchecked Sendable {
 
     private func deliver(_ data: Data) {
         lock.lock()
-        lastRx = Date()
+        lastRx = MonotonicTime.now()
         reader.feed(data)
         var ready: [(CheckedContinuation<PTPIPPacket, Error>, PTPIPPacket)] = []
         var garbled = false
@@ -235,7 +244,7 @@ public actor PTPIPTransport: PTPTransport {
     private var closed = false
     private var eventTask: Task<Void, Never>?
     private var watchTask: Task<Void, Never>?
-    private var monitor = LinkMonitor(now: Date())
+    private var monitor = LinkMonitor(now: MonotonicTime.now())
     private var seenCommandRx = Date.distantPast
     private var seenEventRx = Date.distantPast
     private var lastStatus = LinkStatus()
@@ -326,6 +335,12 @@ public actor PTPIPTransport: PTPTransport {
         shutDown(abortive: false)
     }
 
+    /// Сброс (RST) по решению программы — перед новым подключением: камера, застрявшая на передаче, освобождается
+    /// сразу, а FIN ей было бы некогда разобрать.
+    public func closeAbortively() {
+        shutDown(abortive: true)
+    }
+
     /// Сразу после сопряжения камера иногда молчит на первую команду: ждём недолго и повторяем.
     private func openSession() async throws {
         for attempt in 1...4 {
@@ -345,7 +360,9 @@ public actor PTPIPTransport: PTPTransport {
         guard let command, !closed else { throw TransportError.disconnected }
         let tid = nextTransactionID
         nextTransactionID &+= 1
-        monitor.operationStarted(at: Date())
+        monitor.operationStarted(at: MonotonicTime.now())
+        // время самого обмена — после своей очереди: ожидание за чужой транзакцией в него не входит
+        let started = MonotonicTime.now()
         do {
             try await command.write(PTPIP.operationRequest(operation, transactionID: tid, params: params, dataOut: outData != nil))
             if let outData {
@@ -360,8 +377,9 @@ public actor PTPIPTransport: PTPTransport {
                     try await command.write(PTPIP.probeResponse)
                     continue
                 }
-                if let reply = transaction.consume(packet) {
+                if var reply = transaction.consume(packet) {
                     monitor.operationAnswered()
+                    reply.elapsed = MonotonicTime.now().timeIntervalSince(started)
                     return reply
                 }
             }
@@ -396,7 +414,7 @@ public actor PTPIPTransport: PTPTransport {
     // MARK: - Слежение за связью
 
     private func startWatching() {
-        monitor = LinkMonitor(now: Date())
+        monitor = LinkMonitor(now: MonotonicTime.now())
         watchTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(250))
@@ -417,7 +435,8 @@ public actor PTPIPTransport: PTPTransport {
             seenEventRx = eventRx
             monitor.eventReceived(at: eventRx)
         }
-        for action in monitor.tick(now: Date()) {
+        let wasOutage = monitor.isOutage
+        for action in monitor.tick(now: MonotonicTime.now()) {
             switch action {
             case .sendProbe:
                 Task { try? await event.write(PTPIP.probeRequest) }
@@ -433,24 +452,28 @@ public actor PTPIPTransport: PTPTransport {
             }
         }
         command.setPaused(monitor.isOutage)
+        if wasOutage, !monitor.isOutage { command.restartIdleClock() }
         publishStatus()
         return true
     }
 
     private func probeAnswered() {
-        monitor.probeAnswered(at: Date())
+        let wasOutage = monitor.isOutage
+        monitor.probeAnswered(at: MonotonicTime.now())
+        if wasOutage, !monitor.isOutage { command?.restartIdleClock() }
         publishStatus()
     }
 
     private func pinged(_ answered: Bool) {
-        monitor.pinged(answered, at: Date())
+        monitor.pinged(answered, at: MonotonicTime.now())
     }
 
     private func publishStatus() {
         let status = monitor.status
         guard status != lastStatus else { return }
         lastStatus = status
-        statusContinuation.yield(status)
+        // для экрана — по обычным часам: «прервалась · 0:07» считается от них
+        statusContinuation.yield(LinkStatus(outageSince: status.outageSince.map(MonotonicTime.wallClock), rtt: status.rtt))
     }
 
     /// Транспорт закрывается сам. Связь вернулась или соединение сломано — RST: камера освобождает сеанс сразу,

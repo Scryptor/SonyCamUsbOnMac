@@ -130,9 +130,10 @@ public struct LinkMonitor: Sendable {
         }
         if let since = outageSince {
             if now.timeIntervalSince(since) >= timing.giveUpAfter { return [.close(.noLink)] }
-            if let back = linkBackAt {
-                return now.timeIntervalSince(back) >= timing.stuckAfterLinkBack ? [.close(.resetAfterOutage)] : []
+            if let back = linkBackAt, now.timeIntervalSince(back) >= timing.stuckAfterLinkBack {
+                return [.close(.resetAfterOutage)]
             }
+            // пингуем и после первого ответа: связь могла пропасть снова — тогда RST ушёл бы в пустоту
             guard now.timeIntervalSince(lastPingAt) >= timing.pingEvery else { return [] }
             lastPingAt = now
             return [.ping]

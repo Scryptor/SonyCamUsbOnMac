@@ -147,7 +147,8 @@ public struct PTPIPPacketReader: Sendable {
         var r = ByteReader(buffer.prefix(8))
         let length = try r.u32()
         let type = try r.u32()
-        guard length >= 8 else { throw PTPIPError.badLength(length) }
+        // длиннее 256 МБ пакетов не бывает (файлы идут по 2 МБ): такая длина — сбившийся поток
+        guard length >= 8, length <= 256 << 20 else { throw PTPIPError.badLength(length) }
         guard buffer.count >= Int(length) else { return nil }
         let payload = Data(buffer.dropFirst(8).prefix(Int(length) - 8))
         buffer = Data(buffer.dropFirst(Int(length)))
