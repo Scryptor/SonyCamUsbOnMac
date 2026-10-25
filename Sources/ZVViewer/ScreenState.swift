@@ -12,9 +12,8 @@ final class ScreenState {
     var group: SettingGroup = .exposure
     var editing: SettingID?
     private(set) var histogramOn: Bool
-    /// Строка состояния справа сверху: включена ли (по умолчанию да) и закреплена ли — закреплённая не прячется
-    /// вместе с элементами. Включённая, но не закреплённая видна и прячется вместе с ними.
-    private(set) var statusBarOn: Bool
+    /// Строка состояния справа сверху видна всегда, когда видны элементы. Закреплённая — кнопка рядом с гистограммой
+    /// горит, так и по умолчанию — остаётся на экране и когда элементы спрятаны: клавишей H или сами.
     private(set) var statusBarPinned: Bool
     /// Скрыто клавишей H — возвращается только ей же.
     private(set) var manualHidden = false
@@ -94,6 +93,9 @@ final class ScreenState {
 
     var controlsHidden: Bool { manualHidden || autoHidden }
 
+    /// Элементы на экране: не спрятаны, или открыто то, с чем они не прячутся, — меню, панель, подсказка.
+    var controlsShown: Bool { !controlsHidden || fnOpen || allSettingsOpen || pillInfo != nil }
+
     func togglePillInfo(_ info: PillInfo) {
         let open = pillInfo != info
         closeOverlays()
@@ -122,8 +124,7 @@ final class ScreenState {
 
     init() {
         histogramOn = defaults.bool(forKey: "histogramOn")
-        statusBarOn = defaults.object(forKey: "statusBarOn") as? Bool ?? true
-        statusBarPinned = defaults.bool(forKey: "statusBarPinned")
+        statusBarPinned = defaults.object(forKey: "statusBarPinned") as? Bool ?? true
         histogramPlacement = defaults.data(forKey: "histogramPlacement").flatMap { try? JSONDecoder().decode(FloatingPlacement.self, from: $0) }
     }
 
@@ -153,12 +154,6 @@ final class ScreenState {
         allSettingsOpen = false
         editing = nil
         pillInfo = nil
-    }
-
-    func toggleStatusBar() {
-        statusBarOn.toggle()
-        defaults.set(statusBarOn, forKey: "statusBarOn")
-        if !statusBarOn, pillInfo != nil { pillInfo = nil }
     }
 
     func toggleStatusPin() {

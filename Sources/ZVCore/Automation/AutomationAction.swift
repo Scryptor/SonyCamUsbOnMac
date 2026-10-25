@@ -43,8 +43,7 @@ public enum AutomationAction: Equatable, Sendable, Decodable {
     /// Цифровое увеличение: множитель и точка кадра (доли) в центре экрана; без точки — центр как был.
     case setZoom(factor: Double, x: Double?, y: Double?)
     case resetZoom
-    /// Строка состояния: показать или спрятать; закрепить или открепить.
-    case toggleStatusBar
+    /// Строка состояния: закрепить или открепить — закреплённая остаётся на экране, когда элементы спрятаны.
     case toggleStatusPin
 
     private enum Keys: String, CodingKey {
@@ -90,7 +89,6 @@ public enum AutomationAction: Equatable, Sendable, Decodable {
             self = .setZoom(factor: try c.decode(Double.self, forKey: .factor), x: try c.decodeIfPresent(Double.self, forKey: .x),
                             y: try c.decodeIfPresent(Double.self, forKey: .y))
         case "resetZoom": self = .resetZoom
-        case "toggleStatusBar": self = .toggleStatusBar
         case "toggleStatusPin": self = .toggleStatusPin
         default:
             throw DecodingError.dataCorruptedError(forKey: .action, in: c, debugDescription: "неизвестная команда \(action)")

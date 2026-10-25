@@ -64,14 +64,9 @@ class Prefs(context: Context) {
         get() = prefs.getBoolean("histogramOn", false)
         set(value) = prefs.edit().putBoolean("histogramOn", value).apply()
 
-    /** Строка состояния справа вверху: показывать ли её вообще. */
-    var statusBarOn: Boolean
-        get() = prefs.getBoolean("statusBarOn", true)
-        set(value) = prefs.edit().putBoolean("statusBarOn", value).apply()
-
-    /** Строка состояния приколота: не прячется вместе с остальными элементами. */
+    /** Строка состояния справа вверху закреплена: остаётся на экране и когда элементы скрыты. Вместе с ними видна всегда. */
     var statusBarPinned: Boolean
-        get() = prefs.getBoolean("statusBarPinned", false)
+        get() = prefs.getBoolean("statusBarPinned", true)
         set(value) = prefs.edit().putBoolean("statusBarPinned", value).apply()
 
     /**

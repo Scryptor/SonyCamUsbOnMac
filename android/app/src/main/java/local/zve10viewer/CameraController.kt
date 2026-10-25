@@ -670,16 +670,9 @@ class CameraController(private val context: Context, private val scope: Coroutin
             return SlowMotion(capture, setting?.let(RecordingModes::frameRate))
         }
 
-    /** Строка состояния: показывать ли её и приколота ли она (тогда не прячется вместе с элементами). */
-    var statusBarOn by mutableStateOf(prefs.statusBarOn)
-        private set
+    /** Строка состояния видна вместе с элементами; закреплённая (так по умолчанию) остаётся и когда они скрыты. */
     var statusBarPinned by mutableStateOf(prefs.statusBarPinned)
         private set
-
-    fun toggleStatusBar() {
-        statusBarOn = !statusBarOn
-        prefs.statusBarOn = statusBarOn
-    }
 
     fun toggleStatusBarPin() {
         statusBarPinned = !statusBarPinned

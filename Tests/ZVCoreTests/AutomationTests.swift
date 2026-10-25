@@ -81,6 +81,5 @@ import Testing
     #expect(try decode(#"{"action":"setZoom","factor":4,"x":0.3,"y":0.4}"#) == .setZoom(factor: 4, x: 0.3, y: 0.4))
     #expect(try decode(#"{"action":"setZoom","factor":2}"#) == .setZoom(factor: 2, x: nil, y: nil))
     #expect(try decode(#"{"action":"resetZoom"}"#) == .resetZoom)
-    #expect(try decode(#"{"action":"toggleStatusBar"}"#) == .toggleStatusBar)
     #expect(try decode(#"{"action":"toggleStatusPin"}"#) == .toggleStatusPin)
 }

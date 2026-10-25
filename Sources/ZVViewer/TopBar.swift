@@ -21,15 +21,17 @@ struct TopBar: View {
                 .help("Гистограмма")
                 .accessibilityLabel("Гистограмма")
 
-                Button(action: screen.toggleStatusBar) {
+                // строка состояния видна вместе с элементами; кнопка закрепляет её — тогда остаётся и без них
+                Button(action: screen.toggleStatusPin) {
                     TopBarIconView(icon: .statusBar)
                         .frame(width: 30, height: 26)
-                        .background(screen.statusBarOn ? Color.accentColor : Color.white.opacity(0.08),
+                        .background(screen.statusBarPinned ? Color.accentColor : Color.white.opacity(0.08),
                                     in: RoundedRectangle(cornerRadius: 7))
                 }
                 .buttonStyle(.plain)
-                .help(screen.statusBarOn ? "Спрятать строку состояния" : "Показать строку состояния")
-                .accessibilityLabel("Строка состояния")
+                .help(screen.statusBarPinned ? "Открепить строку состояния: будет прятаться вместе с элементами"
+                      : "Закрепить строку состояния: останется на экране, когда элементы спрятаны")
+                .accessibilityLabel("Закрепить строку состояния")
 
                 ForEach(Array(controller.presets.enumerated()), id: \.offset) { index, preset in
                     Button { controller.applyPreset(index) } label: {
