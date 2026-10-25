@@ -95,7 +95,9 @@ open "/Applications/ZV-E10 Viewer.app" --args --automation
 | `cameraDestination` | число или `null` | куда камера сохраняет снимки (`0xD222`): 1 — Mac, 16 — карта, 17 — оба |
 | `presets` | массив | `name`; `values` — словарь «настройка → значение»; `skip` — настройки, которые пресет не меняет; `summary` — что он ставит, строкой, как в списке; `active` — стоит ли он сейчас на камере |
 | `activePreset` | число или `null` | номер (с 0) первого пресета, который стоит на камере, — его имя на кнопке пресетов |
-| `ui` | объект | что на экране: `fnOpen`, `allSettingsOpen`, `selected`, `group`, `editing` (если открыта строка), `info` (если открыта подсказка из плашки: `connection`, `frames` или `slowMotion`), `histogram`, `histogramPosition` — где гистограмма (`x`, `y` — доли свободного места; `null` — на месте по умолчанию), `controlsHidden`, `manualHidden`, `debug` — открыта ли панель отладки, `debugTab` — её вкладка, `gallery` — открытая галерея (`index` снимка в `shots`, `title`) или `null`, `zoom` — цифровое увеличение (`factor`, `centerX`, `centerY` — точка кадра в центре экрана, доли), `statusBar` — строка состояния: `pinned` — закреплена ли, `visible` — видна ли сейчас (вместе с элементами или закреплённая), `presetMenu` — открыт ли список пресетов, `presetsWindow` — окно «Пресеты» (`selected` — выбранный в нём пресет) или `null` |
+| `previewingPreset` | число или `null` | какой пресет сейчас в быстром просмотре («Посмотреть» держат или камера ещё возвращается) |
+| `previewReturning` | bool | кнопку отпустили, камера возвращается как была |
+| `ui` | объект | что на экране: `fnOpen`, `allSettingsOpen`, `selected`, `group`, `editing` (если открыта строка), `info` (если открыта подсказка из плашки: `connection`, `frames` или `slowMotion`), `histogram`, `histogramPosition` — где гистограмма (`x`, `y` — доли свободного места; `null` — на месте по умолчанию), `controlsHidden`, `manualHidden`, `debug` — открыта ли панель отладки, `debugTab` — её вкладка, `gallery` — открытая галерея (`index` снимка в `shots`, `title`) или `null`, `zoom` — цифровое увеличение (`factor`, `centerX`, `centerY` — точка кадра в центре экрана, доли), `statusBar` — строка состояния: `pinned` — закреплена ли, `visible` — видна ли сейчас (вместе с элементами или закреплённая), `presetMenu` — открыт ли список пресетов, `presetPeeking` — держат ли «Посмотреть», `presetsWindow` — окно «Пресеты» (`selected` — выбранный в нём пресет) или `null` |
 | `settings` | массив | все 24 настройки, см. ниже |
 
 Элемент `settings`:
@@ -184,6 +186,8 @@ open "/Applications/ZV-E10 Viewer.app" --args --automation
 | `movePreset` | `from`, `to` | переставить пресет — меняется и его цифра 1–9 |
 | `duplicatePreset` | `index` | копия «… — копия» следом, она же выбирается в окне |
 | `recapturePreset` | `index` | «Взять с камеры»; 409, если камера не готова |
+| `beginPresetPreview` | `index` | как нажать «Посмотреть»: окно пресетов прозрачно, пресет — на камере; 409, если камера не готова или занята |
+| `endPresetPreview` | — | как отпустить: недописанное не пишется, камера возвращается как была |
 
 ### Съёмка
 
