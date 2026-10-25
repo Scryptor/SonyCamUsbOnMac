@@ -219,10 +219,14 @@ class PtpIpPacketReader {
  * Ответ на одну операцию: данные (Start Data → Data… → End Data) и ответ камеры.
  * Пакеты чужих транзакций — остатки оборванного обмена — пропускаются.
  * Данные собираются в буфер ровно того размера, что объявила камера: кадр отдаётся без лишней копии.
+ * progress — счётчик принятых байт для доли загрузки снимка.
  */
-class PtpIpTransaction(private val transactionId: Long) {
+class PtpIpTransaction(private val transactionId: Long, private val progress: DataProgress? = null) {
     private var data = EMPTY
     private var filled = 0
+    /** Сколько байт объявила камера в Start Data; null — фазы данных (ещё) не было. */
+    var expected: Long? = null
+        private set
 
     /** Возвращает ответ, когда он пришёл; до этого — null. */
     fun consume(packet: PtpIpPacket): PtpReply? = consume(packet.type, packet.payload, 0, packet.payload.size)
@@ -235,17 +239,23 @@ class PtpIpTransaction(private val transactionId: Long) {
             if (length >= 12 && u32(bytes, offset) == transactionId) {
                 val total = u32(bytes, offset + 4) or (u32(bytes, offset + 8) shl 32)
                 if (total in 1..MAX_PRESIZE && filled == 0) data = ByteArray(total.toInt())
+                expected = total
+                progress?.begin(total)
             }
             null
         }
         PtpIp.DATA, PtpIp.END_DATA -> {
-            if (length >= 4 && u32(bytes, offset) == transactionId) append(bytes, offset + 4, length - 4)
+            if (length >= 4 && u32(bytes, offset) == transactionId) {
+                append(bytes, offset + 4, length - 4)
+                progress?.add(length - 4)
+            }
             null
         }
         PtpIp.OPERATION_RESPONSE -> {
             if (length < 6 || u32(bytes, offset + 2) != transactionId) {
                 null
             } else {
+                progress?.finish()
                 val code = (bytes[offset].toInt() and 0xFF) or ((bytes[offset + 1].toInt() and 0xFF) shl 8)
                 val params = ArrayList<Long>()
                 var at = offset + 6

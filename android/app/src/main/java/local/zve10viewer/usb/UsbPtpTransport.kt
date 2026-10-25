@@ -9,6 +9,7 @@ import android.util.Log
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.receiveAsFlow
+import local.zve10viewer.ptp.DataProgress
 import local.zve10viewer.ptp.PtpContainer
 import local.zve10viewer.ptp.PtpEvent
 import local.zve10viewer.ptp.PtpReply
@@ -38,6 +39,8 @@ class UsbPtpTransport(
     private var eventRequest: UsbRequest? = null
     private val eventChannel = Channel<PtpEvent>(Channel.UNLIMITED)
     override val events: Flow<PtpEvent> = eventChannel.receiveAsFlow()
+    /** Принятые байты контейнера данных (длина — из его заголовка) — для доли загрузки снимка. */
+    override val dataProgress = DataProgress()
 
     init {
         var input: UsbEndpoint? = null
@@ -101,27 +104,32 @@ class UsbPtpTransport(
         write(PtpContainer.command(operation, transactionId, params), timeout)
         if (outData != null) write(PtpContainer.data(operation, transactionId, outData), timeout)
         var data = ByteArray(0)
-        while (true) {
-            val container = readContainer(timeout)
-            // остатки прошлых обменов (оборванное подключение) отсеиваем по номеру транзакции и коду
-            if (container.transactionId != transactionId ||
-                (container.type == PtpContainer.DATA && container.code != operation)) {
-                Log.w(TAG, "пропускаю чужой контейнер: тип ${container.type}, транзакция ${container.transactionId}")
-                continue
-            }
-            when (container.type) {
-                PtpContainer.DATA -> data = container.payload
-                PtpContainer.RESPONSE -> {
-                    val reply = PtpReply(container.code, container.params(), data)
-                    if (operation == SonyOp.OPEN_SESSION && (reply.isOK || reply.code == 0x201E)) {
-                        sessionOpen = true
-                        nextTransactionId = 1
-                    }
-                    reply.elapsedNanos = System.nanoTime() - started
-                    return reply
+        try {
+            while (true) {
+                val container = readContainer(timeout)
+                // остатки прошлых обменов (оборванное подключение) отсеиваем по номеру транзакции и коду
+                if (container.transactionId != transactionId ||
+                    (container.type == PtpContainer.DATA && container.code != operation)) {
+                    Log.w(TAG, "пропускаю чужой контейнер: тип ${container.type}, транзакция ${container.transactionId}")
+                    continue
                 }
-                else -> Log.w(TAG, "неожиданный контейнер типа ${container.type}")
+                when (container.type) {
+                    PtpContainer.DATA -> data = container.payload
+                    PtpContainer.RESPONSE -> {
+                        val reply = PtpReply(container.code, container.params(), data)
+                        if (operation == SonyOp.OPEN_SESSION && (reply.isOK || reply.code == 0x201E)) {
+                            sessionOpen = true
+                            nextTransactionId = 1
+                        }
+                        reply.elapsedNanos = System.nanoTime() - started
+                        return reply
+                    }
+                    else -> Log.w(TAG, "неожиданный контейнер типа ${container.type}")
+                }
             }
+        } finally {
+            // и при ошибке: недокачанное не должно висеть на кнопке спуска
+            dataProgress.finish()
         }
     }
 
@@ -169,11 +177,18 @@ class UsbPtpTransport(
         if (length < PtpContainer.HEADER) fail("неверная длина контейнера: $length")
         val bytes = ByteArray(length)
         System.arraycopy(chunk, 0, bytes, 0, minOf(n, length))
+        // данные — считаем принятые байты (без заголовка) для доли загрузки; ответ — короткий, его не считаем
+        val counted = type == PtpContainer.DATA
+        if (counted) {
+            dataProgress.begin((length - PtpContainer.HEADER).toLong())
+            dataProgress.add(minOf(n, length) - PtpContainer.HEADER)
+        }
         var received = n
         while (received < length) {
             val m = connection.bulkTransfer(bulkIn, chunk, chunk.size, timeoutMs)
             if (m < 0) fail("данные от камеры оборвались на $received из $length байт")
             System.arraycopy(chunk, 0, bytes, received, minOf(m, length - received))
+            if (counted) dataProgress.add(minOf(m, length - received))
             received += m
         }
         return Container(type, code, le32(bytes, 8).toInt(), bytes)

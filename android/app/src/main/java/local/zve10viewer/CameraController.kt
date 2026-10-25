@@ -576,7 +576,9 @@ class CameraController(private val context: Context, private val scope: Coroutin
                 if (properties[SonyProp.STILL_IMAGE_STORE_DESTINATION]?.current?.intValue != destination.cameraValue) {
                     session.set(SonyProp.STILL_IMAGE_STORE_DESTINATION, destination.cameraValue)
                 }
-                val objects = session.capturePhoto(destination.savesToDevice)
+                // RAW+JPEG (0xD253 = 2) — два файла, иначе один: пришли все — спуск сразу свободен
+                val fileCount = if (properties[SonyProp.FILE_FORMAT]?.current?.intValue == 2L) 2 else 1
+                val objects = session.capturePhoto(destination.savesToDevice, fileCount)
                 if (!destination.savesToDevice) {
                     showStatus("Снимок сохранён на карту камеры")
                     return@launch

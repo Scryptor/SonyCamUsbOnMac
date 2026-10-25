@@ -167,6 +167,39 @@ object PtpContainer {
 
 class TransportException(message: String, val disconnected: Boolean = false) : Exception(message)
 
+/**
+ * Сколько байт пришло в идущей сейчас фазе данных и сколько ожидается — для доли загрузки снимка на кнопке спуска.
+ * Пишет транспорт (поток транзакции, один за раз), читает экран 10 раз в секунду: поля без замка, а мелкая
+ * рассогласованность между ними на долю на кнопке не влияет.
+ */
+class DataProgress {
+    data class Reading(val received: Long, val expected: Long?)
+
+    @Volatile private var active = false
+    @Volatile private var received = 0L
+    @Volatile private var expected = -1L
+
+    /** Началась фаза данных; expected — объявленная длина (null — неизвестна). */
+    fun begin(expected: Long?) {
+        received = 0
+        this.expected = expected ?: -1
+        active = true
+    }
+
+    fun add(bytes: Int) {
+        if (active) received += bytes
+    }
+
+    /** Ответ пришёл или транзакция оборвалась. */
+    fun finish() {
+        active = false
+    }
+
+    /** null — данные сейчас не идут. */
+    val current: Reading?
+        get() = if (active) Reading(received, expected.takeIf { it >= 0 }) else null
+}
+
 /** Канал до камеры: отправка PTP-операций и поток событий от камеры. */
 interface PtpTransport {
     /**
@@ -176,4 +209,6 @@ interface PtpTransport {
     fun send(operation: Int, params: List<Long> = emptyList(), outData: ByteArray? = null, timeoutMs: Int? = null): PtpReply
     val events: kotlinx.coroutines.flow.Flow<PtpEvent>
     fun close()
+    /** Счётчик принятых байт фазы данных; null — транспорт его не ведёт (доля загрузки не видна, дуга крутится). */
+    val dataProgress: DataProgress? get() = null
 }

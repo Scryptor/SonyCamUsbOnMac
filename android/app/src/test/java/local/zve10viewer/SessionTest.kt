@@ -15,6 +15,7 @@ import local.zve10viewer.ptp.PtpTransport
 import local.zve10viewer.ptp.PtpType
 import local.zve10viewer.ptp.PtpValue
 import local.zve10viewer.session.CameraSession
+import local.zve10viewer.session.CapturePhase
 import local.zve10viewer.session.LiveViewQuality
 import local.zve10viewer.session.RefreshCoalescer
 import local.zve10viewer.session.SessionException
@@ -92,22 +93,61 @@ class SessionTest {
 
     @Test fun captureDownloadsEveryObjectOfTheShot() = runTest {
         val camera = FakeCamera().apply {
-            capturedFiles = listOf("DSC00001.ARW" to byteArrayOf(1, 2, 3), "DSC00001.JPG" to byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 9))
+            capturedFiles = listOf("DSC00001.ARW" to byteArrayOf(1, 2, 3, 4), "DSC00001.JPG" to byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 9))
         }
         val session = ready(camera, this)
-        val files = session.capturePhoto(download = true)
+        val phases = mutableListOf<CapturePhase>()
+        val files = session.capturePhoto(download = true, files = 2) { phases += it }
         assertEquals(listOf("DSC00001.ARW", "DSC00001.JPG"), files.map { it.filename })
         val presses = camera.sent.filter { it.first == SonyOp.CONTROL_DEVICE }
         assertEquals(listOf(0xD2C1L, 0xD2C2L, 0xD2C2L, 0xD2C1L), presses.map { it.second[0] })
         assertEquals(listOf(2, 2, 1, 1), presses.map { it.third!![0].toInt() })
+        // RAW+JPEG: доля — у каждого файла своя, «1/2» и «2/2»
+        assertEquals(listOf(CapturePhase.Downloading(1, 2, 0, 4), CapturePhase.Downloading(2, 2, 0, 3)),
+            phases.filterIsInstance<CapturePhase.Downloading>())
+        assertTrue(pollsAfterLastDownload(camera).isEmpty())
         session.close()
+    }
+
+    @Test fun capturePhaseOrder() = runTest {
+        val camera = FakeCamera().apply { capturedFiles = listOf("DSC00002.JPG" to ByteArray(5)) }
+        val session = ready(camera, this)
+        val phases = mutableListOf<CapturePhase>()
+        session.capturePhoto(download = true, files = 1) { phases += it }
+        assertEquals(listOf(CapturePhase.Focusing, CapturePhase.Exposing, CapturePhase.Downloading(1, 1, 0, 5)), phases)
+        session.close()
+    }
+
+    @Test fun captureReturnsRightAfterTheExpectedFiles() = runTest {
+        // JPEG без RAW: после файла камеру больше не опрашиваем — спуск свободен сразу, а не через 2,5 с
+        val camera = FakeCamera().apply { capturedFiles = listOf("DSC00003.JPG" to ByteArray(5)) }
+        val session = ready(camera, this)
+        assertEquals(1, session.capturePhoto(download = true, files = 1).size)
+        assertTrue(pollsAfterLastDownload(camera).isEmpty())
+        session.close()
+    }
+
+    @Test fun captureWithoutDownloadStopsAfterTheShutter() = runTest {
+        val camera = FakeCamera().apply { capturedFiles = listOf("DSC00004.JPG" to ByteArray(5)) }
+        val session = ready(camera, this)
+        val phases = mutableListOf<CapturePhase>()
+        assertTrue(session.capturePhoto(download = false, files = 1) { phases += it }.isEmpty())
+        assertEquals(listOf(CapturePhase.Focusing, CapturePhase.Exposing), phases)
+        session.close()
+    }
+
+    /** Что ушло в камеру после последнего GetObject снимка. */
+    private fun pollsAfterLastDownload(camera: FakeCamera): List<Int> {
+        val last = camera.sent.indexOfLast { it.first == SonyOp.GET_OBJECT && it.second == listOf(0xFFFF_C001L) }
+        assertTrue(last >= 0)
+        return camera.sent.drop(last + 1).map { it.first }
     }
 
     @Test fun failedShutterStillReleasesBothButtons() = runTest {
         val camera = FakeCamera().apply { busyOnNextPress = SonyProp.SHUTTER_FULL_PRESS }
         val session = ready(camera, this)
         try {
-            session.capturePhoto(download = true)
+            session.capturePhoto(download = true, files = 1)
             fail("ожидали ошибку спуска")
         } catch (e: SessionException.OperationFailed) {
             assertEquals(PtpResponseCode.DEVICE_BUSY, e.code)
