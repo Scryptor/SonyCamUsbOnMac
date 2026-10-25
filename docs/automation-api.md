@@ -75,6 +75,9 @@ open "/Applications/ZV-E10 Viewer.app" --args --automation
 | `recording` | bool | идёт запись видео |
 | `recordingSeconds` | число или `null` | сколько секунд идёт запись |
 | `capturing` | bool | идёт съёмка фото |
+| `capture` | объект или `null` | где снимок: `phase` — `focusing`, `exposing` (камера отработала спуск) или `downloading`; у загрузки ещё `file`, `files`, `received`, `expected` (байты; `expected` — `null`, если размер неизвестен) и `caption` — подпись на кнопке, например «Загрузка 42 %» |
+| `recordingRequest` | строка или `null` | запуск (`starting`) или остановка (`stopping`) записи с кнопки, пока камера не подтвердила; через 6 с без ответа — снова `null` и сообщение в `status` |
+| `feedback` | массив | последние события отклика (до 8, новые в конце) — для отладки анимаций: `accepted(…)`, `shutterFired`, `frameGrabbed(…)`, `shotAdded(…)`, `recordingStarted`, `recordingStopped`, `failed(…)` |
 | `fps` | число | кадров превью в секунду за последние 2 с |
 | `frameGapMs` | число | самая долгая пауза между кадрами превью за последние 10 с, мс |
 | `link` | объект | как идёт связь: `state` — `ok`, `weak` (кадры запаздывают), `interrupted` (связь прервалась), `reconnecting` (сеанс восстанавливается); `seconds` — сколько длится `interrupted` или `reconnecting`; `quality` — качество превью по Wi-Fi (`high` 1024×576, `low` 640×360, `null` по USB); `reconnects` — сколько раз сеанс восстанавливался с запуска; `lastRecoverySeconds` — сколько заняло последнее восстановление (от обрыва до первого кадра); `throughputKBs` — поток превью за 5 с, КБ/с; `rttMs` — отклик камеры на пробу |
@@ -86,12 +89,12 @@ open "/Applications/ZV-E10 Viewer.app" --args --automation
 | `cableAccessHint` | bool | камера на шине USB, а macOS не отдаёт её программе дольше 5 с — ждёт «Разрешить» в окне доступа к съемным томам |
 | `applyingPreset` | bool | применяется пресет |
 | `status` | строка или `null` | сообщение под пресетами, например «Сохранено: …» |
-| `review` | объект или `null` | просмотр снимка поверх видео: `title`, `source` («Загруженный снимок», «Кадр с камеры», «Снимок из ленты»), `timed` (закроется сам), `hasImage`, `files` (пути) |
+| `review` | объект или `null` | просмотр снимка после съёмки: `title`, `source` («Загруженный снимок», «Кадр с камеры»), `timed` (закроется сам), `hasImage`, `files` (пути) |
 | `shots` | массив | снимки и стоп-кадры сессии, новые сначала: `title`, `files` |
 | `prefs` | объект | настройки программы: `destination`, `folder`, `reviewEnabled`, `reviewSeconds`, `reviewSource`, `autoHide`, `autoHideSeconds`, `wifiAdaptiveQuality` |
 | `cameraDestination` | число или `null` | куда камера сохраняет снимки (`0xD222`): 1 — Mac, 16 — карта, 17 — оба |
 | `presets` | массив | `name` и `values` — словарь «настройка → значение» |
-| `ui` | объект | что на экране: `fnOpen`, `allSettingsOpen`, `selected`, `group`, `editing` (если открыта строка), `info` (если открыта подсказка из плашки: `connection`, `frames` или `slowMotion`), `histogram`, `controlsHidden`, `manualHidden`, `debug` — открыта ли панель отладки, `debugTab` — её вкладка |
+| `ui` | объект | что на экране: `fnOpen`, `allSettingsOpen`, `selected`, `group`, `editing` (если открыта строка), `info` (если открыта подсказка из плашки: `connection`, `frames` или `slowMotion`), `histogram`, `histogramPosition` — где гистограмма (`x`, `y` — доли свободного места; `null` — на месте по умолчанию), `controlsHidden`, `manualHidden`, `debug` — открыта ли панель отладки, `debugTab` — её вкладка, `gallery` — открытая галерея (`index` снимка в `shots`, `title`) или `null`, `zoom` — цифровое увеличение (`factor`, `centerX`, `centerY` — точка кадра в центре экрана, доли) |
 | `settings` | массив | все 24 настройки, см. ниже |
 
 Элемент `settings`:
@@ -131,7 +134,12 @@ open "/Applications/ZV-E10 Viewer.app" --args --automation
 | `toggleHistogram` | — | включить или выключить гистограмму |
 | `toggleControls` | — | как клавиша H: спрятать или показать элементы |
 | `dismissReview` | — | закрыть просмотр снимка |
-| `openShot` | `index` | открыть снимок из ленты (0 — самый новый) |
+| `openShot`, `openGallery` | `index` (у `openGallery` необязательно, по умолчанию 0) | открыть галерею на снимке из ленты (0 — самый новый) |
+| `galleryStep` | `offset` (число) | соседний снимок в галерее: +1 — старше, −1 — новее; 409, если галерея закрыта |
+| `closeGallery` | — | закрыть галерею |
+| `moveHistogram` | `x`, `y` — доли от 0 до 1 | поставить гистограмму: 0 — у левого (верхнего) отступа, 1 — у правого (нижнего) |
+| `setZoom` | `factor` (1…8), `x`, `y` — необязательно, точка кадра (доли) в центре экрана | цифровое увеличение live view, как щипок; ниже 1,05 — весь кадр. 409, если кадров нет |
+| `resetZoom` | — | вернуть весь кадр |
 | `showInfo` | `name` — необязательно: `connection`, `frames`, `slowMotion` | открыть подсказку из плашки состояния — о подключении, о кадрах или о S&Q; без параметра — закрыть. 409, если камера не подключена, а для `slowMotion` — если камера не в S&Q |
 
 ### Настройки камеры
