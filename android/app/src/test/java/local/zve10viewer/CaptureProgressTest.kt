@@ -17,15 +17,21 @@ class CaptureProgressTest {
     }
 
     @Test fun downloadShowsTheShareOfABigFile() {
-        // 42 % от 8 МБ
-        val phase = CapturePhase.Downloading(file = 1, files = 1, received = 3_523_215, expected = 8 * MB)
+        // 42,9 % от 8 МБ — «42 %»: проценты округляются вниз
+        val phase = CapturePhase.Downloading(file = 1, files = 1, received = 3_600_000, expected = 8 * MB)
         assertEquals("Загрузка 42 %", CaptureFeedback.caption(phase))
-        assertEquals(0.42, CaptureFeedback.fraction(phase)!!, 1e-6)
+        assertEquals(3_600_000.0 / (8 * MB), CaptureFeedback.fraction(phase)!!, 1e-12)
+        // «100 %» — только когда пришло всё
+        assertEquals("Загрузка 99 %", CaptureFeedback.caption(phase.copy(received = 8_388_000)))
+        assertEquals("Загрузка 100 %", CaptureFeedback.caption(phase.copy(received = 8 * MB)))
+        assertEquals("Загрузка 29 %", CaptureFeedback.caption(phase.copy(received = 29 * MB, expected = 100 * MB)))
     }
 
     @Test fun rawPlusJpegCountsFiles() {
-        val phase = CapturePhase.Downloading(file = 2, files = 2, received = 3_523_215, expected = 8 * MB)
+        val phase = CapturePhase.Downloading(file = 2, files = 2, received = 3_600_000, expected = 8 * MB)
         assertEquals("Загрузка 2/2 · 42 %", CaptureFeedback.caption(phase))
+        // доля неизвестна — без процентов, но с номером файла
+        assertEquals("Загрузка 2/2…", CaptureFeedback.caption(phase.copy(expected = null)))
     }
 
     @Test fun smallOrUnknownFileSpins() {

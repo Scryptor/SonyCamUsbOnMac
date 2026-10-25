@@ -1,7 +1,5 @@
 package local.zve10viewer.session
 
-import kotlin.math.roundToInt
-
 /** Что сейчас со снимком: фокусировка (после полунажатия), спуск отработан, качается файл N из files. */
 sealed class CapturePhase {
     data object Focusing : CapturePhase()
@@ -19,13 +17,13 @@ object CaptureFeedback {
         CapturePhase.Focusing -> "Фокусировка…"
         CapturePhase.Exposing -> "Снимаю…"
         is CapturePhase.Downloading -> {
-            val fraction = fraction(phase)
+            val percent = percent(phase)
             // RAW+JPEG — два файла подряд: доля — текущего
             val count = if (phase.files > 1) "${phase.file}/${phase.files}" else null
             when {
-                fraction == null -> if (count != null) "Загрузка $count…" else "Загрузка…"
-                count != null -> "Загрузка $count · ${percent(fraction)} %"
-                else -> "Загрузка ${percent(fraction)} %"
+                percent == null -> if (count != null) "Загрузка $count…" else "Загрузка…"
+                count != null -> "Загрузка $count · $percent %"
+                else -> "Загрузка $percent %"
             }
         }
     }
@@ -38,5 +36,10 @@ object CaptureFeedback {
         return (download.received.toDouble() / expected).coerceIn(0.0, 1.0)
     }
 
-    private fun percent(fraction: Double): Int = (fraction * 100).roundToInt()
+    /** Проценты с округлением вниз — «100 %» только когда пришло всё; в целых, без ошибок округления дробей. */
+    private fun percent(phase: CapturePhase.Downloading): Long? {
+        val expected = phase.expected ?: return null
+        if (expected < MIN_PROGRESS_BYTES) return null
+        return phase.received.coerceIn(0, expected) * 100 / expected
+    }
 }
