@@ -900,13 +900,18 @@ private fun FloatingHistogram(controller: CameraController, screen: ScreenState,
     val position = remember { Animatable(Offset.Zero, Offset.VectorConverter) }
     var placed by remember { mutableStateOf(false) }
 
+    // место панели FloatingPlacement считает в dp — отступ 16 и прилипание 24, как на Mac; Compose — в пикселях
+    fun dp(size: Size) = Size(size.width / density.density, size.height / density.density)
+    fun dp(offset: Offset) = Offset(offset.x / density.density, offset.y / density.density)
+    fun px(offset: Offset) = Offset(offset.x * density.density, offset.y * density.density)
+
     /** Куда положить панель сейчас: по сохранённому месту или на место по умолчанию, но не под меню Fn. */
     fun goal(): Offset? {
         val view = feedback.screenSize
         if (panel == IntSize.Zero || view == Size.Zero) return null
         val size = panel.toSize()
         return with(density) {
-            val origin = controller.histogramPlacement?.origin(size, view) ?: run {
+            val origin = controller.histogramPlacement?.let { px(it.origin(dp(size), dp(view))) } ?: run {
                 // над лентой снимков: отступ экрана 18, над строкой значений — 76, до ленты — 10
                 val strip = if (controller.shots.isNotEmpty()) (screen.stripHeight ?: 76.dp.toPx()) + 10.dp.toPx() else 0f
                 Offset(18.dp.toPx(), view.height - 18.dp.toPx() - 76.dp.toPx() - strip - size.height)
@@ -936,7 +941,7 @@ private fun FloatingHistogram(controller: CameraController, screen: ScreenState,
 
     fun drop() {
         val from = drag ?: return
-        controller.placeHistogram(FloatingPlacement.dropped(from, panel.toSize(), feedback.screenSize))
+        controller.placeHistogram(FloatingPlacement.dropped(dp(from), dp(panel.toSize()), dp(feedback.screenSize)))
         scope.launch {
             position.snapTo(from)
             drag = null
@@ -968,7 +973,8 @@ private fun FloatingHistogram(controller: CameraController, screen: ScreenState,
                     },
                     onDrag = { change, amount ->
                         change.consume()
-                        drag = FloatingPlacement.dragOrigin((drag ?: position.value) + amount, panel.toSize(), feedback.screenSize)
+                        drag = px(FloatingPlacement.dragOrigin(dp((drag ?: position.value) + amount), dp(panel.toSize()),
+                            dp(feedback.screenSize)))
                     },
                     onDragEnd = { drop() },
                     onDragCancel = { drop() },
