@@ -219,7 +219,7 @@ class PtpIpPacketReader {
  * Ответ на одну операцию: данные (Start Data → Data… → End Data) и ответ камеры.
  * Пакеты чужих транзакций — остатки оборванного обмена — пропускаются.
  * Данные собираются в буфер ровно того размера, что объявила камера: кадр отдаётся без лишней копии.
- * progress — счётчик принятых байт для доли загрузки снимка.
+ * progress — счётчик для доли загрузки снимка: фазу данных открывает Start Data (длина), закрывает ответ.
  */
 class PtpIpTransaction(private val transactionId: Long, private val progress: DataProgress? = null) {
     private var data = EMPTY
@@ -244,11 +244,10 @@ class PtpIpTransaction(private val transactionId: Long, private val progress: Da
             }
             null
         }
+        // принятые байты считает транспорт — по мере чтения из сокета: камера шлёт файл пакетами Data по 2 МБ, и по
+        // целым пакетам доля шла бы рывками по 8–30 %
         PtpIp.DATA, PtpIp.END_DATA -> {
-            if (length >= 4 && u32(bytes, offset) == transactionId) {
-                append(bytes, offset + 4, length - 4)
-                progress?.add(length - 4)
-            }
+            if (length >= 4 && u32(bytes, offset) == transactionId) append(bytes, offset + 4, length - 4)
             null
         }
         PtpIp.OPERATION_RESPONSE -> {

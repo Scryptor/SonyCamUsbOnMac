@@ -212,16 +212,20 @@ class PtpIpTest {
         assertEquals(DataProgress.Reading(7, null), progress.current)
     }
 
-    @Test fun transactionCountsItsDataPhase() {
+    @Test fun transactionOpensAndClosesItsDataPhase() {
         val progress = DataProgress()
         val t = PtpIpTransaction(3, progress)
+        // ответ чужой транзакции фазу не открывает и не закрывает
+        t.consume(PtpIpPacket(9, bytes(le32(2), le64(9))))
+        assertNull(progress.current)
         t.consume(PtpIpPacket(9, bytes(le32(3), le64(5))))
         assertEquals(DataProgress.Reading(0, 5), progress.current)
+        // байты считает транспорт по мере чтения из сокета, а не транзакция по целым пакетам Data
+        progress.add(2)
         t.consume(PtpIpPacket(10, bytes(le32(3), byteArrayOf(1, 2))))
-        // остаток чужой транзакции — не в счёт
-        t.consume(PtpIpPacket(10, bytes(le32(2), byteArrayOf(9, 9, 9))))
-        t.consume(PtpIpPacket(12, bytes(le32(3), byteArrayOf(3, 4, 5))))
-        assertEquals(DataProgress.Reading(5, 5), progress.current)
+        assertEquals(DataProgress.Reading(2, 5), progress.current)
+        t.consume(PtpIpPacket(7, bytes(le16(0x2001), le32(2))))
+        assertEquals(DataProgress.Reading(2, 5), progress.current)
         t.consume(PtpIpPacket(7, bytes(le16(0x2001), le32(3))))
         assertNull(progress.current)
     }
