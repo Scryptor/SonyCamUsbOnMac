@@ -300,7 +300,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
     /** Связь по Wi-Fi напрямую: камера сама раздаёт сеть (режим Wi-Fi Direct). */
     var wifiDirect by mutableStateOf(false)
         private set
-    /** Идёт сопряжение по Wi-Fi (кнопка «Сопрячь с камерой»). */
+    /** Идёт сопряжение по Wi-Fi («Сопрячь новую камеру…» в списке камер). */
     var isPairing by mutableStateOf(false)
         private set
     /** Что сейчас с Wi-Fi: «ищу камеру», «камера найдена, нужно сопряжение» и т.п. */
@@ -1251,7 +1251,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
         if (!freeForSwitch()) return
         pairingTarget = address
         isPairing = true
-        wifiStatus = "Камера найдена ($address). Включите на камере PC Remote Function → Pairing и подтвердите сопряжение"
+        wifiStatus = "Камера найдена ($address) — подтвердите сопряжение на ней"
         choose(CameraLink.WiFi(address), entry.name)
     }
 
@@ -1998,7 +1998,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
                 if (wifiPolicy.maySendInit(cameraBook.isPaired(address) || cameraBook.cameras.any { it.paired }, isPairing)) {
                     tryWiFi(address, discovered = false, remember = false)
                 } else if (wifiStatus == null) {
-                    wifiStatus = "Отладка: камера за $address — нажмите «Сопрячь с камерой», чтобы подключаться по Wi-Fi"
+                    wifiStatus = "Отладка: камера за $address — «Сопрячь» у неё в списке камер, и она будет подключаться по Wi-Fi"
                 }
                 return
             }
@@ -2039,7 +2039,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
             }
             if (candidates.isEmpty()) {
                 if (wifiStatus == null) {
-                    wifiStatus = "В сети есть камера (${addresses[0]}) — нажмите «Сопрячь с камерой», чтобы подключаться по Wi-Fi"
+                    wifiStatus = "В сети есть камера (${addresses[0]}) — «Сопрячь» у неё в списке камер, и она будет подключаться по Wi-Fi"
                 }
                 return
             }
@@ -2104,7 +2104,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
 
     private suspend fun tryWiFiOnce(address: WiFiAddress, discovered: Boolean, remember: Boolean): WiFiAttempt {
         val pairing = isPairing
-        if (pairing) wifiStatus = "Камера найдена ($address). Включите на камере PC Remote Function → Pairing и подтвердите сопряжение"
+        if (pairing) wifiStatus = "Камера найдена ($address) — подтвердите сопряжение на ней"
         val me = identity ?: PtpIpIdentity.load(context).also { identity = it }
         // если корутину отменят, пока ждём камеру, готовое соединение иначе потерялось бы незакрытым
         val created = AtomicReference<PtpIpTransport?>()
@@ -2155,11 +2155,11 @@ class CameraController(private val context: Context, private val scope: Coroutin
             }
             journal("$address: камера отказала (Init Fail ${e.reason})" + if (pairing) "" else " — программа с ней не сопряжена")
             if (pairing) {
-                wifiStatus = "Камера найдена ($address). Включите на камере PC Remote Function → Pairing"
+                wifiStatus = "Камера найдена ($address), но не в режиме Pairing — включите его на камере"
             } else {
                 // камера нас больше не знает (её сбросили или сопрягали заново) — перестаём стучаться
                 forgetPairingWith(address)
-                wifiStatus = "В сети есть камера ($address), но планшет с ней не сопряжён — нажмите «Сопрячь с камерой»"
+                wifiStatus = "В сети есть камера ($address), но планшет с ней не сопряжён — «Сопрячь» у неё в списке камер"
             }
             WiFiAttempt.rejected
         } catch (e: CancellationException) {
@@ -2300,7 +2300,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
             if (WiFiPolicy.forgetsPairing(e.reason)) {
                 reconnectFailed(episode, "камера больше не знает планшет")
                 forgetPairingWith(episode.address)
-                wifiStatus = "В сети есть камера (${episode.address}), но планшет с ней не сопряжён — нажмите «Сопрячь с камерой»"
+                wifiStatus = "В сети есть камера (${episode.address}), но планшет с ней не сопряжён — «Сопрячь» у неё в списке камер"
             } else {
                 journal("${episode.address}: камера отказала (Init Fail ${e.reason}) — занята, повторю")
                 continueReconnect()

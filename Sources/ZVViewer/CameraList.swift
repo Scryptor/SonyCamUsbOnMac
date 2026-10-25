@@ -8,13 +8,20 @@ struct CameraList: View {
     let controller: CameraController
     /// «Сопрячь новую камеру…» под списком — там, где своей кнопки сопряжения нет.
     var showsPairNew = true
+    /// Крупнее — на экране ожидания: там список — главное, что можно сделать.
+    var prominent = false
+    /// Что сказать, пока камер в списке нет, — под заголовком, перед кнопкой сопряжения.
+    var emptyNote: String?
     @State private var editing: String?
     @State private var newName = ""
     @FocusState private var nameFocused: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Камеры").font(.headline)
+        VStack(alignment: .leading, spacing: prominent ? 12 : 8) {
+            Text("Камеры").font(prominent ? .title3.weight(.semibold) : .headline)
+            if controller.cameras.isEmpty, let emptyNote {
+                Text(emptyNote).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
             ForEach(controller.cameras) { entry in
                 row(entry)
             }
@@ -24,6 +31,7 @@ struct CameraList: View {
                     .help("Камера — в режиме Pairing: MENU → Network → PC Remote Function → Pairing")
             }
         }
+        .controlSize(prominent ? .large : .regular)
         .onAppear { controller.cameraListAppeared() }
         .onDisappear { controller.cameraListDisappeared() }
     }
@@ -40,10 +48,10 @@ struct CameraList: View {
                         .onExitCommand { editing = nil }
                         .onChange(of: nameFocused) { _, focused in if !focused { finishRename(entry) } }
                 } else {
-                    Text(entry.name).lineLimit(1)
+                    Text(entry.name).font(prominent ? .title3 : .body).lineLimit(1)
                 }
                 Text("\(entry.detail) · \(entry.stateLabel)")
-                    .font(.caption)
+                    .font(prominent ? .callout : .caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }

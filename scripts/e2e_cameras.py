@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Сквозной тест выбора камеры на виртуальных камерах: сопряжение одной камеры, переключение, переименование,
-отказ при записи, занятая камера и отмена сопряжения, «Забыть» и снова сопрячь.
+переключение во время записи (главная по Wi-Fi уходит в ленту и пишет дальше), занятая камера и отмена сопряжения,
+«Забыть» и снова сопрячь.
 
 Перед запуском:
   scripts/fake_cameras.py --pairing B --busy C        # A, B, C на 127.0.0.1:15740–15742
@@ -72,12 +73,16 @@ act(action="renameCamera", id=a["id"], name="Тест A")
 check("имя на строке состояния — своё", state()["cameraName"] == "Тест A", state()["cameraName"])
 check("текущую не выбрать и не забыть", act(action="selectCamera", id=a["id"]) == 409 and act(action="forgetCamera", id=a["id"]) == 409)
 
-# во время записи не переключает (запись — только на виртуальной камере)
+# во время записи: главная по Wi-Fi уходит в ленту и пишет дальше — переключиться можно (запись — только на виртуальной)
 if camera(state(), "A")["state"] == "current" and camera(state(), "A")["host"] == "127.0.0.1":
     act(action="toggleRecording", confirm=True)
     s, ok = wait(lambda s: s.get("recording"), 5); check("виртуальная A пишет", ok)
-    b = camera(s, "B")
-    check("во время записи переключение отклонено", act(action="selectCamera", id=b["id"]) == 409)
+    check("во время записи переключение на B — сразу", act(action="selectCamera", id=camera(s, "B")["id"]) == 200)
+    s, ok = wait(current_is("B"), 5)
+    check("A в ленте пишет дальше", ok and any(x.get("port") == PORTS["A"] and x["recording"] for x in s["strip"]),
+          str([(x.get("port"), x["recording"]) for x in s["strip"]]))
+    act(action="selectCamera", id=camera(state(), "A")["id"])
+    wait(lambda s: current_is("A")(s) and s.get("recording"), 5)
     time.sleep(1.0)
     act(action="toggleRecording", confirm=True)
     s, ok = wait(lambda s: not s.get("recording"), 8); check("запись остановлена", ok)

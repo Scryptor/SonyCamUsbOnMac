@@ -118,10 +118,21 @@ class SSDPResponder(asyncio.DatagramProtocol):
         headers = {k.strip().upper(): v.strip() for k, _, v in (l.partition(":") for l in text.split("\r\n")[1:]) if v}
         if headers.get("ST") not in (SSDP_ST, "ssdp:all"):
             return
+        # камера на 127.0.0.1 — только для этого Mac: планшет по такому адресу стучался бы сам к себе
+        if self.host.startswith("127.") and not addr[0].startswith("127.") and addr[0] not in local_addresses():
+            return
         reply = ("HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=1800\r\nEXT:\r\n"
                  f"LOCATION: http://{self.host}:{self.port}/fake_camera.xml\r\nSERVER: fake_camera.py UPnP/1.0\r\n"
                  f"ST: {SSDP_ST}\r\nUSN: uuid:{self.cam.uuid}::{SSDP_ST}\r\nX-PTPIP-Port: {self.port}\r\n\r\n")
         self.transport.sendto(reply.encode(), addr)
+
+
+def local_addresses():
+    """Адреса этого Mac: поиск с них — свой, ответ с 127.0.0.1 ему годится."""
+    try:
+        return {info[4][0] for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)}
+    except OSError:
+        return set()
 
 
 def ssdp_socket():

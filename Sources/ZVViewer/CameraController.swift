@@ -1185,7 +1185,7 @@ final class CameraController {
         connectionMessage = nil
         wifiPolicy = WiFiPolicy()
         if pairing {
-            wifiStatus = "Камера найдена (\(endpoint)). Включите на камере PC Remote Function → Pairing и подтвердите сопряжение"
+            wifiStatus = "Камера найдена (\(endpoint)) — подтвердите сопряжение на ней"
         } else {
             showStatus("Подключаю «\(name)»…")
         }
@@ -1611,7 +1611,7 @@ final class CameraController {
         // ни с одной не сопряжены — не стучимся (камера в режиме Pairing показала бы чужой запрос), только подсказываем
         guard wifiPolicy.maySendInit(paired: !paired.isEmpty, pairing: isPairing) else {
             if wifiStatus == nil {
-                wifiStatus = "В сети есть камера (\(found[0])) — нажмите «Сопрячь с камерой…», чтобы подключаться по Wi-Fi"
+                wifiStatus = "В сети есть камера (\(found[0])) — «Сопрячь» у неё в списке камер, и она будет подключаться по Wi-Fi"
             }
             return
         }
@@ -1647,7 +1647,7 @@ final class CameraController {
         let pairing = isPairing
         connectingTransport = transport
         defer { if connectingTransport === transport { connectingTransport = nil } }
-        if pairing { wifiStatus = "Камера найдена (\(host)). Включите на камере PC Remote Function → Pairing и подтвердите сопряжение" }
+        if pairing { wifiStatus = "Камера найдена (\(host)) — подтвердите сопряжение на ней" }
         let started = Date()
         note("подключаюсь к \(host)\(quick ? " (восстановление)" : "")…")
         do {
@@ -1700,13 +1700,13 @@ final class CameraController {
             note("\(host): камера отказала (Init Fail \(reason))\(pairing ? "" : " — программа с ней не сопряжена")")
             guard wifiAttemptWanted else { return .dropped }
             if pairing {
-                wifiStatus = "Камера найдена (\(host)). Включите на камере PC Remote Function → Pairing"
+                wifiStatus = "Камера найдена (\(host)), но не в режиме Pairing — включите его на камере"
             } else {
                 // камера нас больше не знает (её сбросили или сопрягали заново) — перестаём стучаться
                 roster.unpair(host)
                 storeRoster()
                 if Prefs.wifiHost == host.host { Prefs.wifiCameraName = nil }
-                wifiStatus = "В сети есть камера (\(host)), но программа с ней не сопряжена — нажмите «Сопрячь с камерой»"
+                wifiStatus = "В сети есть камера (\(host)), но программа с ней не сопряжена — «Сопрячь» у неё в списке камер"
             }
             return .rejected
         } catch {

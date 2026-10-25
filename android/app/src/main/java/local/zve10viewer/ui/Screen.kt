@@ -293,67 +293,16 @@ fun App(controller: CameraController) {
 private fun WaitingScreen(controller: CameraController, screen: ScreenState, notPcRemote: Boolean) {
     // настройки (Wi-Fi, «Забыть») нужны и без камеры: иначе выключенный Wi-Fi не включить без кабеля
     var settingsOpen by remember { mutableStateOf(false) }
+    // настройка Wi-Fi — не состояние Compose: читаем её здесь и после панели настроек, где её могли сменить
+    var wifiOn by remember { mutableStateOf(controller.prefs.wifiEnabled) }
     Box(Modifier.fillMaxSize()) {
-    // со списком камер может не поместиться — тогда прокручивается; помещается — по центру, как раньше
+    // не помещается — прокручивается; помещается — по центру
     BoxWithConstraints(Modifier.fillMaxSize()) {
-    Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).heightIn(min = maxHeight).padding(48.dp),
+    Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).heightIn(min = maxHeight).padding(horizontal = 48.dp, vertical = 40.dp),
         verticalArrangement = Arrangement.Center) {
-        Text(
-            if (notPcRemote) "Камера подключена, но не в режиме PC Remote" else "Подключите камеру",
-            color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.SemiBold,
-        )
-        Spacer(Modifier.height(24.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(48.dp)) {
-            Column(Modifier.weight(1f)) {
-                Text("По кабелю USB", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.height(8.dp))
-                listOf(
-                    "1. MENU → Network → Smartphone Connect → Smartphone Connection: Off",
-                    "2. MENU → Network → PC Remote Function → PC Remote: On, PC Remote Cnct Method: USB",
-                    if (notPcRemote) "Переподключите кабель" else "3. Подключите камеру к планшету кабелем USB-C",
-                ).forEach { Text(it, color = Secondary, fontSize = 18.sp, modifier = Modifier.padding(vertical = 4.dp)) }
-                if (controller.phase == CameraController.Phase.permission) {
-                    Text("Разрешите доступ к камере в окне Android…", color = Secondary, fontSize = 17.sp, modifier = Modifier.padding(top = 8.dp))
-                }
-            }
-            // камера на кабеле не в PC Remote (например, на зарядке в режиме Wi-Fi) — по сети всё равно можно
-            Column(Modifier.weight(1f)) {
-                Text("По Wi-Fi", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.height(8.dp))
-                listOf(
-                    "1. Камера и планшет — в одной сети Wi-Fi (у камеры: MENU → Network → Wi-Fi Settings → Access Point Set.)",
-                    "2. MENU → Network → PC Remote Function → PC Remote: On, PC Remote Cnct Method: Wi-Fi Access Point",
-                    "3. Один раз — сопряжение: кнопка ниже, на камере PC Remote Function → Pairing",
-                    "Без роутера: на камере PC Remote Cnct Method: Wi-Fi Direct, а планшет подключите к сети камеры (DIRECT-…, пароль — на экране камеры)",
-                ).forEach { Text(it, color = Secondary, fontSize = 18.sp, modifier = Modifier.padding(vertical = 4.dp)) }
-                Spacer(Modifier.height(10.dp))
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                    val pairing = controller.isPairing
-                    Text(if (pairing) "Отмена" else "Сопрячь с камерой", color = Color.White, fontSize = 17.sp,
-                        modifier = Modifier.background(if (pairing) PanelLight else Accent, RoundedCornerShape(10.dp))
-                            .clickable { if (pairing) controller.cancelPairing() else controller.startPairing() }
-                            .padding(horizontal = 18.dp, vertical = 12.dp))
-                    if (pairing) CircularProgressIndicator(Modifier.size(22.dp), color = Color.White, strokeWidth = 2.dp)
-                    val searching = controller.wifiSearchLabel
-                    if (!pairing && controller.prefs.wifiEnabled && searching != null) {
-                        CircularProgressIndicator(Modifier.size(18.dp), color = Secondary, strokeWidth = 2.dp)
-                        Text(searching, color = Secondary, fontSize = 16.sp)
-                    }
-                }
-                controller.wifiStatus?.let { Text(it, color = Color(0xFFFF9F0A), fontSize = 16.sp, modifier = Modifier.padding(top = 10.dp)) }
-                if (!controller.prefs.wifiEnabled) {
-                    Text("Подключение по Wi-Fi выключено в настройках", color = Secondary, fontSize = 16.sp, modifier = Modifier.padding(top = 10.dp))
-                }
-            }
-        }
-        // знакомые и видимые камеры — выбрать, к какой подключаться; сопряжение новой — кнопка выше
-        if (controller.cameraEntries.isNotEmpty()) {
-            Spacer(Modifier.height(24.dp))
-            CameraList(controller, Modifier.widthIn(max = 640.dp), pairButton = false, titleSize = 22.sp)
-        }
-        controller.message?.let {
-            Spacer(Modifier.height(18.dp))
-            Text(it, color = Secondary, fontSize = 17.sp)
+        WaitingContent(controller, notPcRemote, wifiOn) {
+            controller.prefs.wifiEnabled = true
+            wifiOn = true
         }
     }
     }
@@ -365,7 +314,10 @@ private fun WaitingScreen(controller: CameraController, screen: ScreenState, not
         TopBarIcon(TopBarGlyph.settings)
     }
     if (settingsOpen) {
-        SettingsOverlay(controller, onClose = { settingsOpen = false }, onDebug = {
+        SettingsOverlay(controller, onClose = {
+            settingsOpen = false
+            wifiOn = controller.prefs.wifiEnabled
+        }, onDebug = {
             settingsOpen = false
             screen.debugOpen = true
         }, onPresets = {

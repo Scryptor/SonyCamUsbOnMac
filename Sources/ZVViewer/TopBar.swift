@@ -192,7 +192,7 @@ struct HistogramView: View {
 }
 
 /// Окно настроек — то же, что ⌘,.
-private struct SettingsButton: View {
+struct SettingsButton: View {
     @Environment(\.openSettings) private var openSettings
 
     var body: some View {

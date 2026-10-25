@@ -97,7 +97,8 @@ private val Danger = Color(0xFFFF453A)
  * камеру…». Пока список на экране, программа ищет камеры в сети: сразу и раз в 10 с.
  */
 @Composable
-fun CameraList(controller: CameraController, modifier: Modifier = Modifier, pairButton: Boolean = true, titleSize: TextUnit = 18.sp) {
+fun CameraList(controller: CameraController, modifier: Modifier = Modifier, pairButton: Boolean = true, titleSize: TextUnit = 18.sp,
+               emptyNote: String? = null) {
     LaunchedEffect(Unit) {
         while (true) {
             controller.searchCameras()
@@ -107,6 +108,10 @@ fun CameraList(controller: CameraController, modifier: Modifier = Modifier, pair
     var renaming by remember { mutableStateOf<CameraEntry?>(null) }
     Column(modifier, verticalArrangement = Arrangement.spacedBy(2.dp)) {
         Text("Камеры", color = Color.White, fontSize = titleSize, fontWeight = FontWeight.SemiBold)
+        // камер нет — что делать: под заголовком, перед кнопкой сопряжения
+        if (controller.cameraEntries.isEmpty()) emptyNote?.let {
+            Text(it, color = Secondary, fontSize = 16.sp, lineHeight = 22.sp, modifier = Modifier.padding(vertical = 6.dp))
+        }
         controller.cameraEntries.forEach { entry -> CameraRow(controller, entry) { renaming = entry } }
         if (pairButton) {
             val pairing = controller.isPairing
