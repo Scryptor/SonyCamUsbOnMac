@@ -60,7 +60,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.Canvas
 import kotlinx.coroutines.delay
+import androidx.compose.ui.text.TextStyle
 import local.zve10viewer.CameraController
+import local.zve10viewer.session.CaptureFeedback
 import local.zve10viewer.settings.CaptureMode
 import local.zve10viewer.settings.FnSlot
 import local.zve10viewer.settings.SettingCatalog
@@ -431,7 +433,9 @@ fun ReviewOverlay(controller: CameraController, review: CameraController.Review)
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             Text(review.title, color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
-            if (review.detail.isNotEmpty()) Text(review.detail, color = Secondary, fontSize = 16.sp)
+            // снимок ещё качается — та же подпись, что у кнопки спуска
+            val detail = if (review.live) controller.capturePhase?.let(CaptureFeedback::caption) ?: review.detail else review.detail
+            if (detail.isNotEmpty()) Text(detail, color = Secondary, fontSize = 16.sp, style = TextStyle(fontFeatureSettings = "tnum"))
             review.files.firstOrNull()?.let { file ->
                 Text("Открыть", color = Color.White, fontSize = 16.sp, modifier = Modifier.background(PanelLight, RoundedCornerShape(9.dp))
                     .clickable { controller.openExternally(review.files.firstOrNull { it.mime == "image/jpeg" } ?: file) }

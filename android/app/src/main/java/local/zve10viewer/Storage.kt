@@ -4,9 +4,14 @@ import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.BitmapRegionDecoder
+import android.graphics.ImageDecoder
 import android.net.Uri
+import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import androidx.compose.ui.unit.IntSize
+import kotlin.math.roundToInt
 import local.zve10viewer.settings.FileNaming
 import local.zve10viewer.settings.Preset
 import local.zve10viewer.settings.PresetCatalog
@@ -106,6 +111,32 @@ class MediaSaver(private val context: Context) {
         return SavedFile(uri, unique, mime)
     }
 
+    /**
+     * Снимок из файла — не больше maxSide точек по длинной стороне (для галереи: под экран). hardware — картинку только
+     * рисуют, и ей место в памяти видеокарты, а не программы; для работы с точками — false.
+     */
+    fun decode(uri: Uri, maxSide: Int, hardware: Boolean = true): Bitmap? = runCatching {
+        ImageDecoder.decodeBitmap(ImageDecoder.createSource(context.contentResolver, uri)) { decoder, info, _ ->
+            val width = info.size.width
+            val height = info.size.height
+            val scale = maxSide.toDouble() / maxOf(width, height)
+            if (scale < 1) decoder.setTargetSize(maxOf(1, (width * scale).roundToInt()), maxOf(1, (height * scale).roundToInt()))
+            decoder.allocator = if (hardware) ImageDecoder.ALLOCATOR_DEFAULT else ImageDecoder.ALLOCATOR_SOFTWARE
+        }
+    }.getOrNull()
+
+    /** Участки снимка в полном разрешении — при сильном увеличении в галерее. Закрывать — recycle(). */
+    fun regionDecoder(uri: Uri): BitmapRegionDecoder? = runCatching {
+        // файл отображается в память: дескриптор после создания можно закрыть
+        context.contentResolver.openFileDescriptor(uri, "r")?.use { file ->
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                BitmapRegionDecoder.newInstance(file)
+            } else {
+                @Suppress("DEPRECATION") BitmapRegionDecoder.newInstance(file.fileDescriptor, false)
+            }
+        }
+    }.getOrNull()
+
     private fun exists(name: String): Boolean = context.contentResolver.query(
         MediaStore.Downloads.EXTERNAL_CONTENT_URI,
         arrayOf(MediaStore.MediaColumns._ID),
@@ -132,6 +163,20 @@ class MediaSaver(private val context: Context) {
             var sample = 1
             while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= maxSide) sample *= 2
             return BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, BitmapFactory.Options().apply { inSampleSize = sample })
+        }
+
+        /** Размер JPEG в точках — по заголовку, без декодирования. */
+        fun pixelSize(jpeg: ByteArray): IntSize? {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, bounds)
+            return if (bounds.outWidth > 0 && bounds.outHeight > 0) IntSize(bounds.outWidth, bounds.outHeight) else null
+        }
+
+        /** Уменьшенная копия для ленты — не больше maxSide точек по длинной стороне. */
+        fun thumbnail(source: Bitmap, maxSide: Int): Bitmap {
+            val scale = minOf(1f, maxSide.toFloat() / maxOf(source.width, source.height))
+            return Bitmap.createScaledBitmap(source, maxOf(1, (source.width * scale).roundToInt()),
+                maxOf(1, (source.height * scale).roundToInt()), true)
         }
     }
 }

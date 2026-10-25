@@ -28,7 +28,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.unit.IntSize
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -36,7 +38,10 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -58,6 +63,7 @@ import local.zve10viewer.ptp.PtpType
 import local.zve10viewer.ptp.PtpValue
 import local.zve10viewer.ptp.TransportException
 import local.zve10viewer.session.CameraSession
+import local.zve10viewer.session.CapturePhase
 import local.zve10viewer.session.LiveViewQuality
 import local.zve10viewer.session.LiveViewQualityPolicy
 import local.zve10viewer.session.LiveViewSample
@@ -100,18 +106,62 @@ import kotlin.math.roundToInt
 class CameraController(private val context: Context, private val scope: CoroutineScope) {
     enum class Phase { searching, permission, connecting, settling, ready, notPcRemote }
 
-    /** Снимок или стоп-кадр этой сессии. */
-    class Shot(val files: List<SavedFile>, val thumbnail: ImageBitmap?, val preview: ByteArray?) {
+    /**
+     * Снимок или стоп-кадр этой сессии. В памяти — только миниатюра (и кадр с камеры у RAW без JPEG): сам снимок
+     * галерея читает из файла, а не держит целиком (~10 МБ на кадр).
+     */
+    class Shot(
+        val id: Long,
+        val files: List<SavedFile>,
+        /** Миниатюра для ленты — до 160 точек по длинной стороне. */
+        val thumbnail: ImageBitmap?,
+        /** Когда камера сняла (спуск отработан) или сохранён стоп-кадр. */
+        val takenAt: Long,
+        /** Размер картинки в точках — JPEG или стоп-кадра; null — неизвестен (RAW без JPEG). */
+        val pixelSize: IntSize?,
+        /** Сколько весят файлы вместе, байт. */
+        val bytes: Long,
+        val isFrameGrab: Boolean,
+        /** RAW без JPEG: кадр с камеры в момент снимка — его и показывает галерея. */
+        val cameraFrame: ImageBitmap? = null,
+    ) {
         val title: String get() = files.joinToString(" + ") { it.name }
+        /** JPEG снимка — его показывают и открывают; null — только RAW. */
+        val jpeg: SavedFile? get() = files.firstOrNull { it.mime == "image/jpeg" }
     }
 
-    /** Что показывается поверх видео после снимка или при открытии снимка из ленты. */
+    /** Что показывается поверх видео после снимка. */
     data class Review(
         val image: ImageBitmap?, val title: String, val detail: String,
         val files: List<SavedFile>, val source: String,
-        /** null — показывается, пока не закроют (снимок открыт из ленты). */
+        /** null — показывается, пока не закроют (ждём загруженный снимок или снимок открыт из ленты). */
         val endsAt: Long?,
+        /** Снимок ещё качается: вместо detail — та же подпись, что у кнопки спуска («Загрузка 42 %»). */
+        val live: Boolean = false,
     )
+
+    /** Какая кнопка ответила: для волны, «мотания» и вибрации. */
+    enum class FeedbackTarget { shutter, record, grab }
+
+    /** События для отклика на экране — от действия камеры и программы, а не от пальца. */
+    sealed class FeedbackEvent {
+        /** Действие принято (кнопку отпустили, и оно пошло в камеру): волна вокруг кнопки. */
+        data class Accepted(val target: FeedbackTarget) : FeedbackEvent()
+        /** Камера отработала спуск: шторка. */
+        data object ShutterFired : FeedbackEvent()
+        /** Стоп-кадр сохранён и встал в ленту: вспышка и полёт кадра. image — весь кадр (копия); null — копии нет. */
+        data class FrameGrabbed(val image: ImageBitmap?, val shotId: Long) : FeedbackEvent()
+        /** Снимок скачан и встал в ленту. */
+        data class ShotAdded(val shotId: Long) : FeedbackEvent()
+        data object RecordingStarted : FeedbackEvent()
+        data object RecordingStopped : FeedbackEvent()
+        /** Отказ: камера не начала (не остановила) запись, снимок или стоп-кадр не удался. */
+        data class Failed(val target: FeedbackTarget) : FeedbackEvent()
+    }
+
+    private val feedbackEvents = MutableSharedFlow<FeedbackEvent>(extraBufferCapacity = 32)
+    /** Отклик для экрана: волна, шторка, полёт кадра, «мотание», вибрация. */
+    val feedback: SharedFlow<FeedbackEvent> = feedbackEvents.asSharedFlow()
 
     val prefs = Prefs(context)
     val saver = MediaSaver(context)
@@ -166,6 +216,9 @@ class CameraController(private val context: Context, private val scope: Coroutin
     var isApplyingPreset by mutableStateOf(false)
         private set
     var isCapturing by mutableStateOf(false)
+        private set
+    /** Этап снимка для кнопки спуска: фокусировка, спуск, загрузка с долей; null — не снимаем. */
+    var capturePhase by mutableStateOf<CapturePhase?>(null)
         private set
     /** Короткое сообщение: пресет применён, снимок сохранён и т.п. */
     var statusMessage by mutableStateOf<String?>(null)
@@ -282,6 +335,8 @@ class CameraController(private val context: Context, private val scope: Coroutin
     private var summaryAt = 0L
     private var summaryFrames = 0
     private var summaryBytes = 0L
+    /** Номер следующего снимка в ленте: галерея держит снимок по нему, а не по месту в ленте. */
+    private var nextShotId = 1L
 
     // для панели отладки: сеанс — вместе с тихими переподключениями, счёт с начала нового сеанса
     private var sessionStartedAt: Long? = null
@@ -557,28 +612,50 @@ class CameraController(private val context: Context, private val scope: Coroutin
 
     // MARK: - Фото
 
+    /**
+     * Снимок. Этапы — для кнопки спуска: фокусировка → спуск отработан (шторка; просмотр — с кадром этой секунды) →
+     * загрузка файла с долей скачанного. Файлов у снимка — по формату (RAW+JPEG — два).
+     */
     fun capturePhoto() {
         val session = session ?: return
         if (phase != Phase.ready || mode != CaptureMode.photo || isCapturing || isApplyingPreset) return
         isCapturing = true
+        capturePhase = CapturePhase.Focusing
+        feedback(FeedbackEvent.Accepted(FeedbackTarget.shutter))
         val destination = prefs.destination
-        // копия: кадр на экране — из пула, его перезапишут следующие кадры
-        val cameraFrame = frameCopy()
         val reviewOn = prefs.reviewEnabled
         val source = if (destination.savesToDevice) prefs.reviewSource else Prefs.ReviewSource.camera
-        if (reviewOn) {
-            // кадр с камеры есть сразу; загруженный снимок появится после скачивания
-            showReview(Review(cameraFrame, "Снимок", if (source == Prefs.ReviewSource.camera) "" else "Загружаю…",
-                emptyList(), "Кадр с камеры", null), timed = source == Prefs.ReviewSource.camera)
-        }
+        // RAW+JPEG (0xD253 = 2) — два файла, иначе один: пришли все — спуск сразу свободен
+        val fileCount = if (properties[SonyProp.FILE_FORMAT]?.current?.intValue == 2L) 2 else 1
+        val transport = transport
         scope.launch {
+            // кадр с камеры в момент снимка — для просмотра и для RAW без JPEG
+            var cameraFrame: ImageBitmap? = null
+            var takenAt = System.currentTimeMillis()
+            var progress: Job? = null
             try {
                 if (properties[SonyProp.STILL_IMAGE_STORE_DESTINATION]?.current?.intValue != destination.cameraValue) {
                     session.set(SonyProp.STILL_IMAGE_STORE_DESTINATION, destination.cameraValue)
                 }
-                // RAW+JPEG (0xD253 = 2) — два файла, иначе один: пришли все — спуск сразу свободен
-                val fileCount = if (properties[SonyProp.FILE_FORMAT]?.current?.intValue == 2L) 2 else 1
-                val objects = session.capturePhoto(destination.savesToDevice, fileCount)
+                val objects = session.capturePhoto(destination.savesToDevice, fileCount) { step ->
+                    capturePhase = step
+                    when (step) {
+                        CapturePhase.Exposing -> {
+                            takenAt = System.currentTimeMillis()
+                            // копия: кадр на экране — из пула, его перезапишут следующие кадры
+                            cameraFrame = frameCopy()
+                            feedback(FeedbackEvent.ShutterFired)
+                            // просмотр — с кадром той секунды, когда камера снимала, а не момента нажатия;
+                            // загруженный снимок заменит его, когда скачается
+                            if (reviewOn) {
+                                showReview(Review(cameraFrame, "Снимок", "", emptyList(), "Кадр с камеры", null, live = true),
+                                    timed = source == Prefs.ReviewSource.camera)
+                            }
+                        }
+                        is CapturePhase.Downloading -> if (progress == null) progress = scope.launch { followDownload(transport) }
+                        CapturePhase.Focusing -> Unit
+                    }
+                }
                 if (!destination.savesToDevice) {
                     showStatus("Снимок сохранён на карту камеры")
                     return@launch
@@ -586,54 +663,95 @@ class CameraController(private val context: Context, private val scope: Coroutin
                 if (objects.isEmpty()) throw IllegalStateException("камера не отдала файл")
                 val files = withContext(Dispatchers.IO) { objects.map { saver.save(it.filename, it.data) } }
                 val jpeg = objects.firstOrNull { it.filename.endsWith(".JPG", ignoreCase = true) }?.data
-                val large = withContext(Dispatchers.Default) { jpeg?.let { MediaSaver.decode(it, 2048)?.asImageBitmap() } }
-                val small = withContext(Dispatchers.Default) { jpeg?.let { MediaSaver.decode(it, 160)?.asImageBitmap() } }
-                val shot = Shot(files, small ?: cameraFrame, jpeg)
+                val frame = cameraFrame
+                val small = withContext(Dispatchers.Default) {
+                    (jpeg?.let { MediaSaver.decode(it, THUMBNAIL_SIDE) } ?: frame?.let { MediaSaver.thumbnail(it.asAndroidBitmap(), THUMBNAIL_SIDE) })
+                        ?.asImageBitmap()
+                }
+                val shot = Shot(nextShotId++, files, small, takenAt, jpeg?.let(MediaSaver::pixelSize),
+                    objects.sumOf { it.data.size.toLong() }, isFrameGrab = false, cameraFrame = if (jpeg == null) frame else null)
                 shots = listOf(shot) + shots
-                val megabytes = objects.sumOf { it.data.size } / 1_048_576.0
+                feedback(FeedbackEvent.ShotAdded(shot.id))
                 showStatus("Сохранено: ${shot.title}")
                 if (reviewOn && review != null) {
-                    val downloaded = source == Prefs.ReviewSource.downloaded && large != null
-                    showReview(Review(if (downloaded) large else cameraFrame, shot.title,
-                        "%.1f МБ · «%s»".format(megabytes, saver.folderTitle), files,
-                        if (downloaded) "Загруженный снимок" else "Кадр с камеры", null), timed = true)
+                    // большой снимок декодируем, только если его и показываем
+                    val large = if (source == Prefs.ReviewSource.downloaded && jpeg != null) {
+                        withContext(Dispatchers.Default) { MediaSaver.decode(jpeg, 2048)?.asImageBitmap() }
+                    } else {
+                        null
+                    }
+                    showReview(Review(large ?: frame, shot.title, "%.1f МБ · «%s»".format(shot.bytes / 1_048_576.0, saver.folderTitle),
+                        files, if (large != null) "Загруженный снимок" else "Кадр с камеры", null), timed = true)
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Log.w(TAG, "снимок не удался", e)
                 dismissReview()
+                feedback(FeedbackEvent.Failed(FeedbackTarget.shutter))
                 showStatus("Снимок не удался: ${e.message}")
             } finally {
+                progress?.cancel()
                 isCapturing = false
+                capturePhase = null
             }
+        }
+    }
+
+    /**
+     * Пока качается файл снимка — 10 раз в секунду доля из счётчика транспорта. Берём только показание той же длины, что
+     * у файла по ObjectInfo: между файлами в очередь успевают проскочить кадры live view.
+     */
+    private suspend fun followDownload(transport: PtpTransport?) {
+        val counter = transport?.dataProgress ?: return
+        while (true) {
+            delay(100)
+            val step = capturePhase as? CapturePhase.Downloading ?: return
+            val reading = counter.current ?: continue
+            if (step.expected == null || reading.expected != step.expected) continue
+            if (reading.received != step.received) capturePhase = step.copy(received = reading.received)
         }
     }
 
     /** Стоп-кадр из видео: сохраняет текущий кадр live view, запись не прерывается. */
     fun grabFrame() {
         val sample = lastSample ?: return
-        val thumbnail = frameCopy()
+        // копия: кадр на экране — из пула; она же летит в ленту
+        val image = frameCopy()
+        feedback(FeedbackEvent.Accepted(FeedbackTarget.grab))
         scope.launch {
             try {
                 val jpeg = withContext(Dispatchers.Default) { sample.jpeg() }
                 val file = withContext(Dispatchers.IO) { saver.save(FileNaming.frameGrab(), jpeg) }
-                shots = listOf(Shot(listOf(file), thumbnail, jpeg)) + shots
+                val small = withContext(Dispatchers.Default) {
+                    image?.let { MediaSaver.thumbnail(it.asAndroidBitmap(), THUMBNAIL_SIDE).asImageBitmap() }
+                }
+                val shot = Shot(nextShotId++, listOf(file), small, System.currentTimeMillis(), MediaSaver.pixelSize(jpeg),
+                    jpeg.size.toLong(), isFrameGrab = true)
+                shots = listOf(shot) + shots
+                feedback(FeedbackEvent.FrameGrabbed(image, shot.id))
                 showStatus("Кадр сохранён: ${file.name}")
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
+                feedback(FeedbackEvent.Failed(FeedbackTarget.grab))
                 showStatus("Не удалось сохранить кадр: ${e.message}")
             }
         }
     }
 
-    /** Открывает снимок из ленты поверх видео (пока не закроют). */
+    /** Открывает снимок из ленты поверх видео (пока не закроют): снимок читается из файла. */
     fun openShot(index: Int) {
         val shot = shots.getOrNull(index) ?: return
         scope.launch {
-            val image = withContext(Dispatchers.Default) { shot.preview?.let { MediaSaver.decode(it, 2048)?.asImageBitmap() } }
-            showReview(Review(image ?: shot.thumbnail, shot.title, "«${saver.folderTitle}»", shot.files, "Снимок из ленты", null),
-                timed = false)
+            val image = shot.jpeg?.let { file -> withContext(Dispatchers.IO) { saver.decode(file.uri, 2560)?.asImageBitmap() } }
+            showReview(Review(image ?: shot.cameraFrame ?: shot.thumbnail, shot.title, "«${saver.folderTitle}»", shot.files,
+                "Снимок из ленты", null), timed = false)
         }
+    }
+
+    private fun feedback(event: FeedbackEvent) {
+        feedbackEvents.tryEmit(event)
     }
 
     /** Открывает файл в программе для просмотра на планшете. */
@@ -1717,6 +1835,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
         recordingStartedAt = null
         isApplyingPreset = false
         isCapturing = false
+        capturePhase = null
         dismissReview()
         phase = Phase.searching
     }
@@ -1895,6 +2014,8 @@ class CameraController(private val context: Context, private val scope: Coroutin
         /** Связь, качество превью, переподключения — отдельным тегом: `adb logcat -s ZVLink`. */
         private const val LINK = "ZVLink"
         private const val ACTION_USB_PERMISSION = "local.zve10viewer.USB_PERMISSION"
+        /** Миниатюра снимка в ленте — не больше стольких точек по длинной стороне. */
+        private const val THUMBNAIL_SIDE = 160
         /** Столько в фоне — и сеанс закрываем обычным образом; на экране подключимся снова. */
         private const val BACKGROUND_CLOSE_MS = 60_000L
         /** Прощальная запись при закрытии: вернуть камере высокое качество превью, если снижали мы. */
