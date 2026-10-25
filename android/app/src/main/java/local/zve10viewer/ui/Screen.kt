@@ -53,10 +53,27 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.VectorConverter
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.layout.offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.round
 import androidx.compose.ui.unit.toSize
+import kotlinx.coroutines.launch
+import local.zve10viewer.view.FloatingPlacement
 import local.zve10viewer.view.ViewZoom
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -120,6 +137,13 @@ class ScreenState {
     /** Панель отладки: долгое нажатие на плашку состояния или ⚙ → «Отладка»; закрывается только ×. */
     var debugOpen by mutableStateOf(false)
     var debugTab by mutableStateOf(DebugTab.link)
+
+    /** Где гистограмма на экране: касания по ней не возвращают скрытые элементы. */
+    var histogramRect: Rect? = null
+    /** Высота ленты снимков (как её разложили) — гистограмма по умолчанию стоит над ней. */
+    var stripHeight by mutableStateOf<Float?>(null)
+    /** Где меню Fn, пока оно открыто: гистограмма поднимается над ним, а не прячется под ним. */
+    var fnMenuRect by mutableStateOf<Rect?>(null)
 
     val controlsHidden: Boolean get() = manualHidden || autoHidden
     val overlayOpen: Boolean get() = fnOpen || allSettingsOpen || settingsOpen || pillInfo != null
@@ -303,13 +327,18 @@ private fun LiveScreen(controller: CameraController, screen: ScreenState) {
     Box(
         Modifier.fillMaxSize()
             .onSizeChanged { feedback.screenSize = it.toSize() }
-            // любое касание — «активность», элементы не прячутся; само касание не перехватываем
+            // любое касание — «активность», элементы не прячутся; само касание не перехватываем. Касания по гистограмме
+            // (её перетаскивают) скрытые элементы не возвращают
             .pointerInput(Unit) {
                 awaitPointerEventScope {
+                    var onPanel = false
                     while (true) {
                         val event = awaitPointerEvent(PointerEventPass.Initial)
-                        if (event.type == PointerEventType.Press) screen.revealTap = screen.controlsHidden
-                        screen.noteActivity()
+                        if (event.type == PointerEventType.Press && event.changes.count { it.pressed } == 1) {
+                            onPanel = screen.histogramRect?.contains(event.changes.first().position) == true
+                            if (!onPanel) screen.revealTap = screen.controlsHidden
+                        }
+                        if (!onPanel) screen.noteActivity()
                     }
                 }
             },
@@ -329,6 +358,8 @@ private fun LiveScreen(controller: CameraController, screen: ScreenState) {
                 }
             }
         })
+        // гистограмма — над видео, под кнопками и меню; не прячется вместе с элементами
+        if (controller.histogramOn) FloatingHistogram(controller, screen, feedback)
         AnimatedVisibility(showControls, enter = fadeIn(), exit = fadeOut()) {
             Controls(controller, screen, feedback)
         }
@@ -437,16 +468,17 @@ private fun Controls(controller: CameraController, screen: ScreenState, feedback
             screen.pillInfo?.let { PillInfoCard(controller, it) }
         }
         RightColumn(controller, feedback, Modifier.align(Alignment.CenterEnd).padding(end = 4.dp))
-        if (!screen.fnOpen) {
-            Column(Modifier.align(Alignment.BottomStart).padding(bottom = 76.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                val bins = controller.histogram
-                if (controller.histogramOn && bins != null) HistogramView(bins, controller.histogramStats)
-                if (controller.shots.isNotEmpty()) ShotsStrip(controller, feedback)
+        if (!screen.fnOpen && controller.shots.isNotEmpty()) {
+            Box(Modifier.align(Alignment.BottomStart).padding(bottom = 76.dp)
+                .onSizeChanged { screen.stripHeight = it.height.toFloat() }) {
+                ShotsStrip(controller, feedback)
             }
         }
         Box(Modifier.align(Alignment.BottomCenter).padding(end = if (screen.fnOpen) 110.dp else 0.dp)) {
             if (screen.fnOpen) {
-                FnMenu(controller, screen)
+                // где меню — для гистограммы: она поднимается над ним
+                DisposableEffect(Unit) { onDispose { screen.fnMenuRect = null } }
+                Box(Modifier.onGloballyPositioned { screen.fnMenuRect = it.boundsInRoot() }) { FnMenu(controller, screen) }
             } else if (!screen.allSettingsOpen) {
                 InfoLine(controller) { screen.openFn(it) }
             }
@@ -698,6 +730,103 @@ private fun TopBar(controller: CameraController, screen: ScreenState) {
             confirmButton = { TextButton({ controller.renamePreset(renaming, newName); renaming = -1 }) { Text("Сохранить") } },
             dismissButton = { TextButton({ renaming = -1 }) { Text("Отмена") } },
         )
+    }
+}
+
+/**
+ * Гистограмма отдельным слоем над видео: видна и при скрытых элементах, и при открытом меню Fn (там она нужнее всего —
+ * меняют экспозицию; если меню её закрыло бы, она поднимается над ним). Тащат за любое место — она чуть крупнее (1,03)
+ * и с тенью; отпустили ближе 24 dp к краю — прилипает к отступу 16 dp; за экран не уходит. Место — доли свободного
+ * места: переживает поворот и перезапуск. По умолчанию — как раньше, слева внизу над лентой снимков. Размер панели —
+ * как её разложили, а не на глаз: с неверным размером у краёв она уходила бы за экран.
+ */
+@Composable
+private fun FloatingHistogram(controller: CameraController, screen: ScreenState, feedback: FeedbackState) {
+    val bins = controller.histogram ?: return
+    val density = LocalDensity.current
+    val scope = rememberCoroutineScope()
+    var panel by remember { mutableStateOf(IntSize.Zero) }
+    /** Где панель, пока её тащат; null — не тащат. */
+    var drag by remember { mutableStateOf<Offset?>(null) }
+    val position = remember { Animatable(Offset.Zero, Offset.VectorConverter) }
+    var placed by remember { mutableStateOf(false) }
+
+    /** Куда положить панель сейчас: по сохранённому месту или на место по умолчанию, но не под меню Fn. */
+    fun goal(): Offset? {
+        val view = feedback.screenSize
+        if (panel == IntSize.Zero || view == Size.Zero) return null
+        val size = panel.toSize()
+        return with(density) {
+            val origin = controller.histogramPlacement?.origin(size, view) ?: run {
+                // над лентой снимков: отступ экрана 18, над строкой значений — 76, до ленты — 10
+                val strip = if (controller.shots.isNotEmpty()) (screen.stripHeight ?: 76.dp.toPx()) + 10.dp.toPx() else 0f
+                Offset(18.dp.toPx(), view.height - 18.dp.toPx() - 76.dp.toPx() - strip - size.height)
+            }
+            val menu = screen.fnMenuRect
+            if (menu != null && Rect(origin, size).overlaps(menu)) {
+                origin.copy(y = maxOf(16.dp.toPx(), menu.top - 10.dp.toPx() - size.height))
+            } else {
+                origin
+            }
+        }
+    }
+
+    // место поменялось (поворот, лента, меню Fn, сохранили новое) — едем туда; в первый раз — сразу
+    val target = goal()
+    LaunchedEffect(target) {
+        val to = target ?: return@LaunchedEffect
+        if (drag != null) return@LaunchedEffect
+        if (placed) {
+            position.animateTo(to, spring(dampingRatio = 0.85f, stiffness = Spring.StiffnessMediumLow))
+        } else {
+            position.snapTo(to)
+            placed = true
+        }
+    }
+    DisposableEffect(Unit) { onDispose { screen.histogramRect = null } }
+
+    fun drop() {
+        val from = drag ?: return
+        controller.placeHistogram(FloatingPlacement.dropped(from, panel.toSize(), feedback.screenSize))
+        scope.launch {
+            position.snapTo(from)
+            drag = null
+            goal()?.let { position.animateTo(it, spring(dampingRatio = 0.85f, stiffness = Spring.StiffnessMediumLow)) }
+        }
+    }
+
+    val lifted by animateFloatAsState(if (drag != null) 1f else 0f, tween(150), label = "lift")
+    Box(
+        Modifier
+            .offset { (drag ?: position.value).round() }
+            .onGloballyPositioned {
+                panel = it.size
+                screen.histogramRect = it.boundsInRoot()
+            }
+            .graphicsLayer {
+                // пока размер не известен — не показываем: место считается от размера
+                alpha = if (placed) 1f else 0f
+                scaleX = 1f + 0.03f * lifted
+                scaleY = 1f + 0.03f * lifted
+                shadowElevation = 16.dp.toPx() * lifted
+                shape = RoundedCornerShape(10.dp)
+            }
+            .pointerInput(Unit) {
+                detectDragGestures(
+                    onDragStart = {
+                        drag = position.value
+                        feedback.haptic(HapticEvent.dragStart)
+                    },
+                    onDrag = { change, amount ->
+                        change.consume()
+                        drag = FloatingPlacement.dragOrigin((drag ?: position.value) + amount, panel.toSize(), feedback.screenSize)
+                    },
+                    onDragEnd = { drop() },
+                    onDragCancel = { drop() },
+                )
+            },
+    ) {
+        HistogramView(bins, controller.histogramStats)
     }
 }
 

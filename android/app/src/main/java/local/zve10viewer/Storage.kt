@@ -15,6 +15,7 @@ import kotlin.math.roundToInt
 import local.zve10viewer.settings.FileNaming
 import local.zve10viewer.settings.Preset
 import local.zve10viewer.settings.PresetCatalog
+import local.zve10viewer.view.FloatingPlacement
 
 /** Настройки программы. Хранятся в SharedPreferences; имена и значения — как у программы для Mac. */
 class Prefs(context: Context) {
@@ -62,6 +63,23 @@ class Prefs(context: Context) {
     var histogramOn: Boolean
         get() = prefs.getBoolean("histogramOn", false)
         set(value) = prefs.edit().putBoolean("histogramOn", value).apply()
+
+    /**
+     * Где гистограмма: доли свободного места по ширине и высоте (переживают поворот и смену размера экрана);
+     * null — на месте по умолчанию, слева внизу над лентой снимков.
+     */
+    var histogramPlacement: FloatingPlacement?
+        get() = if (prefs.contains("histogramX") && prefs.contains("histogramY")) {
+            FloatingPlacement.restored(prefs.getFloat("histogramX", 0f), prefs.getFloat("histogramY", 0f))
+        } else {
+            null
+        }
+        set(value) {
+            val edit = prefs.edit()
+            if (value == null) edit.remove("histogramX").remove("histogramY")
+            else edit.putFloat("histogramX", value.x.toFloat()).putFloat("histogramY", value.y.toFloat())
+            edit.apply()
+        }
 
     /** Вибрация при съёмке — если у планшета есть мотор. */
     var hapticsEnabled: Boolean

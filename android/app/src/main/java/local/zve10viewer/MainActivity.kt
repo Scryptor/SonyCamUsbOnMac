@@ -1,6 +1,7 @@
 package local.zve10viewer
 
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
@@ -61,10 +62,17 @@ class MainActivity : ComponentActivity() {
         val host = intent.getStringExtra(EXTRA_PTPIP_HOST)?.trim()?.takeIf { it.isNotEmpty() }
         val linkCheck = intent.getStringExtra(EXTRA_LINK_CHECK_URL)?.trim()?.takeIf { it.isNotEmpty() }
         if (host != null || linkCheck != null) controller.setDebugTarget(host, linkCheck)
+        // поворот экрана для проверки без настроек системы: только своё окно, `--es orientation portrait|landscape|auto`
+        when (intent.getStringExtra(EXTRA_ORIENTATION)) {
+            "portrait" -> requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            "landscape" -> requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+            "auto" -> requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        }
     }
 
     private companion object {
         const val EXTRA_PTPIP_HOST = "ptpipHost"
         const val EXTRA_LINK_CHECK_URL = "linkCheckUrl"
+        const val EXTRA_ORIENTATION = "orientation"
     }
 }

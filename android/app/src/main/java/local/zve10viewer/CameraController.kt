@@ -93,6 +93,7 @@ import local.zve10viewer.sony.SonyOp
 import local.zve10viewer.sony.SonyProp
 import local.zve10viewer.sony.SonyProperty
 import local.zve10viewer.usb.UsbPtpTransport
+import local.zve10viewer.view.FloatingPlacement
 import local.zve10viewer.wifi.LinkLoss
 import local.zve10viewer.wifi.PtpIpIdentity
 import local.zve10viewer.wifi.PtpIpTransport
@@ -638,6 +639,15 @@ class CameraController(private val context: Context, private val scope: Coroutin
             val capture = property(SettingID.shutter)?.let { SlowQuick.captureFrameRate(it.settableValues, pal) }
             return SlowMotion(capture, setting?.let(RecordingModes::frameRate))
         }
+
+    /** Где гистограмма (доли свободного места); null — на месте по умолчанию. */
+    var histogramPlacement by mutableStateOf(prefs.histogramPlacement)
+        private set
+
+    fun placeHistogram(placement: FloatingPlacement) {
+        histogramPlacement = placement
+        prefs.histogramPlacement = placement
+    }
 
     fun applyTallyStyle(style: TallyStyle) {
         tallyStyle = style
