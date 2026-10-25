@@ -1,5 +1,6 @@
 package local.zve10viewer.ui
 
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
@@ -43,8 +44,12 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.withFrameMillis
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -496,12 +501,14 @@ private fun ShotThumbnail(controller: CameraController, shot: CameraController.S
 /** Просмотр снимка поверх видео: по таймеру после съёмки или до закрытия, если открыт из ленты. */
 @Composable
 fun ReviewOverlay(controller: CameraController, review: CameraController.Review) {
-    Box(Modifier.fillMaxSize().background(Color.Black).pointerInput(review) { detectTapGestures { controller.dismissReview() } }) {
-        val image = review.image
-        if (image != null) {
-            Image(image, review.title, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
-        } else {
-            CircularProgressIndicator(Modifier.align(Alignment.Center), color = Color.White)
+    Box(Modifier.fillMaxSize().background(Color.Black).pointerInput(Unit) { detectTapGestures { controller.dismissReview() } }) {
+        // скачанный снимок сменяет кадр с камеры плавно
+        Crossfade(review.image, animationSpec = tween(250), label = "review") { image ->
+            if (image != null) {
+                Image(image, review.title, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
+            } else {
+                Box(Modifier.fillMaxSize()) { CircularProgressIndicator(Modifier.align(Alignment.Center), color = Color.White) }
+            }
         }
         Text("${review.source} · нажмите, чтобы вернуться", color = Color.White, fontSize = 16.sp,
             modifier = Modifier.align(Alignment.TopCenter).padding(18.dp).background(Panel, RoundedCornerShape(10.dp))
@@ -522,22 +529,30 @@ fun ReviewOverlay(controller: CameraController, review: CameraController.Review)
             }
         }
         review.endsAt?.let { endsAt ->
-            Countdown(endsAt, Modifier.align(Alignment.CenterEnd).padding(end = 24.dp))
+            Countdown(review.shownAt, endsAt, Modifier.align(Alignment.CenterEnd).padding(end = 24.dp))
         }
     }
 }
 
+/** Сколько ещё показывать снимок: кольцо плавно убывает от полного до пустого, в середине — целые секунды. */
 @Composable
-private fun Countdown(endsAt: Long, modifier: Modifier) {
+private fun Countdown(startsAt: Long, endsAt: Long, modifier: Modifier) {
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(endsAt) {
-        while (now < endsAt) {
-            delay(250)
-            now = System.currentTimeMillis()
-        }
+        while (now < endsAt) withFrameMillis { now = System.currentTimeMillis() }
     }
-    val left = maxOf(0L, endsAt - now)
-    Box(modifier.size(76.dp).border(4.dp, Color.White.copy(alpha = 0.25f), CircleShape), contentAlignment = Alignment.Center) {
-        Text("${(left + 999) / 1000}", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Bold)
+    val total = (endsAt - startsAt).coerceAtLeast(1L)
+    val seconds by remember(endsAt) { derivedStateOf { (maxOf(0L, endsAt - now) + 999) / 1000 } }
+    Box(
+        modifier.size(76.dp).background(Panel, CircleShape).drawBehind {
+            val width = 4.dp.toPx()
+            val left = (endsAt - now).coerceIn(0L, total).toFloat() / total
+            drawCircle(Color.White.copy(alpha = 0.25f), size.minDimension / 2 - width / 2, style = Stroke(width))
+            drawArc(Color.White, -90f, 360f * left, false, Offset(width / 2, width / 2), Size(size.width - width, size.height - width),
+                style = Stroke(width, cap = StrokeCap.Round))
+        },
+        contentAlignment = Alignment.Center,
+    ) {
+        Text("$seconds", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Bold)
     }
 }

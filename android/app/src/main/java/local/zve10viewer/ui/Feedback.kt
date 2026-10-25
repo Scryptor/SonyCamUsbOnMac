@@ -62,6 +62,7 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import local.zve10viewer.TallyStyle
 import local.zve10viewer.CameraController.FeedbackEvent
 import local.zve10viewer.CameraController.FeedbackTarget
 import kotlin.math.roundToInt
@@ -322,26 +323,38 @@ fun GrabFlightLayer(feedback: FeedbackState) {
 }
 
 /**
- * Рамка записи вокруг видимой картинки (при увеличении — по краю экрана), 3 dp, красная, как тэлли у мониторов:
- * запись началась — вспыхивает (100 % → 70 %), остановилась — тает за 300 мс. Видна и при скрытых элементах.
- * picture — где картинка на экране.
+ * Рамка записи вокруг видимой картинки (при увеличении — по краю экрана), красная, как тэлли у мониторов: запись
+ * началась — вспыхивает (100 % → яркость из настроек, по умолчанию 70 %), остановилась — тает за 300 мс; с «Мигать» —
+ * медленно мигает между этой яркостью и её четвертью, раз в секунду. Видна и при скрытых элементах.
+ * picture — где картинка на экране; null — по краю всего места (образец в настройках).
  */
 @Composable
-fun TallyBorder(recording: Boolean, picture: () -> Rect?, modifier: Modifier = Modifier) {
+fun TallyBorder(recording: Boolean, style: TallyStyle, picture: () -> Rect?, modifier: Modifier = Modifier) {
     val alpha = remember { Animatable(0f) }
-    LaunchedEffect(recording) {
-        if (recording) {
-            alpha.snapTo(1f)
-            alpha.animateTo(0.7f, tween(600))
-        } else {
+    // вспышка — один раз на запись, а не при каждой смене настроек
+    val lit = remember { BooleanArray(1) }
+    LaunchedEffect(recording, style.enabled, style.opacity, style.blink) {
+        if (!recording || !style.enabled) {
+            lit[0] = false
             alpha.animateTo(0f, tween(300))
+            return@LaunchedEffect
+        }
+        if (!lit[0]) {
+            lit[0] = true
+            alpha.snapTo(1f)
+        }
+        alpha.animateTo(style.opacity, tween(600))
+        while (style.blink) {
+            alpha.animateTo(style.opacity * 0.25f, tween(500, easing = FastOutSlowInEasing))
+            alpha.animateTo(style.opacity, tween(500, easing = FastOutSlowInEasing))
         }
     }
     Spacer(modifier.fillMaxSize().drawBehind {
         val a = alpha.value
         if (a <= 0f) return@drawBehind
-        val rect = picture()?.intersect(Rect(Offset.Zero, size))?.takeIf { !it.isEmpty } ?: return@drawBehind
-        val width = 3.dp.toPx()
+        val area = Rect(Offset.Zero, size)
+        val rect = (picture() ?: area).intersect(area).takeIf { !it.isEmpty } ?: return@drawBehind
+        val width = style.width.dp.toPx()
         drawRect(Color.Red.copy(alpha = a), Offset(rect.left + width / 2, rect.top + width / 2),
             Size(rect.width - width, rect.height - width), style = Stroke(width))
     })

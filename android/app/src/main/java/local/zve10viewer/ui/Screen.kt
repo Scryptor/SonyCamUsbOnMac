@@ -373,7 +373,7 @@ private fun Video(controller: CameraController, feedback: FeedbackState, modifie
             // где картинка на экране: отсюда улетает стоп-кадр, по её краю — рамка записи
             val picture = ViewZoom.identity.imageRect(viewSize, Size(frame.width.toFloat(), frame.height.toFloat()))
             SideEffect { feedback.frameRect = picture }
-            TallyBorder(controller.isRecording, { picture })
+            TallyBorder(controller.isRecording, controller.tallyStyle, { picture })
             when (notice) {
                 // кадр не тускнеет: картинка, скорее всего, сейчас пойдёт дальше
                 FrameNotice.weakSignal -> Text("Слабый сигнал Wi-Fi", color = Color.White, fontSize = 16.sp,
@@ -792,6 +792,7 @@ private fun SettingsPanel(controller: CameraController, modifier: Modifier, onDe
     val context = LocalContext.current
     val hasVibrator = remember { Haptics.deviceHasVibrator(context) }
     var haptics by remember { mutableStateOf(prefs.hapticsEnabled) }
+    val tally = controller.tallyStyle
     Column(
         modifier.background(Color(0xF22C2C2E), RoundedCornerShape(18.dp)).padding(24.dp)
             .verticalScroll(rememberScrollState()).pointerInput(Unit) { detectTapGestures { } },
@@ -831,6 +832,26 @@ private fun SettingsPanel(controller: CameraController, modifier: Modifier, onDe
                 color = Secondary, fontSize = 13.sp)
         }
         Spacer(Modifier.height(8.dp))
+        Toggle("Красная рамка во время записи", tally.enabled) { controller.applyTallyStyle(tally.copy(enabled = it)) }
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(18.dp)) {
+            Column(Modifier.weight(1f)) {
+                val color = if (tally.enabled) Color.White else Secondary
+                Text("Толщина: ${tally.width.roundToInt()} dp", color = color, fontSize = 16.sp)
+                Slider(tally.width, { controller.applyTallyStyle(tally.copy(width = it.roundToInt().toFloat())) },
+                    valueRange = 1f..12f, steps = 10, enabled = tally.enabled)
+                Text("Яркость: ${(tally.opacity * 100).roundToInt()} %", color = color, fontSize = 16.sp)
+                Slider(tally.opacity, { controller.applyTallyStyle(tally.copy(opacity = (it * 20).roundToInt() / 20f)) },
+                    valueRange = 0.3f..1f, steps = 13, enabled = tally.enabled)
+                Toggle("Мигать", tally.blink, enabled = tally.enabled) { controller.applyTallyStyle(tally.copy(blink = it)) }
+            }
+            // образец вживую: тёмный кадр с рамкой как есть
+            Box(Modifier.size(160.dp, 90.dp).background(Color(0xFF101012), RoundedCornerShape(4.dp))) {
+                TallyBorder(recording = true, style = tally, picture = { null })
+            }
+        }
+        Text("Рамка — по краю картинки, видна и при скрытых элементах; «● REC» в строке состояния остаётся и без неё.",
+            color = Secondary, fontSize = 13.sp)
+        Spacer(Modifier.height(8.dp))
         Text("Wi-Fi", color = Secondary, fontSize = 15.sp)
         Toggle("Подключаться по Wi-Fi, когда камеры нет на кабеле", wifiEnabled) { wifiEnabled = it; prefs.wifiEnabled = it }
         Toggle("Снижать качество превью при слабом Wi-Fi", adaptiveQuality) {
@@ -869,10 +890,11 @@ private fun Choice(title: String, selected: Boolean, enabled: Boolean = true, on
 }
 
 @Composable
-private fun Toggle(title: String, checked: Boolean, onChange: (Boolean) -> Unit) {
-    Row(Modifier.fillMaxWidth().clickable { onChange(!checked) }.padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(title, color = Color.White, fontSize = 16.sp, modifier = Modifier.weight(1f))
-        Switch(checked, onChange)
+private fun Toggle(title: String, checked: Boolean, enabled: Boolean = true, onChange: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth().clickable(enabled = enabled) { onChange(!checked) }.padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        Text(title, color = if (enabled) Color.White else Secondary, fontSize = 16.sp, modifier = Modifier.weight(1f))
+        Switch(checked, onChange, enabled = enabled)
     }
 }
 

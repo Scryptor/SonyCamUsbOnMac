@@ -135,10 +135,14 @@ class CameraController(private val context: Context, private val scope: Coroutin
     data class Review(
         val image: ImageBitmap?, val title: String, val detail: String,
         val files: List<SavedFile>, val source: String,
-        /** null — показывается, пока не закроют (ждём загруженный снимок или снимок открыт из ленты). */
+        /** null — показывается, пока не закроют (снимок открыт из ленты). */
         val endsAt: Long?,
         /** Снимок ещё качается: вместо detail — та же подпись, что у кнопки спуска («Загрузка 42 %»). */
         val live: Boolean = false,
+        /** Какого снимка просмотр: скачанный файл подменяет картинку только в просмотре своего снимка. */
+        val capture: Long = 0,
+        /** С какого момента идёт отсчёт показа — для кольца обратного отсчёта. */
+        val shownAt: Long = 0,
     )
 
     /** Какая кнопка ответила: для волны, «мотания» и вибрации. */
@@ -208,6 +212,9 @@ class CameraController(private val context: Context, private val scope: Coroutin
     var histogramStats by mutableStateOf<LumaStats?>(null)
         private set
     var histogramOn by mutableStateOf(prefs.histogramOn)
+        private set
+    /** Красная рамка во время записи — как её рисовать (настройка ⚙). */
+    var tallyStyle by mutableStateOf(prefs.tallyStyle)
         private set
     /** Настройки, для которых запрошено новое значение, но камера его ещё не подтвердила. */
     var pending by mutableStateOf<Set<SettingID>>(emptySet())
@@ -342,6 +349,8 @@ class CameraController(private val context: Context, private val scope: Coroutin
     private var summaryBytes = 0L
     /** Номер следующего снимка в ленте: галерея держит снимок по нему, а не по месту в ленте. */
     private var nextShotId = 1L
+    /** Номер нажатия спуска: просмотр подменяет картинку только у своего снимка. */
+    private var captureSerial = 0L
 
     // для панели отладки: сеанс — вместе с тихими переподключениями, счёт с начала нового сеанса
     private var sessionStartedAt: Long? = null
@@ -630,6 +639,11 @@ class CameraController(private val context: Context, private val scope: Coroutin
             return SlowMotion(capture, setting?.let(RecordingModes::frameRate))
         }
 
+    fun applyTallyStyle(style: TallyStyle) {
+        tallyStyle = style
+        prefs.tallyStyle = style
+    }
+
     fun toggleHistogram() {
         histogramOn = !histogramOn
         prefs.histogramOn = histogramOn
@@ -666,6 +680,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
         // RAW+JPEG (0xD253 = 2) — два файла, иначе один: пришли все — спуск сразу свободен
         val fileCount = if (properties[SonyProp.FILE_FORMAT]?.current?.intValue == 2L) 2 else 1
         val transport = transport
+        val capture = ++captureSerial
         scope.launch {
             // кадр с камеры в момент снимка — для просмотра и для RAW без JPEG
             var cameraFrame: ImageBitmap? = null
@@ -683,11 +698,11 @@ class CameraController(private val context: Context, private val scope: Coroutin
                             // копия: кадр на экране — из пула, его перезапишут следующие кадры
                             cameraFrame = frameCopy()
                             feedback(FeedbackEvent.ShutterFired)
-                            // просмотр — с кадром той секунды, когда камера снимала, а не момента нажатия;
-                            // загруженный снимок заменит его, когда скачается
+                            // просмотр — с кадром той секунды, когда камера снимала, а не момента нажатия, и отсчёт
+                            // идёт с этой секунды; загруженный снимок подменит кадр, когда скачается, не продлевая показ
                             if (reviewOn) {
-                                showReview(Review(cameraFrame, "Снимок", "", emptyList(), "Кадр с камеры", null, live = true),
-                                    timed = source == Prefs.ReviewSource.camera)
+                                showReview(Review(cameraFrame, "Снимок", "", emptyList(), "Кадр с камеры", null, live = true,
+                                    capture = capture), timed = true)
                             }
                         }
                         is CapturePhase.Downloading -> if (progress == null) progress = scope.launch { followDownload(transport) }
@@ -711,21 +726,25 @@ class CameraController(private val context: Context, private val scope: Coroutin
                 shots = listOf(shot) + shots
                 feedback(FeedbackEvent.ShotAdded(shot.id))
                 showStatus("Сохранено: ${shot.title}")
-                if (reviewOn && review != null) {
+                // просмотр этого снимка ещё на экране — в нём подменяем картинку и подпись, время показа не трогаем
+                if (review?.capture == capture) {
                     // большой снимок декодируем, только если его и показываем
                     val large = if (source == Prefs.ReviewSource.downloaded && jpeg != null) {
                         withContext(Dispatchers.Default) { MediaSaver.decode(jpeg, 2048)?.asImageBitmap() }
                     } else {
                         null
                     }
-                    showReview(Review(large ?: frame, shot.title, "%.1f МБ · «%s»".format(shot.bytes / 1_048_576.0, saver.folderTitle),
-                        files, if (large != null) "Загруженный снимок" else "Кадр с камеры", null), timed = true)
+                    review?.takeIf { it.capture == capture }?.let { current ->
+                        review = current.copy(image = large ?: current.image, title = shot.title,
+                            detail = "%.1f МБ · «%s»".format(shot.bytes / 1_048_576.0, saver.folderTitle), files = files,
+                            source = if (large != null) "Загруженный снимок" else "Кадр с камеры", live = false)
+                    }
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Log.w(TAG, "снимок не удался", e)
-                dismissReview()
+                if (review?.capture == capture) dismissReview()
                 feedback(FeedbackEvent.Failed(FeedbackTarget.shutter))
                 showStatus("Снимок не удался: ${e.message}")
             } finally {
@@ -811,7 +830,8 @@ class CameraController(private val context: Context, private val scope: Coroutin
             return
         }
         val seconds = prefs.reviewSeconds
-        review = value.copy(endsAt = System.currentTimeMillis() + seconds * 1000L)
+        val now = System.currentTimeMillis()
+        review = value.copy(endsAt = now + seconds * 1000L, shownAt = now)
         reviewJob = scope.launch {
             delay(seconds * 1000L)
             review = null

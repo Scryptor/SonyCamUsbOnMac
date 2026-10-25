@@ -68,6 +68,17 @@ class Prefs(context: Context) {
         get() = prefs.getBoolean("hapticsEnabled", true)
         set(value) = prefs.edit().putBoolean("hapticsEnabled", value).apply()
 
+    /** Красная рамка во время записи: включена, толщина, яркость, мигание. */
+    var tallyStyle: TallyStyle
+        get() = TallyStyle(
+            enabled = prefs.getBoolean("tallyEnabled", true),
+            width = prefs.getFloat("tallyWidth", 3f).coerceIn(1f, 12f),
+            opacity = prefs.getFloat("tallyOpacity", 0.7f).coerceIn(0.3f, 1f),
+            blink = prefs.getBoolean("tallyBlink", false),
+        )
+        set(value) = prefs.edit().putBoolean("tallyEnabled", value.enabled).putFloat("tallyWidth", value.width)
+            .putFloat("tallyOpacity", value.opacity).putBoolean("tallyBlink", value.blink).apply()
+
     /** Подключаться к камере по Wi-Fi, когда её нет на кабеле. */
     var wifiEnabled: Boolean
         get() = prefs.getBoolean("wifiEnabled", true)
@@ -91,6 +102,12 @@ class Prefs(context: Context) {
         get() = PresetCatalog.fromJson(prefs.getString("presets", "[]")!!)
         set(value) = prefs.edit().putString("presets", PresetCatalog.toJson(value)).apply()
 }
+
+/**
+ * Красная рамка во время записи. width — толщина, dp (1…12); opacity — яркость, с которой рамка горит после вспышки на
+ * старте (0,3…1); blink — медленно мигать между этой яркостью и её четвертью, раз в секунду.
+ */
+data class TallyStyle(val enabled: Boolean = true, val width: Float = 3f, val opacity: Float = 0.7f, val blink: Boolean = false)
 
 /** Сохранённый файл: где лежит, как называется, какого типа. */
 data class SavedFile(val uri: Uri, val name: String, val mime: String)
