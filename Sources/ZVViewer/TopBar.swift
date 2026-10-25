@@ -184,3 +184,63 @@ private struct SettingsButton: View {
         .help("Настройки (⌘,)")
     }
 }
+
+/// Гистограмма поверх кадра, которую можно утащить мышью куда угодно. Видна, пока включена, — и когда остальные
+/// элементы скрыты, и при открытом меню Fn: там она нужнее всего. Место запоминается долями свободного места
+/// (переживает смену размера окна); у края прилипает к отступу.
+struct FloatingHistogram: View {
+    let controller: CameraController
+    let screen: ScreenState
+    let view: CGSize
+    @State private var panel = CGSize(width: 280, height: 150)
+    @State private var dragStart: CGPoint?
+    @State private var dragOrigin: CGPoint?
+
+    var body: some View {
+        let origin = dragOrigin ?? restingOrigin
+        HistogramView(bins: controller.histogram, stats: controller.histogramStats)
+            .background(GeometryReader { geometry in
+                Color.clear.preference(key: PanelSizeKey.self, value: geometry.size)
+            })
+            .onPreferenceChange(PanelSizeKey.self) { panel = $0 }
+            .scaleEffect(dragOrigin == nil ? 1 : 1.03)
+            .shadow(color: .black.opacity(dragOrigin == nil ? 0 : 0.45), radius: 14, y: 4)
+            .gesture(
+                DragGesture(minimumDistance: 2, coordinateSpace: .named(LiveScreen.space))
+                    .onChanged { value in
+                        let start = dragStart ?? restingOrigin
+                        if dragStart == nil {
+                            dragStart = start
+                            NSCursor.closedHand.set()
+                        }
+                        dragOrigin = FloatingPlacement.dragOrigin(
+                            CGPoint(x: start.x + value.translation.width, y: start.y + value.translation.height),
+                            panel: panel, view: view)
+                    }
+                    .onEnded { _ in
+                        guard let dropped = dragOrigin else { return }
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                            screen.placeHistogram(FloatingPlacement.dropped(at: dropped, panel: panel, view: view))
+                            dragOrigin = nil
+                        }
+                        dragStart = nil
+                        NSCursor.openHand.set()
+                    }
+            )
+            .onHover { inside in
+                if inside { NSCursor.openHand.push() } else { NSCursor.pop() }
+            }
+            .position(x: origin.x + panel.width / 2, y: origin.y + panel.height / 2)
+    }
+
+    /// По умолчанию — слева внизу, над лентой снимков и строкой значений.
+    private var restingOrigin: CGPoint {
+        if let placement = screen.histogramPlacement { return placement.origin(panel: panel, view: view) }
+        return CGPoint(x: FloatingPlacement.margin, y: max(FloatingPlacement.margin, view.height - panel.height - 134))
+    }
+}
+
+private struct PanelSizeKey: PreferenceKey {
+    static let defaultValue = CGSize.zero
+    static func reduce(value: inout CGSize, nextValue: () -> CGSize) { value = nextValue() }
+}

@@ -51,6 +51,25 @@ final class ScreenState {
     /// Стоп-кадр, к миниатюре которого сейчас летит кадр: миниатюра пока спрятана.
     var flyingShot: UUID?
 
+    /// Где гистограмма: доли свободного места; nil — на месте по умолчанию, слева внизу над лентой снимков.
+    private(set) var histogramPlacement: FloatingPlacement?
+
+    /// Открытая галерея: какой снимок на экране; nil — закрыта. По id, а не по номеру: новый снимок её не сбивает.
+    var galleryShot: UUID?
+
+    /// Цифровое увеличение live view — только на экране, камера о нём не знает.
+    var zoom: ViewZoom = .identity
+
+    func placeHistogram(_ placement: FloatingPlacement) {
+        histogramPlacement = placement
+        if let data = try? JSONEncoder().encode(placement) { defaults.set(data, forKey: "histogramPlacement") }
+    }
+
+    func openGallery(_ shot: UUID) {
+        closeOverlays()
+        galleryShot = shot
+    }
+
     func toggleDebug() {
         debugOpen.toggle()
     }
@@ -91,6 +110,7 @@ final class ScreenState {
 
     init() {
         histogramOn = defaults.bool(forKey: "histogramOn")
+        histogramPlacement = defaults.data(forKey: "histogramPlacement").flatMap { try? JSONDecoder().decode(FloatingPlacement.self, from: $0) }
     }
 
     func toggleFn() {

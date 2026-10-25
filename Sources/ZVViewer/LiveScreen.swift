@@ -10,6 +10,8 @@ struct LiveScreen: View {
     @State private var showHiddenHint = false
 
     private var showControls: Bool { !screen.controlsHidden || screen.fnOpen || screen.allSettingsOpen || screen.pillInfo != nil }
+    /// Система координат экрана: в ней тащат гистограмму и мини-карту.
+    static let space = "live"
 
     var body: some View {
         GeometryReader { geometry in
@@ -92,6 +94,10 @@ struct LiveScreen: View {
         ZStack {
             Color.black
             video(size: size)
+            // гистограмма — не среди элементов: не прячется вместе с ними
+            if screen.histogramOn, !controller.histogram.isEmpty, controller.review == nil, screen.galleryShot == nil {
+                FloatingHistogram(controller: controller, screen: screen, view: size)
+            }
             if showControls {
                 controls.transition(.opacity)
             } else if let started = controller.recordingStartedAt {
@@ -131,6 +137,7 @@ struct LiveScreen: View {
                 .transition(.opacity)
             }
         }
+        .coordinateSpace(name: Self.space)
         // стоп-кадр улетает на место первой миниатюры ленты, а без ленты — в левый нижний угол
         .overlayPreferenceValue(FirstShotSlotKey.self) { anchor in
             GeometryReader { proxy in
@@ -175,15 +182,8 @@ struct LiveScreen: View {
                     StatusPill(controller: controller, screen: screen)
                 }
                 Spacer()
-                if !screen.fnOpen {
-                    VStack(alignment: .leading, spacing: 8) {
-                        if screen.histogramOn && !controller.histogram.isEmpty {
-                            HistogramView(bins: controller.histogram, stats: controller.histogramStats)
-                        }
-                        if !controller.shots.isEmpty {
-                            ShotsStrip(controller: controller, screen: screen)
-                        }
-                    }
+                if !screen.fnOpen, !controller.shots.isEmpty {
+                    ShotsStrip(controller: controller, screen: screen)
                 }
                 HStack {
                     Spacer()

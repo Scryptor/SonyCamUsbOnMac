@@ -34,9 +34,18 @@ public enum AutomationAction: Equatable, Sendable, Decodable {
     /// Панель отладки на вкладке: "link", "preview", "camera", "properties", "log"; nil — та, что была.
     case showDebug(String?)
     case hideDebug
+    /// Гистограмма — в это место: доли свободного места по ширине и высоте.
+    case moveHistogram(x: Double, y: Double)
+    /// Галерея снимков сеанса: открыть на снимке, листать, закрыть.
+    case openGallery(Int)
+    case galleryStep(Int)
+    case closeGallery
+    /// Цифровое увеличение: множитель и точка кадра (доли) в центре экрана; без точки — центр как был.
+    case setZoom(factor: Double, x: Double?, y: Double?)
+    case resetZoom
 
     private enum Keys: String, CodingKey {
-        case action, key, setting, offset, value, group, name, index, confirm, mode
+        case action, key, setting, offset, value, group, name, index, confirm, mode, x, y, factor
     }
 
     public init(from decoder: Decoder) throws {
@@ -70,6 +79,14 @@ public enum AutomationAction: Equatable, Sendable, Decodable {
         case "showInfo": self = .showInfo(try c.decodeIfPresent(String.self, forKey: .name))
         case "showDebug": self = .showDebug(try c.decodeIfPresent(String.self, forKey: .name))
         case "hideDebug": self = .hideDebug
+        case "moveHistogram": self = .moveHistogram(x: try c.decode(Double.self, forKey: .x), y: try c.decode(Double.self, forKey: .y))
+        case "openGallery": self = .openGallery(try c.decodeIfPresent(Int.self, forKey: .index) ?? 0)
+        case "galleryStep": self = .galleryStep(try c.decode(Int.self, forKey: .offset))
+        case "closeGallery": self = .closeGallery
+        case "setZoom":
+            self = .setZoom(factor: try c.decode(Double.self, forKey: .factor), x: try c.decodeIfPresent(Double.self, forKey: .x),
+                            y: try c.decodeIfPresent(Double.self, forKey: .y))
+        case "resetZoom": self = .resetZoom
         default:
             throw DecodingError.dataCorruptedError(forKey: .action, in: c, debugDescription: "неизвестная команда \(action)")
         }

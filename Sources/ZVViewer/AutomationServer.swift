@@ -196,9 +196,24 @@ final class AutomationServer {
             guard info != .slowMotion || controller.slowMotion != nil else { return "camera is not in S&Q" }
             screen.closeOverlays()
             screen.pillInfo = info
-        case let .openShot(index):
+        case let .openShot(index), let .openGallery(index):
             guard controller.shots.indices.contains(index) else { return "no shot \(index)" }
-            controller.openShot(index)
+            screen.openGallery(controller.shots[index].id)
+        case let .galleryStep(offset):
+            guard let id = screen.galleryShot, let i = controller.shots.firstIndex(where: { $0.id == id }) else {
+                return "gallery is closed"
+            }
+            screen.galleryShot = controller.shots[min(max(i + offset, 0), controller.shots.count - 1)].id
+        case .closeGallery:
+            screen.galleryShot = nil
+        case let .moveHistogram(x, y):
+            screen.placeHistogram(FloatingPlacement(x: min(max(x, 0), 1), y: min(max(y, 0), 1)))
+        case let .setZoom(factor, x, y):
+            guard controller.frame != nil else { return "no frame" }
+            let center = CGPoint(x: x ?? screen.zoom.center.x, y: y ?? screen.zoom.center.y)
+            screen.zoom = factor < ViewZoom.snapBelow ? .identity : ViewZoom(factor: min(factor, ViewZoom.maxFactor), center: center)
+        case .resetZoom:
+            screen.zoom = .identity
         }
         return nil
     }
@@ -296,6 +311,13 @@ final class AutomationServer {
         ui["debug"] = screen.debugOpen
         ui["debugTab"] = screen.debugTab.rawValue
         ui["manualHidden"] = screen.manualHidden
+        ui["histogramPosition"] = screen.histogramPlacement.map { ["x": $0.x, "y": $0.y] } ?? NSNull()
+        if let id = screen.galleryShot, let index = controller.shots.firstIndex(where: { $0.id == id }) {
+            ui["gallery"] = ["index": index, "title": controller.shots[index].title] as [String: Any]
+        } else {
+            ui["gallery"] = NSNull()
+        }
+        ui["zoom"] = ["factor": screen.zoom.factor, "centerX": screen.zoom.center.x, "centerY": screen.zoom.center.y]
         var result: [String: Any] = [
             "phase": controller.phase.rawValue,
             "model": controller.deviceInfo?.model ?? NSNull(),

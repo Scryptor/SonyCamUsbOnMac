@@ -70,3 +70,15 @@ import Testing
     #expect(try decode(#"{"action":"showDebug"}"#) == .showDebug(nil))
     #expect(try decode(#"{"action":"hideDebug"}"#) == .hideDebug)
 }
+
+@Test func decodesGalleryHistogramAndZoomActions() throws {
+    func decode(_ json: String) throws -> AutomationAction { try JSONDecoder().decode(AutomationAction.self, from: Data(json.utf8)) }
+    #expect(try decode(#"{"action":"moveHistogram","x":0.5,"y":0.25}"#) == .moveHistogram(x: 0.5, y: 0.25))
+    #expect(try decode(#"{"action":"openGallery","index":2}"#) == .openGallery(2))
+    #expect(try decode(#"{"action":"openGallery"}"#) == .openGallery(0))
+    #expect(try decode(#"{"action":"galleryStep","offset":-1}"#) == .galleryStep(-1))
+    #expect(try decode(#"{"action":"closeGallery"}"#) == .closeGallery)
+    #expect(try decode(#"{"action":"setZoom","factor":4,"x":0.3,"y":0.4}"#) == .setZoom(factor: 4, x: 0.3, y: 0.4))
+    #expect(try decode(#"{"action":"setZoom","factor":2}"#) == .setZoom(factor: 2, x: nil, y: nil))
+    #expect(try decode(#"{"action":"resetZoom"}"#) == .resetZoom)
+}
