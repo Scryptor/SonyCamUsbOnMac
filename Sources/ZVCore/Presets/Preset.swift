@@ -3,23 +3,28 @@ import Foundation
 /// Сохранённый набор настроек камеры.
 public struct Preset: Codable, Equatable, Sendable {
     public var name: String
+    /// Для фото или для видео: у каждого режима свой список пресетов (S&Q — видео).
+    public var mode: CaptureMode
     public var values: [SettingID: Int64]
     /// Настройки, которые пресет не меняет: значение он помнит, но не применяет — включили обратно, и оно на месте.
     public var skip: Set<SettingID>
 
-    public init(name: String, values: [SettingID: Int64], skip: Set<SettingID> = []) {
+    public init(name: String, mode: CaptureMode = .photo, values: [SettingID: Int64], skip: Set<SettingID> = []) {
         self.name = name
+        self.mode = mode
         self.values = values
         self.skip = skip
     }
 
     private enum CodingKeys: String, CodingKey {
-        case name, values, skip
+        case name, mode, values, skip
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         name = try c.decode(String.self, forKey: .name)
+        // у пресетов до списков по режимам поля нет: в какой список они попадут, решает `PresetLibrary.decode`
+        mode = try c.decodeIfPresent(String.self, forKey: .mode).flatMap(CaptureMode.init(rawValue:)) ?? .photo
         // незнакомую настройку из будущей версии пропускаем: иначе не прочитался бы весь список пресетов
         values = Dictionary(uniqueKeysWithValues: try c.decode([String: Int64].self, forKey: .values)
             .compactMap { key, value in SettingID(rawValue: key).map { ($0, value) } })
@@ -30,9 +35,18 @@ public struct Preset: Codable, Equatable, Sendable {
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(name, forKey: .name)
+        try c.encode(mode, forKey: .mode)
         try c.encode(values, forKey: .values)
         if !skip.isEmpty { try c.encode(skip.map(\.rawValue).sorted(), forKey: .skip) }
     }
+}
+
+/// Что на камере сейчас не так, как в пресете: значение пресета, значение камеры и подпись для экрана.
+public struct PresetChange: Equatable, Sendable {
+    public let id: SettingID
+    public let preset: Int64
+    public let camera: Int64
+    public let label: String
 }
 
 public struct PresetResult: Equatable, Sendable {
@@ -61,14 +75,14 @@ public enum PresetCatalog {
     ]
 
     /// Снимок текущих значений; берутся только настройки, которые камера сейчас даёт менять.
-    public static func capture(name: String, from properties: [UInt16: SonyProperty]) -> Preset {
+    public static func capture(name: String, mode: CaptureMode = .photo, from properties: [UInt16: SonyProperty]) -> Preset {
         var values: [SettingID: Int64] = [:]
         for id in order {
             if let property = properties[id.code], property.isWritable, let value = property.current.intValue {
                 values[id] = value
             }
         }
-        return Preset(name: name, values: values)
+        return Preset(name: name, mode: mode, values: values)
     }
 
     /// Имя нового пресета, если его не назвали: «Пресет N» по месту, которое он займёт; занят такой — следующий номер.
@@ -116,6 +130,41 @@ public enum PresetCatalog {
         return fresh
     }
 
+    /// В каком порядке перечислять изменения: главное — как в `summary`, остальное — по каталогу.
+    static let changeOrder: [SettingID] = {
+        let main: [SettingID] = [.shutter, .aperture, .iso, .whiteBalance, .colorTemperature, .exposureComp]
+        return main + order.filter { !main.contains($0) }
+    }()
+
+    /// Что из того, что пресет применяет, на камере сейчас другое. Только то, что камера сейчас даёт менять: выдержку
+    /// в режиме A пресет поставить не может — это не изменение, его не сохранить в пресет и не вернуть.
+    public static func changes(_ preset: Preset, _ properties: [UInt16: SonyProperty]) -> [PresetChange] {
+        let values = effective(preset)
+        return changeOrder.compactMap { id in
+            guard let value = values[id], let property = properties[id.code], property.isWritable,
+                  let current = property.current.intValue, current != value else { return nil }
+            return PresetChange(id: id, preset: value, camera: current,
+                                label: changeLabel(id, value, current, presetKelvin: values[.colorTemperature],
+                                                   cameraKelvin: properties[SettingID.colorTemperature.code]?.current.intValue))
+        }
+    }
+
+    /// «1/50 → 1/100», «f/2.8 → f/4», «3200 K → 5600 K» — значения говорят сами за себя; «ISO 800 → 1600»; баланс
+    /// белого — как в `summary`, с температурой пресета и камеры; остальное — с коротким названием: «Фокус AF-S → AF-C».
+    static func changeLabel(_ id: SettingID, _ from: Int64, _ to: Int64, presetKelvin: Int64?, cameraKelvin: Int64?) -> String {
+        switch id {
+        case .shutter, .aperture, .colorTemperature:
+            return ValueFormatter.label(id, from) + " → " + ValueFormatter.label(id, to)
+        case .iso:
+            return "ISO " + ValueFormatter.label(id, from) + " → " + ValueFormatter.label(id, to)
+        case .whiteBalance:
+            return ValueFormatter.whiteBalanceLabel(whiteBalance: from, colorTemperature: presetKelvin) + " → "
+                + ValueFormatter.whiteBalanceLabel(whiteBalance: to, colorTemperature: cameraKelvin)
+        default:
+            return id.shortTitle + " " + ValueFormatter.label(id, from) + " → " + ValueFormatter.label(id, to)
+        }
+    }
+
     /// Кратко, что пресет ставит, — для списков: «1/50 · f/2.8 · ISO 800 · 3200 K · AF-C». Ничего из главного —
     /// какие настройки он меняет: «Замер · Стиль».
     public static func summary(_ preset: Preset) -> String {
@@ -148,6 +197,71 @@ public enum PresetCatalog {
             list.insert(SettingOption(value: value, label: ValueFormatter.label(id, value)), at: 0)
         }
         return list
+    }
+}
+
+/// Все пресеты одним списком — и фото, и видео. Список режима — его пресеты в том же порядке: номер на экране, в окне,
+/// клавиша 1–9 и номер в API — место в списке режима.
+public enum PresetLibrary {
+    /// Заголовок списка: у S&Q — пресеты видео.
+    public static func title(_ mode: CaptureMode) -> String {
+        mode == .photo ? "Пресеты для фото" : "Пресеты для видео и S&Q"
+    }
+
+    /// Подсказка вместо пустого списка.
+    public static func emptyHint(_ mode: CaptureMode) -> String {
+        (mode == .photo ? "Для фото" : "Для видео и S&Q")
+            + " пресетов пока нет. «Новый пресет» запомнит, как сейчас настроена камера."
+    }
+
+    /// Места в общем списке пресетов режима — по порядку.
+    public static func indices(of mode: CaptureMode, in all: [Preset]) -> [Int] {
+        all.indices.filter { all[$0].mode == mode }
+    }
+
+    /// Общий список, где пресет режима с места `from` его списка стоит на месте `to`; пресеты другого режима — где были.
+    public static func moved(_ all: [Preset], mode: CaptureMode, from: Int, to: Int) -> [Preset]? {
+        let slots = indices(of: mode, in: all)
+        guard slots.indices.contains(from), slots.indices.contains(to) else { return nil }
+        var list = slots.map { all[$0] }
+        list.insert(list.remove(at: from), at: to)
+        var result = all
+        for (slot, preset) in zip(slots, list) { result[slot] = preset }
+        return result
+    }
+
+    /// Сохранённый список. Пресет без режима — сохранён до списков по режимам — попадает и в фото, и в видео: какой для
+    /// чего, знает только снимавший, а пропасть не должен ни один. Сначала фото-копии, за ними видео-копии, по порядку.
+    /// Незнакомый режим (из будущей версии) пропускается — остальные читаются.
+    public static func decode(_ data: Data) -> [Preset] {
+        guard let stored = try? JSONDecoder().decode([Stored].self, from: data) else { return [] }
+        var presets: [Preset] = []
+        var videoCopies: [Preset] = []
+        for item in stored {
+            guard let mode = item.mode else {
+                var photo = item.preset, video = item.preset
+                photo.mode = .photo
+                video.mode = .video
+                presets.append(photo)
+                videoCopies.append(video)
+                continue
+            }
+            if CaptureMode(rawValue: mode) != nil { presets.append(item.preset) }
+        }
+        return presets + videoCopies
+    }
+
+    /// Пресет и как записан его режим: nil — поля нет.
+    private struct Stored: Decodable {
+        let preset: Preset
+        let mode: String?
+
+        private enum CodingKeys: String, CodingKey { case mode }
+
+        init(from decoder: Decoder) throws {
+            preset = try Preset(from: decoder)
+            mode = try decoder.container(keyedBy: CodingKeys.self).decodeIfPresent(String.self, forKey: .mode)
+        }
     }
 }
 

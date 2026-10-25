@@ -60,6 +60,12 @@ public enum AutomationAction: Equatable, Sendable, Decodable {
     /// Быстрый просмотр: как нажать и отпустить «Посмотреть».
     case beginPresetPreview(Int)
     case endPresetPreview
+    /// Сохранение: «Сохранить в «…»» для текущего пресета; «☆+»; «Новый пресет…» в окошке «Сохранить настройки»;
+    /// закрыть окошки сохранения.
+    case savePresetChanges
+    case openSavePreset
+    case chooseNewPreset
+    case closeSavePreset
 
     private enum Keys: String, CodingKey {
         case action, key, setting, offset, value, group, name, index, confirm, mode, x, y, factor, included, from, to
@@ -121,6 +127,10 @@ public enum AutomationAction: Equatable, Sendable, Decodable {
         case "recapturePreset": self = .recapturePreset(try c.decode(Int.self, forKey: .index))
         case "beginPresetPreview": self = .beginPresetPreview(try c.decode(Int.self, forKey: .index))
         case "endPresetPreview": self = .endPresetPreview
+        case "savePresetChanges": self = .savePresetChanges
+        case "openSavePreset": self = .openSavePreset
+        case "chooseNewPreset": self = .chooseNewPreset
+        case "closeSavePreset": self = .closeSavePreset
         default:
             throw DecodingError.dataCorruptedError(forKey: .action, in: c, debugDescription: "неизвестная команда \(action)")
         }

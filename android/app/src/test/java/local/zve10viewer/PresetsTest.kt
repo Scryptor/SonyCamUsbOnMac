@@ -2,10 +2,14 @@ package local.zve10viewer
 
 import local.zve10viewer.ptp.PtpType
 import local.zve10viewer.ptp.PtpValue
+import local.zve10viewer.settings.CaptureMode
 import local.zve10viewer.settings.Preset
 import local.zve10viewer.settings.PresetCatalog
+import local.zve10viewer.settings.PresetChange
+import local.zve10viewer.settings.PresetLibrary
 import local.zve10viewer.settings.SettingID
 import local.zve10viewer.settings.SettingOption
+import local.zve10viewer.settings.WhiteBalanceTemperature
 import local.zve10viewer.sony.PropertyRange
 import local.zve10viewer.sony.SonyProperty
 import local.zve10viewer.sony.SonyPropertyParser
@@ -31,7 +35,9 @@ class PresetsTest {
 
     @Test fun oldPresetsWithoutSkipLoadAsTheyWere() {
         val presets = PresetCatalog.fromJson(oldJson)
-        assertEquals(1, presets.size)
+        // без режима — и в фото, и в видео: две независимые копии
+        assertEquals(listOf(CaptureMode.photo, CaptureMode.video), presets.map { it.mode })
+        assertEquals(presets[0].copy(mode = CaptureMode.video), presets[1])
         val preset = presets[0]
         assertEquals("Пресет 1", preset.name)
         assertEquals(12, preset.values.size)
@@ -40,10 +46,36 @@ class PresetsTest {
         // меняет всё, что помнит, — как раньше
         assertEquals(preset.values, PresetCatalog.effective(preset))
         assertEquals("1/30 · f/3.2 · ISO 400 · AWB · AF-C", PresetCatalog.summary(preset))
-        // записанный обратно — тот же пресет, и без «skip»
+        // записанный обратно — те же пресеты, у каждого режим, и без «skip»
         val written = PresetCatalog.toJson(presets)
         assertFalse(JSONArray(written).getJSONObject(0).has("skip"))
+        assertEquals(listOf("photo", "video"), List(2) { JSONArray(written).getJSONObject(it).getString("mode") })
         assertEquals(presets, PresetCatalog.fromJson(written))
+    }
+
+    @Test fun modeIsWrittenAndReadBack() {
+        val presets = listOf(Preset("Улица", mapOf(SettingID.iso to 100L)),
+            Preset("Интервью", mapOf(SettingID.shutter to 0x10032L), mode = CaptureMode.video),
+            Preset("Портрет", mapOf(SettingID.aperture to 180L), skip = setOf(SettingID.aperture)))
+        assertEquals(presets, PresetCatalog.fromJson(PresetCatalog.toJson(presets)))
+    }
+
+    @Test fun presetsFromBeforeModesGoIntoBothListsAndKeepTheirOrder() {
+        val json = """[{"name":"А","values":{"iso":100}},{"name":"В","mode":"video","values":{"iso":200}},""" +
+            """{"name":"Б","values":{"iso":400}}]"""
+        val a = Preset("А", mapOf(SettingID.iso to 100L))
+        val b = Preset("Б", mapOf(SettingID.iso to 400L))
+        val v = Preset("В", mapOf(SettingID.iso to 200L), mode = CaptureMode.video)
+        // фото-копии — на местах прежних пресетов, видео-копии — в конце, по порядку
+        assertEquals(listOf(a, v, b, a.copy(mode = CaptureMode.video), b.copy(mode = CaptureMode.video)), PresetCatalog.fromJson(json))
+        val all = PresetCatalog.fromJson(json)
+        assertEquals(listOf("А", "Б"), PresetLibrary.indices(CaptureMode.photo, all).map { all[it].name })
+        assertEquals(listOf("В", "А", "Б"), PresetLibrary.indices(CaptureMode.video, all).map { all[it].name })
+    }
+
+    @Test fun presetOfAnUnknownModeIsSkipped() {
+        val json = """[{"name":"S&Q","mode":"slowQuick","values":{"iso":800}},{"name":"Фото","mode":"photo","values":{"iso":100}}]"""
+        assertEquals(listOf(Preset("Фото", mapOf(SettingID.iso to 100L))), PresetCatalog.fromJson(json))
     }
 
     @Test fun skipIsWrittenSortedAndOnlyWhenThereIsOne() {
@@ -57,7 +89,7 @@ class PresetsTest {
     }
 
     @Test fun unknownSettingsFromANewerVersionAreDropped() {
-        val json = """[{"name":"Новый","values":{"iso":800,"frameRate":25},"skip":["iso","frameRate"]}]"""
+        val json = """[{"name":"Новый","mode":"photo","values":{"iso":800,"frameRate":25},"skip":["iso","frameRate"]}]"""
         assertEquals(listOf(Preset("Новый", mapOf(SettingID.iso to 800L), setOf(SettingID.iso))), PresetCatalog.fromJson(json))
     }
 
@@ -231,5 +263,97 @@ class PresetsTest {
         val iso = SettingID.iso.code
         val other = camera + (iso to camera.getValue(iso).copy(current = PtpValue.Num(6400)))
         assertFalse(PresetCatalog.matches(preset, other))
+        // и это изменение — одно
+        assertEquals(listOf("ISO ${preset.values[SettingID.iso]} → 6400"), PresetCatalog.changes(preset, other).map { it.label })
+        assertEquals(emptyList<PresetChange>(), PresetCatalog.changes(preset, camera))
+    }
+
+    @Test fun newPresetGoesIntoTheListOfItsModeAndRecaptureKeepsIt() {
+        val camera = cameraWith(property(SettingID.iso, 800))
+        assertEquals(CaptureMode.video, PresetCatalog.capture("Интервью", camera, CaptureMode.video).mode)
+        assertEquals(CaptureMode.photo, PresetCatalog.capture("Улица", camera).mode)
+        val video = Preset("Интервью", mapOf(SettingID.iso to 100L), mode = CaptureMode.video)
+        assertEquals(CaptureMode.video, PresetCatalog.recapture(video, camera).mode)
+    }
+
+    @Test fun movingWithinAModeLeavesTheOtherModeWhereItWas() {
+        val p1 = Preset("Ф1", emptyMap())
+        val p2 = Preset("Ф2", emptyMap())
+        val p3 = Preset("Ф3", emptyMap())
+        val v1 = Preset("В1", emptyMap(), mode = CaptureMode.video)
+        val v2 = Preset("В2", emptyMap(), mode = CaptureMode.video)
+        val all = listOf(p1, v1, p2, v2, p3)
+        assertEquals(listOf(0, 2, 4), PresetLibrary.indices(CaptureMode.photo, all))
+        assertEquals(listOf(1, 3), PresetLibrary.indices(CaptureMode.video, all))
+        // первый фото — в конец своего списка; видео на своих местах
+        assertEquals(listOf(p2, v1, p3, v2, p1), PresetLibrary.moved(all, CaptureMode.photo, 0, 2))
+        assertEquals(listOf(p1, v2, p2, v1, p3), PresetLibrary.moved(all, CaptureMode.video, 1, 0))
+        // такого места в списке режима нет
+        assertNull(PresetLibrary.moved(all, CaptureMode.video, 0, 2))
+        assertNull(PresetLibrary.moved(all, CaptureMode.photo, -1, 0))
+    }
+
+    @Test fun currentPresetFollowsMovesDeletesAndCopies() {
+        // перенесли его самого — он там, куда перенесли
+        assertEquals(3, PresetLibrary.afterMove(1, from = 1, to = 3))
+        // перенесли стоявший перед ним за него — он поднялся на место выше, и наоборот
+        assertEquals(1, PresetLibrary.afterMove(2, from = 0, to = 2))
+        assertEquals(3, PresetLibrary.afterMove(2, from = 4, to = 1))
+        // перестановка в стороне его не трогает
+        assertEquals(0, PresetLibrary.afterMove(0, from = 2, to = 3))
+        // удалили его — опоры нет; удалили выше — он на место выше; ниже — на месте
+        assertNull(PresetLibrary.afterDelete(2, removed = 2))
+        assertEquals(1, PresetLibrary.afterDelete(2, removed = 0))
+        assertEquals(2, PresetLibrary.afterDelete(2, removed = 3))
+        // копия встаёт следом за своим: всё ниже сдвигается
+        assertEquals(1, PresetLibrary.afterInsert(1, at = 2))
+        assertEquals(3, PresetLibrary.afterInsert(2, at = 2))
+    }
+
+    @Test fun changesAreWhatTheCameraLetsChangeAndIsNotAsInThePreset() {
+        val preset = Preset("Вечер", mapOf(SettingID.shutter to 0x10032L, SettingID.aperture to 280L, SettingID.iso to 800L,
+            SettingID.focusMode to 2L, SettingID.exposureComp to 0L, SettingID.dro to 31L, SettingID.metering to 1L),
+            skip = setOf(SettingID.metering))
+        val camera = cameraWith(
+            // выдержку в режиме A камера выбирает сама — это не изменение
+            property(SettingID.shutter, 0x10064, writable = false),
+            property(SettingID.aperture, 400), property(SettingID.iso, 1600), property(SettingID.focusMode, 0x8004),
+            property(SettingID.exposureComp, 700),
+            // выключенное в пресете — не изменение
+            property(SettingID.metering, 4),
+        )
+        // DRO у камеры нет — тоже; главное — первым, остальное — по каталогу
+        assertEquals(listOf("f/2.8 → f/4", "ISO 800 → 1600", "Экспокорр. ±0.0 → +0.7", "Фокус AF-S → AF-C"),
+            PresetCatalog.changes(preset, camera).map { it.label })
+        assertEquals(PresetChange(SettingID.iso, 800L, 1600L, "ISO 800 → 1600"), PresetCatalog.changes(preset, camera)[1])
+        // всё совпадает — изменений нет
+        assertEquals(emptyList<PresetChange>(), PresetCatalog.changes(Preset("п", mapOf(SettingID.iso to 1600L)), camera))
+    }
+
+    @Test fun changesOfWhiteBalanceShowTheTemperatureOfEachSide() {
+        fun changes(preset: Map<SettingID, Long>, vararg camera: SonyProperty) =
+            PresetCatalog.changes(Preset("п", preset), cameraWith(*camera)).map { it.label }
+        val manual = WhiteBalanceTemperature.MANUAL_MODE
+        // оба в «Цвет. темп.» — другая только температура
+        assertEquals(listOf("3200 K → 5600 K"), changes(mapOf(SettingID.whiteBalance to manual, SettingID.colorTemperature to 3200L),
+            property(SettingID.whiteBalance, manual), property(SettingID.colorTemperature, 5600)))
+        // в пресете AWB, на камере «Цвет. темп.» — температура пресета не применяется, сравнивать нечего
+        assertEquals(listOf("AWB → 5600 K"), changes(mapOf(SettingID.whiteBalance to 2L, SettingID.colorTemperature to 3200L),
+            property(SettingID.whiteBalance, manual), property(SettingID.colorTemperature, 5600)))
+        // в пресете «Цвет. темп.», на камере AWB: температуру камера сейчас менять не даёт
+        assertEquals(listOf("3200 K → AWB"), changes(mapOf(SettingID.whiteBalance to manual, SettingID.colorTemperature to 3200L),
+            property(SettingID.whiteBalance, 2), property(SettingID.colorTemperature, 5600, writable = false)))
+        // другой режим без температуры
+        assertEquals(listOf("AWB → Дневной"), changes(mapOf(SettingID.whiteBalance to 2L), property(SettingID.whiteBalance, 4)))
+    }
+
+    @Test fun listTitlesAndHintsNameTheMode() {
+        assertEquals("Пресеты для фото", PresetLibrary.title(CaptureMode.photo))
+        assertEquals("Пресеты для видео и S&Q", PresetLibrary.title(CaptureMode.video))
+        assertEquals("Для фото пресетов пока нет. «Новый пресет» запомнит, как сейчас настроена камера.",
+            PresetLibrary.emptyHint(CaptureMode.photo))
+        assertEquals("Для видео и S&Q пресетов пока нет. «Новый пресет» запомнит, как сейчас настроена камера.",
+            PresetLibrary.emptyHint(CaptureMode.video))
+        assertEquals("Для видео и S&Q", PresetLibrary.forMode(CaptureMode.video))
     }
 }

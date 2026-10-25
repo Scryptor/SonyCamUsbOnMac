@@ -1,16 +1,23 @@
 import SwiftUI
 import ZVCore
 
-/// Кнопка пресетов вверху слева: на ней — пресет, который сейчас стоит на камере, иначе «Пресеты». Нажатие — список:
-/// применить, сохранить текущие настройки, открыть окно пресетов.
+/// Изменённый пресет — оранжевым: точка на кнопке, «изменён» в списках.
+let presetModifiedColor = Color.orange
+
+/// Кнопка пресетов вверху слева: на ней — текущий пресет (оранжевая точка — камера от него отличается), иначе
+/// «Пресеты». Нажатие — список: применить, сохранить, открыть окно пресетов.
 struct PresetPicker: View {
     let controller: CameraController
     let screen: ScreenState
 
     var body: some View {
+        let changes = controller.currentPresetChanges
         Button { screen.presetMenuOpen.toggle() } label: {
             HStack(spacing: 6) {
                 Text(title)
+                if !changes.isEmpty {
+                    Circle().fill(presetModifiedColor).frame(width: 7, height: 7)
+                }
                 Image(systemName: "chevron.down").font(.caption2.weight(.semibold))
             }
             .lineLimit(1)
@@ -19,7 +26,9 @@ struct PresetPicker: View {
             .background(Color.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 7))
         }
         .buttonStyle(.plain)
-        .help("Пресеты: выбрать, сохранить, настроить")
+        .help(changes.isEmpty ? "Пресеты: выбрать, сохранить, настроить"
+              : "«\(controller.currentPresetIndex.map { controller.presets[$0].name } ?? "")» изменён: "
+                + changes.map(\.label).joined(separator: " · "))
         .popover(isPresented: Binding(get: { screen.presetMenuOpen }, set: { screen.presetMenuOpen = $0 }),
                  arrowEdge: .bottom) {
             PresetMenu(controller: controller, screen: screen)
@@ -28,41 +37,54 @@ struct PresetPicker: View {
 
     /// Длинное имя не должно растянуть верхний ряд до строки состояния.
     private var title: String {
-        guard let index = controller.activePresetIndex else { return "Пресеты" }
+        guard let index = controller.currentPresetIndex else { return "Пресеты" }
         let name = controller.presets[index].name
         return "\(index + 1) · " + (name.count > 24 ? name.prefix(23) + "…" : name)
     }
 }
 
-/// Список пресетов под кнопкой: номер, имя, что он ставит; галочка — тот, что сейчас на камере. Нажатие применяет.
+/// Список пресетов режима камеры под кнопкой: номер, имя, что он ставит; галочка — стоит на камере, «изменён» — текущий,
+/// от которого камера отличается. Нажатие применяет. Внизу — «Сохранить в «…»» (только когда текущий изменён),
+/// «Новый пресет…» и «Настроить…».
 private struct PresetMenu: View {
     let controller: CameraController
     let screen: ScreenState
     @State private var hovered: Int?
 
     var body: some View {
-        let active = controller.activePresetIndex
+        let current = controller.currentPresetIndex
+        let changes = controller.currentPresetChanges
         VStack(alignment: .leading, spacing: 0) {
+            Text(PresetLibrary.title(controller.presetMode))
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 12)
+                .padding(.top, 10)
             if controller.presets.isEmpty {
-                Text("Пресетов пока нет. «Сохранить текущие» запомнит, как сейчас настроена камера.")
+                Text(PresetLibrary.emptyHint(controller.presetMode))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(12)
             } else if controller.presets.count > 8 {
-                ScrollView { rows }.frame(height: 360)
+                ScrollView { rows(current: current, modified: !changes.isEmpty) }.frame(height: 360)
             } else {
-                rows
+                rows(current: current, modified: !changes.isEmpty)
             }
             Divider()
+            if let current, !changes.isEmpty {
+                saveChanges(name: controller.presets[current].name, changes: changes)
+                Divider()
+            }
             HStack {
-                Button("Сохранить текущие…") {
+                Button("Новый пресет…") {
                     screen.presetMenuOpen = false
                     screen.presetNaming = true
                 }
                 .disabled(controller.phase != .ready)
+                .help("Новый пресет из текущих настроек камеры")
                 Spacer()
                 Button("Настроить…") {
-                    screen.openPresetsWindow(selecting: active ?? (controller.presets.isEmpty ? nil : 0))
+                    screen.openPresetsWindow(selecting: current ?? (controller.presets.isEmpty ? nil : 0))
                 }
             }
             .padding(10)
@@ -70,15 +92,44 @@ private struct PresetMenu: View {
         .frame(width: 360)
     }
 
-    /// Галочка — у каждого пресета, который стоит на камере; на кнопке — первый из них.
-    private var rows: some View {
+    /// «Сохранить в «Вечер»» и под ним — что на камере не так, как в пресете.
+    private func saveChanges(name: String, changes: [PresetChange]) -> some View {
+        Button {
+            screen.presetMenuOpen = false
+            controller.savePresetChanges()
+        } label: {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Сохранить в «\(name)»")
+                Text(changes.map(\.label).joined(separator: " · "))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(hovered == -1 ? Color.primary.opacity(0.08) : Color.clear, in: RoundedRectangle(cornerRadius: 6))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(controller.isApplyingPreset)
+        .help("Записать в пресет, как сейчас настроена камера")
+        .onHover { inside in
+            if inside { hovered = -1 } else if hovered == -1 { hovered = nil }
+        }
+        .padding(6)
+    }
+
+    /// Галочка — у каждого пресета, который стоит на камере; на кнопке — текущий.
+    private func rows(current: Int?, modified: Bool) -> some View {
         VStack(spacing: 2) {
             ForEach(Array(controller.presets.enumerated()), id: \.offset) { index, preset in
                 Button {
                     screen.presetMenuOpen = false
                     controller.applyPreset(index)
                 } label: {
-                    PresetLine(number: index + 1, preset: preset, active: PresetCatalog.matches(preset, controller.properties))
+                    PresetLine(number: index + 1, preset: preset, active: PresetCatalog.matches(preset, controller.properties),
+                               modified: modified && index == current)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 6)
                         .background(hovered == index ? Color.primary.opacity(0.08) : Color.clear,
@@ -96,11 +147,13 @@ private struct PresetMenu: View {
     }
 }
 
-/// Строка пресета в списках: номер (он же клавиша 1–9), имя, что он ставит; галочка — стоит на камере.
+/// Строка пресета в списках: номер (он же клавиша 1–9), имя, что он ставит; галочка — стоит на камере, «изменён» —
+/// текущий, от которого камера отличается.
 struct PresetLine: View {
     let number: Int
     let preset: Preset
     let active: Bool
+    var modified = false
 
     var body: some View {
         HStack(spacing: 10) {
@@ -118,6 +171,8 @@ struct PresetLine: View {
             Spacer(minLength: 8)
             if active {
                 Image(systemName: "checkmark").foregroundStyle(Color.accentColor)
+            } else if modified {
+                Text("изменён").font(.caption).foregroundStyle(presetModifiedColor)
             }
         }
     }
@@ -138,13 +193,12 @@ struct PresetsWindow: View {
             sidebar.frame(width: 280)
             Divider()
             if let index = screen.presetsSelected, controller.presets.indices.contains(index) {
-                // своё имя у каждого пресета: поле имени не тянет текст от прежнего
+                // своё имя у каждого пресета: поле имени не тянет текст от прежнего — и когда под тем же номером
+                // оказался другой пресет: сменился режим камеры, удалили, переставили
                 PresetEditor(controller: controller, screen: screen, index: index) { deleting = index }
-                    .id(index)
+                    .id("\(controller.presetMode.rawValue) \(index) \(controller.presetListVersion)")
             } else {
-                Text(controller.presets.isEmpty
-                     ? "Пресетов пока нет. «Сохранить текущие» запомнит, как сейчас настроена камера."
-                     : "Выберите пресет слева.")
+                Text(controller.presets.isEmpty ? PresetLibrary.emptyHint(controller.presetMode) : "Выберите пресет слева.")
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .padding(40)
@@ -157,7 +211,7 @@ struct PresetsWindow: View {
         .onAppear {
             screen.presetsWindowOpen = true
             if !(screen.presetsSelected.map(controller.presets.indices.contains) ?? false) {
-                screen.presetsSelected = controller.activePresetIndex ?? (controller.presets.isEmpty ? nil : 0)
+                screen.presetsSelected = controller.currentPresetIndex ?? (controller.presets.isEmpty ? nil : 0)
             }
         }
         .onDisappear { screen.presetsWindowOpen = false }
@@ -176,10 +230,18 @@ struct PresetsWindow: View {
     }
 
     private var sidebar: some View {
-        VStack(spacing: 0) {
+        let current = controller.currentPresetIndex
+        let modified = !controller.currentPresetChanges.isEmpty
+        return VStack(alignment: .leading, spacing: 0) {
+            Text(PresetLibrary.title(controller.presetMode))
+                .font(.headline)
+                .padding(.horizontal, 12)
+                .padding(.top, 10)
+                .padding(.bottom, 4)
             List(selection: Binding(get: { screen.presetsSelected }, set: { screen.presetsSelected = $0 })) {
                 ForEach(Array(controller.presets.enumerated()), id: \.offset) { index, preset in
-                    PresetLine(number: index + 1, preset: preset, active: PresetCatalog.matches(preset, controller.properties))
+                    PresetLine(number: index + 1, preset: preset, active: PresetCatalog.matches(preset, controller.properties),
+                               modified: modified && index == current)
                         .padding(.vertical, 3)
                         .tag(index)
                         .contextMenu {
@@ -204,10 +266,10 @@ struct PresetsWindow: View {
                     screen.presetsSelected = controller.savePreset()
                     screen.presetsFocusName = true
                 } label: {
-                    Label("Сохранить текущие", systemImage: "plus")
+                    Label("Новый пресет", systemImage: "plus")
                 }
                 .disabled(controller.phase != .ready)
-                .help("Новый пресет — как сейчас настроена камера")
+                .help("Новый пресет из текущих настроек камеры")
                 Spacer()
                 Button { deleting = screen.presetsSelected } label: {
                     Image(systemName: "minus")
@@ -271,6 +333,13 @@ private struct PresetEditor: View {
                 Spacer()
                 Button("Дублировать") { screen.presetsSelected = controller.duplicatePreset(index) }
                 Button("Удалить…", role: .destructive, action: onDelete)
+            }
+            if controller.currentPresetIndex == index, case let changes = controller.currentPresetChanges, !changes.isEmpty {
+                Label("На камере изменено: " + changes.map(\.label).joined(separator: " · ")
+                      + ". «Взять с камеры» запишет это в пресет.", systemImage: "pencil")
+                    .font(.callout)
+                    .foregroundStyle(presetModifiedColor)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             if let status = controller.statusMessage {
                 Text(status).font(.callout).foregroundStyle(.secondary)

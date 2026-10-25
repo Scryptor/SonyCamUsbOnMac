@@ -273,6 +273,21 @@ final class AutomationServer {
         case .endPresetPreview:
             screen.presetPeeking = false
             controller.endPresetPreview()
+        case .savePresetChanges:
+            guard controller.phase == .ready else { return "camera not ready" }
+            guard !controller.currentPresetChanges.isEmpty else { return "current preset is not modified" }
+            controller.savePresetChanges()
+        case .openSavePreset:
+            guard controller.phase == .ready else { return "camera not ready" }
+            // как нажать «☆+»: кнопка — среди элементов, они должны быть на экране
+            if screen.manualHidden { screen.toggleControls() } else { screen.noteActivity() }
+            screen.pressSavePreset(currentModified: !controller.currentPresetChanges.isEmpty)
+        case .chooseNewPreset:
+            guard screen.presetSaving else { return "save dialog is closed" }
+            screen.chooseNewPreset()
+        case .closeSavePreset:
+            screen.presetSaving = false
+            screen.presetNaming = false
         }
         return nil
     }
@@ -391,6 +406,8 @@ final class AutomationServer {
         ui["zoom"] = ["factor": screen.zoom.factor, "centerX": screen.zoom.center.x, "centerY": screen.zoom.center.y]
         ui["statusBar"] = ["pinned": screen.statusBarPinned, "visible": screen.controlsShown || screen.statusBarPinned]
         ui["presetMenu"] = screen.presetMenuOpen
+        ui["presetNaming"] = screen.presetNaming
+        ui["presetSaving"] = screen.presetSaving
         ui["presetPeeking"] = screen.presetPeeking
         ui["presetsWindow"] = screen.presetsWindowOpen ? ["selected": screen.presetsSelected ?? NSNull()] as [String: Any] : NSNull()
         var result: [String: Any] = [
@@ -445,14 +462,22 @@ final class AutomationServer {
             ] as [String: Any],
             "link": linkState(),
             "cameraDestination": controller.properties[SonyProp.stillImageStoreDestination]?.current.intValue ?? NSNull(),
+            "presetMode": controller.presetMode.rawValue,
             "presets": controller.presets.map { preset in
                 ["name": preset.name,
+                 "mode": preset.mode.rawValue,
                  "values": Dictionary(uniqueKeysWithValues: preset.values.map { ($0.key.rawValue, $0.value) }),
                  "skip": preset.skip.map(\.rawValue).sorted(),
                  "summary": PresetCatalog.summary(preset),
                  "active": PresetCatalog.matches(preset, controller.properties)] as [String: Any]
             },
+            "presetCounts": Dictionary(uniqueKeysWithValues: [CaptureMode.photo, .video].map { mode in
+                (mode.rawValue, controller.presetCount(mode))
+            }),
             "activePreset": controller.activePresetIndex ?? NSNull(),
+            "currentPreset": controller.currentPresetIndex ?? NSNull(),
+            "presetModified": !controller.currentPresetChanges.isEmpty,
+            "presetChanges": controller.currentPresetChanges.map(\.label),
             "previewingPreset": controller.previewingPreset ?? NSNull(),
             "previewReturning": controller.previewReturning,
             "ui": ui,

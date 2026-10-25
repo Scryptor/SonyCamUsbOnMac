@@ -12,9 +12,13 @@ import java.util.Calendar
 
 /**
  * Сохранённый набор настроек камеры. skip — настройки, которые пресет не меняет: значение он помнит, но не применяет
- * (включили обратно — оно на месте).
+ * (включили обратно — оно на месте). mode — для фото или для видео: у каждого режима свой список пресетов (S&Q — видео).
  */
-data class Preset(val name: String, val values: Map<SettingID, Long>, val skip: Set<SettingID> = emptySet())
+data class Preset(val name: String, val values: Map<SettingID, Long>, val skip: Set<SettingID> = emptySet(),
+                  val mode: CaptureMode = CaptureMode.photo)
+
+/** Что на камере сейчас не так, как в пресете: from — значение пресета, to — камеры, label — подпись для экрана. */
+data class PresetChange(val id: SettingID, val from: Long, val to: Long, val label: String)
 
 data class PresetResult(val applied: List<SettingID>, val skipped: List<SettingID>)
 
@@ -41,15 +45,15 @@ object PresetCatalog {
         SettingID.exposureComp to SettingID.iso,
     )
 
-    /** Снимок текущих значений; берутся только настройки, которые камера сейчас даёт менять. */
-    fun capture(name: String, properties: Map<Int, SonyProperty>): Preset {
+    /** Снимок текущих значений для списка режима mode; берутся только настройки, которые камера сейчас даёт менять. */
+    fun capture(name: String, properties: Map<Int, SonyProperty>, mode: CaptureMode = CaptureMode.photo): Preset {
         val values = LinkedHashMap<SettingID, Long>()
         for (id in order) {
             val property = properties[id.code] ?: continue
             val value = property.current.intValue ?: continue
             if (property.isWritable) values[id] = value
         }
-        return Preset(name, values)
+        return Preset(name, values, mode = mode)
     }
 
     /**
@@ -96,6 +100,39 @@ object PresetCatalog {
     /** «Взять с камеры»: всё, что камера сейчас даёт менять, — текущими значениями; остальное, имя и skip — как были. */
     fun recapture(preset: Preset, properties: Map<Int, SonyProperty>): Preset =
         preset.copy(values = preset.values + capture(preset.name, properties).values)
+
+    /** В каком порядке перечислять изменения: главное — как в summary, остальное — по каталогу. */
+    private val changeOrder: List<SettingID> = listOf(SettingID.shutter, SettingID.aperture, SettingID.iso,
+        SettingID.whiteBalance, SettingID.colorTemperature, SettingID.exposureComp)
+        .let { main -> main + order.filter { it !in main } }
+
+    /**
+     * Что из применяемого пресетом (effective) на камере сейчас другое. Только то, что камера сейчас даёт менять: выдержку
+     * в режиме A пресет поставить не может — это не изменение, его не сохранить в пресет и не вернуть.
+     */
+    fun changes(preset: Preset, properties: Map<Int, SonyProperty>): List<PresetChange> {
+        val values = effective(preset)
+        val cameraKelvin = properties[SettingID.colorTemperature.code]?.current?.intValue
+        return changeOrder.mapNotNull { id ->
+            val value = values[id] ?: return@mapNotNull null
+            val property = properties[id.code]?.takeIf { it.isWritable } ?: return@mapNotNull null
+            val current = property.current.intValue?.takeIf { it != value } ?: return@mapNotNull null
+            PresetChange(id, value, current, changeLabel(id, value, current, values[SettingID.colorTemperature], cameraKelvin))
+        }
+    }
+
+    /**
+     * «1/50 → 1/100», «f/2.8 → f/4», «3200 K → 5600 K» — значения говорят сами за себя; «ISO 800 → 1600»; баланс белого —
+     * как в summary, с температурой пресета и камеры; остальное — с коротким названием: «Фокус AF-S → AF-C».
+     */
+    fun changeLabel(id: SettingID, from: Long, to: Long, presetKelvin: Long?, cameraKelvin: Long?): String = when (id) {
+        SettingID.shutter, SettingID.aperture, SettingID.colorTemperature ->
+            ValueFormatter.label(id, from) + " → " + ValueFormatter.label(id, to)
+        SettingID.iso -> "ISO " + ValueFormatter.label(id, from) + " → " + ValueFormatter.label(id, to)
+        SettingID.whiteBalance ->
+            ValueFormatter.whiteBalanceLabel(from, presetKelvin) + " → " + ValueFormatter.whiteBalanceLabel(to, cameraKelvin)
+        else -> id.shortTitle + " " + ValueFormatter.label(id, from) + " → " + ValueFormatter.label(id, to)
+    }
 
     /**
      * Кратко, что меняет пресет (по тому, что применится): выдержка, диафрагма, ISO, баланс белого (в «Цвет. темп.» —
@@ -172,7 +209,7 @@ object PresetCatalog {
 
     fun toJson(presets: List<Preset>): String = JSONArray().apply {
         presets.forEach { preset ->
-            val item = JSONObject().put("name", preset.name).put("values", JSONObject().apply {
+            val item = JSONObject().put("name", preset.name).put("mode", preset.mode.name).put("values", JSONObject().apply {
                 preset.values.forEach { (id, value) -> put(id.name, value) }
             })
             // выключенных нет — поля нет: запись та же, что у прежних версий; есть — по алфавиту, как на Mac
@@ -181,20 +218,78 @@ object PresetCatalog {
         }
     }.toString()
 
-    /** Чего эта версия не знает (пресет из более новой), пропускает: остальное читается. Нет «skip» — выключенных нет. */
+    /**
+     * Чего эта версия не знает (пресет из более новой), пропускает: остальное читается. Нет «skip» — выключенных нет.
+     * Нет «mode» — пресет сохранён до списков по режимам: он и в фото, и в видео (сначала фото-копии, за ними видео-копии,
+     * по порядку) — какой для чего, знает только снимавший, а пропасть не должен ни один. Незнакомый режим — пропускается.
+     */
     fun fromJson(json: String): List<Preset> = runCatching {
         val array = JSONArray(json)
-        List(array.length()) { i ->
+        val presets = ArrayList<Preset>()
+        val videoCopies = ArrayList<Preset>()
+        for (i in 0 until array.length()) {
             val item = array.getJSONObject(i)
             val values = item.getJSONObject("values")
             val skip = item.optJSONArray("skip")?.let { list -> List(list.length()) { known(list.optString(it)) }.filterNotNull().toSet() }
-            Preset(item.getString("name"), values.keys().asSequence().mapNotNull { key ->
+            val preset = Preset(item.getString("name"), values.keys().asSequence().mapNotNull { key ->
                 known(key)?.let { it to values.getLong(key) }
             }.toMap(), skip ?: emptySet())
+            if (item.isNull("mode")) {
+                presets += preset.copy(mode = CaptureMode.photo)
+                videoCopies += preset.copy(mode = CaptureMode.video)
+            } else {
+                val mode = runCatching { CaptureMode.valueOf(item.getString("mode")) }.getOrNull() ?: continue
+                presets += preset.copy(mode = mode)
+            }
         }
+        presets + videoCopies
     }.getOrDefault(emptyList())
 
     private fun known(name: String): SettingID? = runCatching { SettingID.valueOf(name) }.getOrNull()
+}
+
+/**
+ * Все пресеты одним списком — и фото, и видео. Список режима — его пресеты в том же порядке: номер на экране и в окне —
+ * место в списке режима.
+ */
+object PresetLibrary {
+    /** Заголовок списка: у S&Q — пресеты видео. */
+    fun title(mode: CaptureMode): String = if (mode == CaptureMode.photo) "Пресеты для фото" else "Пресеты для видео и S&Q"
+
+    /** Для какого режима — в начале подсказок: «Для фото: 1/50 · f/2.8 …». */
+    fun forMode(mode: CaptureMode): String = if (mode == CaptureMode.photo) "Для фото" else "Для видео и S&Q"
+
+    /** Подсказка вместо пустого списка. */
+    fun emptyHint(mode: CaptureMode): String =
+        forMode(mode) + " пресетов пока нет. «Новый пресет» запомнит, как сейчас настроена камера."
+
+    /** Места в общем списке пресетов режима — по порядку. */
+    fun indices(mode: CaptureMode, all: List<Preset>): List<Int> = all.indices.filter { all[it].mode == mode }
+
+    /** Общий список, где пресет режима с места from его списка стоит на месте to; пресеты другого режима — где были. */
+    fun moved(all: List<Preset>, mode: CaptureMode, from: Int, to: Int): List<Preset>? {
+        val slots = indices(mode, all)
+        val list = PresetCatalog.moved(slots.map { all[it] }, from, to) ?: return null
+        return all.toMutableList().also { result -> slots.forEachIndexed { k, slot -> result[slot] = list[k] } }
+    }
+
+    /** Где теперь пресет с места index списка (опора текущего), когда пресет с места from переставили на место to. */
+    fun afterMove(index: Int, from: Int, to: Int): Int = when {
+        index == from -> to
+        from < index && to >= index -> index - 1
+        from > index && to <= index -> index + 1
+        else -> index
+    }
+
+    /** …когда удалили пресет с места removed; null — удалили его самого. */
+    fun afterDelete(index: Int, removed: Int): Int? = when {
+        index == removed -> null
+        index > removed -> index - 1
+        else -> index
+    }
+
+    /** …когда на место at встал новый пресет (копия — следом за своим). */
+    fun afterInsert(index: Int, at: Int): Int = if (index >= at) index + 1 else index
 }
 
 /**

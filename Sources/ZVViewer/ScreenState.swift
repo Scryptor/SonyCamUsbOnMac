@@ -75,10 +75,28 @@ final class ScreenState {
     var presetsWindowCloseRequest = 0
     /// Окошко «Новый пресет» с полем имени.
     var presetNaming = false
+    /// Окошко «Сохранить настройки»: текущий пресет изменён — сохранить в него или новым.
+    var presetSaving = false
     /// Новый пресет из окна: поле имени — сразу в фокус.
     var presetsFocusName = false
     /// «Посмотреть» держат: окно пресетов прозрачно — не мешает смотреть на картинку.
     var presetPeeking = false
+
+    /// «☆+»: текущий пресет изменён — спросить, куда сохранять; иначе сразу новый пресет.
+    func pressSavePreset(currentModified: Bool) {
+        presetMenuOpen = false
+        if currentModified { presetSaving = true } else { presetNaming = true }
+    }
+
+    /// «Новый пресет…» в окошке «Сохранить настройки»: окошко имени — когда то уже уехало. Второе окошко поверх
+    /// закрывающегося первого AppKit показывает ненадёжно.
+    func chooseNewPreset() {
+        presetSaving = false
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(350))
+            self?.presetNaming = true
+        }
+    }
 
     func openPresetsWindow(selecting index: Int?) {
         presetMenuOpen = false
@@ -139,7 +157,9 @@ final class ScreenState {
     var controlsHidden: Bool { manualHidden || autoHidden }
 
     /// Элементы на экране: не спрятаны, или открыто то, с чем они не прячутся, — меню, панель, подсказка.
-    var controlsShown: Bool { !controlsHidden || fnOpen || allSettingsOpen || pillInfo != nil || presetMenuOpen || presetNaming }
+    var controlsShown: Bool {
+        !controlsHidden || fnOpen || allSettingsOpen || pillInfo != nil || presetMenuOpen || presetNaming || presetSaving
+    }
 
     func togglePillInfo(_ info: PillInfo) {
         let open = pillInfo != info

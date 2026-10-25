@@ -12,6 +12,7 @@ import android.os.Environment
 import android.provider.MediaStore
 import androidx.compose.ui.unit.IntSize
 import kotlin.math.roundToInt
+import local.zve10viewer.settings.CaptureMode
 import local.zve10viewer.settings.FileNaming
 import local.zve10viewer.settings.Preset
 import local.zve10viewer.settings.PresetCatalog
@@ -124,6 +125,11 @@ class Prefs(context: Context) {
     var presets: List<Preset>
         get() = PresetCatalog.fromJson(prefs.getString("presets", "[]")!!)
         set(value) = prefs.edit().putString("presets", PresetCatalog.toJson(value)).apply()
+
+    /** В каком режиме камера была в последний раз: без связи показываем пресеты этого режима. До первой камеры — фото. */
+    var presetMode: CaptureMode
+        get() = CaptureMode.entries.firstOrNull { it.name == prefs.getString("presetMode", null) } ?: CaptureMode.photo
+        set(value) = prefs.edit().putString("presetMode", value.name).apply()
 }
 
 /**

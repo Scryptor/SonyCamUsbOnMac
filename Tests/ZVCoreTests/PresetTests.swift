@@ -32,10 +32,93 @@ import Testing
 }
 
 @Test func presetRoundTripsThroughJSON() throws {
-    let preset = Preset(name: "Улица", values: [.iso: 100, .aperture: 560])
+    let preset = Preset(name: "Улица", mode: .video, values: [.iso: 100, .aperture: 560])
     let data = try JSONEncoder().encode(preset)
     #expect(try JSONDecoder().decode(Preset.self, from: data) == preset)
     #expect(String(decoding: data, as: UTF8.self).contains("\"aperture\""))
+    #expect(String(decoding: data, as: UTF8.self).contains(#""mode":"video""#))
+}
+
+@Test func presetFromBeforeModesGoesIntoBothLists() throws {
+    let old = #"[{"name":"А","values":{"iso":400}},{"name":"Б","values":{"iso":800},"skip":["iso"]}]"#
+    let presets = PresetLibrary.decode(Data(old.utf8))
+    #expect(presets.map(\.name) == ["А", "Б", "А", "Б"])
+    #expect(presets.map(\.mode) == [.photo, .photo, .video, .video])
+    #expect(presets[3].skip == [.iso])
+    #expect(presets[3].values[.iso] == 800)
+}
+
+@Test func presetOfUnknownModeIsSkippedAndTheRestRead() {
+    let future = #"[{"name":"Таймлапс","mode":"timelapse","values":{"iso":100}},{"name":"Видео","mode":"video","values":{"iso":800}}]"#
+    let presets = PresetLibrary.decode(Data(future.utf8))
+    #expect(presets == [Preset(name: "Видео", mode: .video, values: [.iso: 800])])
+    #expect(PresetLibrary.decode(Data("мусор".utf8)).isEmpty)
+}
+
+@Test func libraryRoundTripsThroughJSON() throws {
+    let presets = [Preset(name: "Улица", values: [.iso: 100]), Preset(name: "Вечер", mode: .video, values: [.iso: 800])]
+    #expect(PresetLibrary.decode(try JSONEncoder().encode(presets)) == presets)
+}
+
+@Test func movingAPresetKeepsTheOtherModeInPlace() {
+    let all = [Preset(name: "Ф1", values: [:]), Preset(name: "В1", mode: .video, values: [:]),
+               Preset(name: "Ф2", values: [:]), Preset(name: "В2", mode: .video, values: [:]),
+               Preset(name: "Ф3", values: [:])]
+    #expect(PresetLibrary.indices(of: .video, in: all) == [1, 3])
+    let moved = PresetLibrary.moved(all, mode: .photo, from: 0, to: 2)
+    #expect(moved?.map(\.name) == ["Ф2", "В1", "Ф3", "В2", "Ф1"])
+    #expect(PresetLibrary.moved(all, mode: .video, from: 1, to: 0)?.map(\.name) == ["Ф1", "В2", "Ф2", "В1", "Ф3"])
+    #expect(PresetLibrary.moved(all, mode: .video, from: 0, to: 2) == nil)
+}
+
+@Test func listTitleAndHintNameTheMode() {
+    #expect(PresetLibrary.title(.photo) == "Пресеты для фото")
+    #expect(PresetLibrary.title(.video) == "Пресеты для видео и S&Q")
+    #expect(PresetLibrary.emptyHint(.video).hasPrefix("Для видео и S&Q пресетов пока нет."))
+}
+
+private func cameraProperty(_ id: SettingID, _ value: Int64, writable: Bool = true) -> (UInt16, SonyProperty) {
+    (id.code, SonyProperty(code: id.code, dataType: PTPType.uint32, getSet: 1, enabled: writable ? 1 : 2,
+                           current: .int(value), range: nil, settableValues: [], allValues: []))
+}
+
+@Test func changesListWhatTheCameraLetsChangeInSummaryOrder() {
+    let evening = Preset(name: "Вечер", mode: .video, values: [
+        .whiteBalance: WhiteBalanceTemperature.manualMode, .colorTemperature: 3200, .iso: 800, .shutter: 0x10032,
+        .aperture: 280, .focusMode: 2, .exposureComp: 0, .metering: 0x8001,
+    ], skip: [.metering])
+    let camera = Dictionary(uniqueKeysWithValues: [
+        cameraProperty(.whiteBalance, WhiteBalanceTemperature.manualMode), cameraProperty(.colorTemperature, 5600),
+        cameraProperty(.iso, 1600), cameraProperty(.shutter, 0x10064), cameraProperty(.aperture, 400, writable: false),
+        cameraProperty(.focusMode, 0x8004), cameraProperty(.exposureComp, 700), cameraProperty(.metering, 0x8002),
+    ])
+    let changes = PresetCatalog.changes(evening, camera)
+    #expect(changes.map(\.label) == ["1/50 → 1/100", "ISO 800 → 1600", "3200 K → 5600 K", "Экспокорр. ±0.0 → +0.7",
+                                     "Фокус AF-S → AF-C"])
+    #expect(changes.first == PresetChange(id: .shutter, preset: 0x10032, camera: 0x10064, label: "1/50 → 1/100"))
+    // диафрагму камера сейчас менять не даёт, замер пресет не меняет — это не изменения
+    #expect(!changes.contains { $0.id == .aperture || $0.id == .metering })
+    // всё как в пресете — изменений нет
+    #expect(PresetCatalog.changes(PresetCatalog.recapture(evening, from: camera), camera).isEmpty)
+}
+
+@Test func whiteBalanceChangeShowsTheTemperatureWhereItIsUsed() {
+    let warm = Preset(name: "Тепло", values: [.whiteBalance: WhiteBalanceTemperature.manualMode, .colorTemperature: 3200])
+    let auto = Dictionary(uniqueKeysWithValues: [cameraProperty(.whiteBalance, 2),
+                                                 cameraProperty(.colorTemperature, 5600, writable: false)])
+    #expect(PresetCatalog.changes(warm, auto).map(\.label) == ["3200 K → AWB"])
+    let manual = Dictionary(uniqueKeysWithValues: [cameraProperty(.whiteBalance, WhiteBalanceTemperature.manualMode),
+                                                   cameraProperty(.colorTemperature, 5600)])
+    #expect(PresetCatalog.changes(Preset(name: "Авто", values: [.whiteBalance: 2]), manual).map(\.label) == ["AWB → 5600 K"])
+    // свойства на камере нет — сравнивать не с чем
+    #expect(PresetCatalog.changes(warm, [:]).isEmpty)
+}
+
+@Test func captureTakesTheModeItIsGiven() throws {
+    let props = try SonyPropertyParser.parse(Fixture.data("props_settled"))
+    #expect(PresetCatalog.capture(name: "В", mode: .video, from: props).mode == .video)
+    // «Взять с камеры» режим не меняет
+    #expect(PresetCatalog.recapture(Preset(name: "В", mode: .video, values: [:]), from: props).mode == .video)
 }
 
 @Test func presetFromBeforeTheWindowHasNothingSkipped() throws {

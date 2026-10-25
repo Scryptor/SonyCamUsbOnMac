@@ -29,6 +29,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
@@ -71,6 +72,8 @@ import androidx.compose.ui.unit.sp
 import local.zve10viewer.CameraController
 import local.zve10viewer.settings.Preset
 import local.zve10viewer.settings.PresetCatalog
+import local.zve10viewer.settings.PresetChange
+import local.zve10viewer.settings.PresetLibrary
 import local.zve10viewer.settings.SettingID
 import local.zve10viewer.settings.SettingOption
 import local.zve10viewer.settings.ValueFormatter
@@ -79,16 +82,19 @@ import local.zve10viewer.settings.WhiteBalanceTemperature
 /** Удалить — красным, как у системы. */
 private val Danger = Color(0xFFFF453A)
 
-private const val EMPTY_HINT = "Пресетов пока нет. «Сохранить текущие» запомнит, как сейчас настроена камера."
+/** Изменения на камере одной строкой: «ISO 800 → 1600 · 1/50 → 1/100». */
+private fun List<PresetChange>.labels(): String = joinToString(" · ") { it.label }
 
 /**
- * Кнопка пресетов в верхней панели: «2 · Вечер ▾», если на камере сейчас стоит пресет, иначе «Пресеты ▾». Касание —
- * список под кнопкой, долгое — сразу окно пресетов.
+ * Кнопка пресетов в верхней панели: «2 · Вечер ▾» — текущий пресет (см. CameraController.currentPresetIndex), иначе
+ * «Пресеты ▾». Изменили на камере то, что он ставит, — оранжевая точка перед ▾. Касание — список под кнопкой, долгое —
+ * сразу окно пресетов.
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun PresetButton(controller: CameraController, screen: ScreenState, modifier: Modifier = Modifier) {
-    val active = controller.activePresetIndex
+    val current = controller.currentPresetIndex
+    val changes = controller.currentPresetChanges
     // длинное имя не дотягивает панель до строки состояния справа (она шире во время записи): справа от кнопки ещё ☆+
     // и ⚙ — 106 dp, и зазор 12
     val room = with(LocalDensity.current) {
@@ -97,39 +103,49 @@ fun PresetButton(controller: CameraController, screen: ScreenState, modifier: Mo
     Row(
         modifier.height(44.dp).widthIn(max = room.coerceIn(120.dp, 320.dp))
             .background(if (screen.presetMenuOpen) Accent else PanelLight, RoundedCornerShape(9.dp))
-            .combinedClickable(onClick = { screen.togglePresetMenu() }, onLongClick = { screen.openPresets(active ?: 0) })
+            .combinedClickable(onClick = { screen.togglePresetMenu() }, onLongClick = { screen.openPresets(current ?: 0) })
             .padding(horizontal = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // длинное имя сокращается, а ▾ остаётся
-        Text(active?.let { "${it + 1} · ${controller.presets[it].name}" } ?: "Пресеты", color = Color.White, fontSize = 16.sp,
+        val name = current?.let { controller.presets.getOrNull(it)?.name }
+        // длинное имя сокращается, а ● и ▾ остаются
+        Text(if (current != null && name != null) "${current + 1} · $name" else "Пресеты", color = Color.White, fontSize = 16.sp,
             maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+        if (name != null && changes.isNotEmpty()) {
+            Text(" ●", color = Amber, fontSize = 12.sp,
+                modifier = Modifier.semantics { contentDescription = "«$name» изменён: ${changes.labels()}" })
+        }
         Text(" ▾", color = Color.White, fontSize = 16.sp)
     }
 }
 
 /**
- * Список пресетов под кнопкой. Галочка — у каждого, что стоит на камере (на кнопке — первый из них). Касание строки
- * применяет пресет и закрывает список; пока пресет применяется или камера не готова, строки неактивны. Внизу —
- * «Сохранить текущие…» и «Настроить…» (окно пресетов).
+ * Список пресетов под кнопкой — пресеты режима камеры (у фото и у видео свои). Галочка — у каждого, что стоит на камере;
+ * у изменённого текущего — «изменён». Касание строки применяет пресет и закрывает список; пока пресет применяется или
+ * камера не готова, строки неактивны. Внизу — «Сохранить в «Вечер»» (только когда текущий изменён), «Новый пресет…»
+ * и «Настроить…» (окно пресетов).
  */
 @Composable
 fun PresetMenu(controller: CameraController, screen: ScreenState, modifier: Modifier = Modifier) {
     val ready = controller.phase == CameraController.Phase.ready
+    val current = controller.currentPresetIndex
+    val changes = controller.currentPresetChanges
     Column(
         modifier.width(440.dp).background(Color(0xF71C1C1E), RoundedCornerShape(14.dp))
             // касания по списку не уходят к видео под ним: оно закрыло бы список
             .pointerInput(Unit) { detectTapGestures { } }
             .padding(8.dp),
     ) {
+        Text(PresetLibrary.title(controller.presetMode), color = Secondary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 4.dp))
         if (controller.presets.isEmpty()) {
-            Text(EMPTY_HINT, color = Secondary, fontSize = 15.sp, lineHeight = 20.sp,
+            Text(PresetLibrary.emptyHint(controller.presetMode), color = Secondary, fontSize = 15.sp, lineHeight = 20.sp,
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp))
         } else {
             Column(Modifier.heightIn(max = 430.dp).verticalScroll(rememberScrollState())) {
                 controller.presets.forEachIndexed { index, preset ->
                     PresetRow(index + 1, preset, active = PresetCatalog.matches(preset, controller.properties), selected = false,
-                        enabled = ready && !controller.isApplyingPreset) {
+                        enabled = ready && !controller.isApplyingPreset, modified = index == current && changes.isNotEmpty()) {
                         screen.presetMenuOpen = false
                         controller.applyPreset(index)
                     }
@@ -137,11 +153,24 @@ fun PresetMenu(controller: CameraController, screen: ScreenState, modifier: Modi
             }
         }
         HorizontalDivider(color = PanelLight, modifier = Modifier.padding(vertical = 6.dp))
-        MenuAction("Сохранить текущие…", enabled = ready) {
+        val name = current?.let { controller.presets.getOrNull(it)?.name }
+        if (name != null && changes.isNotEmpty()) {
+            // куда сохранится — видно по самой строке; под ней — что именно поменяли на камере
+            val enabled = ready && !controller.isApplyingPreset
+            Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable(enabled = enabled) {
+                screen.presetMenuOpen = false
+                controller.savePresetChanges()
+            }.alpha(if (enabled) 1f else 0.4f).padding(horizontal = 12.dp, vertical = 10.dp)) {
+                Text("Сохранить в «$name»", color = Color.White, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(changes.labels(), color = Secondary, fontSize = 14.sp, lineHeight = 18.sp, maxLines = 2,
+                    overflow = TextOverflow.Ellipsis)
+            }
+        }
+        MenuAction("Новый пресет…", enabled = ready) {
             screen.presetMenuOpen = false
             screen.newPresetOpen = true
         }
-        MenuAction("Настроить…") { screen.openPresets(controller.activePresetIndex ?: 0) }
+        MenuAction("Настроить…") { screen.openPresets(current ?: 0) }
     }
 }
 
@@ -151,11 +180,14 @@ private fun MenuAction(title: String, enabled: Boolean = true, onClick: () -> Un
         .clip(RoundedCornerShape(10.dp)).clickable(enabled = enabled, onClick = onClick).padding(horizontal = 12.dp, vertical = 12.dp))
 }
 
-/** Строка пресета — в списке под кнопкой и в окне пресетов: номер, имя, кратко значения, галочка у того, что стоит на камере. */
+/**
+ * Строка пресета — в списке под кнопкой и в окне пресетов: номер, имя, кратко значения, галочка у того, что стоит на
+ * камере; у изменённого текущего (modified) — «изменён».
+ */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun PresetRow(number: Int, preset: Preset, active: Boolean, selected: Boolean, enabled: Boolean,
-                      modifier: Modifier = Modifier, onClick: () -> Unit) {
+                      modifier: Modifier = Modifier, modified: Boolean = false, onClick: () -> Unit) {
     Row(
         modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(if (selected) Accent else Color.Transparent)
             .clickable(enabled = enabled, onClick = onClick).alpha(if (enabled) 1f else 0.4f)
@@ -170,10 +202,52 @@ private fun PresetRow(number: Int, preset: Preset, active: Boolean, selected: Bo
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         if (active) Text("✓", color = if (selected) Color.White else Accent, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+        else if (modified) Text("изменён", color = if (selected) Color.White else Amber, fontSize = 14.sp,
+            fontWeight = FontWeight.SemiBold)
     }
 }
 
-/** «Новый пресет»: имя сразу — подставлено «Пресет N» и выделено, можно сразу печатать; под ним — что в него войдёт. */
+/**
+ * «Сохранить настройки» — «☆+», когда текущий пресет изменён: в него («Сохранить в «Вечер»») или новым пресетом
+ * (onNew — дальше окошко «Новый пресет»). Текущего не стало (связь пропала) — окошко закрывается само.
+ */
+@Composable
+fun SavePresetDialog(controller: CameraController, onNew: () -> Unit, onDismiss: () -> Unit) {
+    val name = controller.currentPresetIndex?.let { controller.presets.getOrNull(it)?.name }
+    val ready = controller.phase == CameraController.Phase.ready
+    LaunchedEffect(name, ready) {
+        if (name == null || !ready) onDismiss()
+    }
+    name ?: return
+    val changes = controller.currentPresetChanges
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Сохранить настройки") },
+        text = {
+            Text(if (changes.isEmpty()) "Камера настроена, как в «$name»." else "Камера отличается от «$name»: ${changes.labels()}.",
+                fontSize = 16.sp, lineHeight = 22.sp)
+        },
+        confirmButton = {
+            Button(onClick = {
+                controller.savePresetChanges()
+                onDismiss()
+            }, enabled = ready && !controller.isApplyingPreset) {
+                Text("Сохранить в «$name»", maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        },
+        dismissButton = {
+            Row {
+                TextButton(onClick = onNew, enabled = ready) { Text("Новый пресет…") }
+                TextButton(onClick = onDismiss) { Text("Отмена") }
+            }
+        },
+    )
+}
+
+/**
+ * «Новый пресет»: имя сразу — подставлено «Пресет N» и выделено, можно сразу печатать; под ним — для какого режима он
+ * и что в него войдёт.
+ */
 @Composable
 fun NewPresetDialog(controller: CameraController, onDismiss: () -> Unit) {
     val initial = remember { controller.newPresetName }
@@ -192,8 +266,9 @@ fun NewPresetDialog(controller: CameraController, onDismiss: () -> Unit) {
                 OutlinedTextField(name, { name = it }, singleLine = true, modifier = Modifier.fillMaxWidth().focusRequester(focus),
                     keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences, imeAction = ImeAction.Done),
                     keyboardActions = KeyboardActions(onDone = { save() }))
-                Text(PresetCatalog.summary(PresetCatalog.capture(name.text, controller.properties)), color = Secondary, fontSize = 14.sp,
-                    lineHeight = 19.sp)
+                Text(PresetLibrary.forMode(controller.presetMode) + ": " +
+                    PresetCatalog.summary(PresetCatalog.capture(name.text, controller.properties)),
+                    color = Secondary, fontSize = 14.sp, lineHeight = 19.sp)
             }
             LaunchedEffect(Unit) {
                 // поле ещё не в окне — без фокуса, но не падаем
@@ -206,10 +281,11 @@ fun NewPresetDialog(controller: CameraController, onDismiss: () -> Unit) {
 }
 
 /**
- * Окно пресетов поверх экрана, как «Настройки». Слева — список: номер, имя, кратко значения, галочка у каждого, что стоит
- * на камере; «Выше» / «Ниже» двигают выбранный; «+ Сохранить текущие» — новый пресет с камеры. Справа — выбранный: имя
- * (правится на месте), «Применить», «Взять с камеры», «Дублировать», «Удалить» и его настройки группами. Всё сохраняется
- * сразу, кнопки «Сохранить» нет. Закрывают ×, «Назад» и касание мимо панели.
+ * Окно пресетов поверх экрана, как «Настройки» — пресеты режима камеры (у фото и у видео свои). Слева — список: номер,
+ * имя, кратко значения, галочка у каждого, что стоит на камере; «Выше» / «Ниже» двигают выбранный; «+ Новый пресет» —
+ * новый пресет с камеры. Справа — выбранный: имя (правится на месте), «Применить», «Взять с камеры», «Дублировать»,
+ * «Удалить» и его настройки группами. Всё сохраняется сразу, кнопки «Сохранить» нет. Закрывают ×, «Назад» и касание
+ * мимо панели.
  */
 @Composable
 fun PresetsOverlay(controller: CameraController, screen: ScreenState) {
@@ -218,6 +294,14 @@ fun PresetsOverlay(controller: CameraController, screen: ScreenState) {
     val online = controller.phase == CameraController.Phase.ready
     // новый пресет с камеры: имя сразу выделено — можно печатать
     var focusName by remember { mutableStateOf(false) }
+    // сменился режим камеры — в окне другой список: выбран его текущий пресет, иначе первый
+    val mode = controller.presetMode
+    var listMode by remember { mutableStateOf(mode) }
+    LaunchedEffect(mode) {
+        if (mode == listMode) return@LaunchedEffect
+        listMode = mode
+        screen.presetsSelected = controller.currentPresetIndex ?: 0
+    }
     BackHandler { screen.presetsOpen = false }
     Box(
         // пока держат «Посмотреть» — окна не видно, но палец оно не отпускает
@@ -232,7 +316,7 @@ fun PresetsOverlay(controller: CameraController, screen: ScreenState) {
         ) {
             Row(Modifier.fillMaxWidth().padding(start = 24.dp, end = 12.dp, top = 10.dp, bottom = 6.dp),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("Пресеты", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
+                Text(PresetLibrary.title(mode), color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
                 // что сделала программа: «Применяю…», «применено 12 из 12», «Сохранено» — окно закрывает строку под панелью
                 Text(controller.statusMessage ?: "", color = Secondary, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
                     textAlign = TextAlign.End, modifier = Modifier.weight(1f))
@@ -254,7 +338,8 @@ fun PresetsOverlay(controller: CameraController, screen: ScreenState) {
                 Box(Modifier.width(1.dp).fillMaxHeight().background(PanelLight))
                 if (presets.isEmpty()) {
                     Box(Modifier.weight(1f).fillMaxHeight().padding(32.dp), contentAlignment = Alignment.Center) {
-                        Text(EMPTY_HINT, color = Secondary, fontSize = 17.sp, lineHeight = 23.sp, textAlign = TextAlign.Center)
+                        Text(PresetLibrary.emptyHint(mode), color = Secondary, fontSize = 17.sp, lineHeight = 23.sp,
+                            textAlign = TextAlign.Center)
                     }
                 } else {
                     PresetEditor(controller, screen, selected, focusName, onNameFocused = { focusName = false },
@@ -266,13 +351,15 @@ fun PresetsOverlay(controller: CameraController, screen: ScreenState) {
 }
 
 /**
- * Левая часть окна: пресеты по порядку, галочка — у каждого, что стоит на камере; «Выше» / «Ниже» переставляют выбранный,
- * внизу — «+ Сохранить текущие» (новый пресет сразу выбран, имя выделено).
+ * Левая часть окна: пресеты по порядку, галочка — у каждого, что стоит на камере, «изменён» — у изменённого текущего;
+ * «Выше» / «Ниже» переставляют выбранный, внизу — «+ Новый пресет» из текущих настроек камеры (сразу выбран, имя выделено).
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun PresetList(controller: CameraController, screen: ScreenState, selected: Int, onCreated: (Int) -> Unit, modifier: Modifier) {
     val presets = controller.presets
+    val current = controller.currentPresetIndex
+    val modified = controller.currentPresetModified
     // выбранный (и переставленный) — всегда на виду
     val selectedRow = remember { BringIntoViewRequester() }
     LaunchedEffect(selected, presets.size) {
@@ -284,7 +371,8 @@ private fun PresetList(controller: CameraController, screen: ScreenState, select
             presets.forEachIndexed { index, preset ->
                 PresetRow(index + 1, preset, active = PresetCatalog.matches(preset, controller.properties), selected = index == selected,
                     enabled = true,
-                    modifier = if (index == selected) Modifier.bringIntoViewRequester(selectedRow) else Modifier) {
+                    modifier = if (index == selected) Modifier.bringIntoViewRequester(selectedRow) else Modifier,
+                    modified = modified && index == current) {
                     screen.presetsSelected = index
                 }
             }
@@ -301,7 +389,7 @@ private fun PresetList(controller: CameraController, screen: ScreenState, select
                 }
             }
         }
-        WindowButton("+ Сохранить текущие", Modifier.fillMaxWidth(), enabled = controller.phase == CameraController.Phase.ready,
+        WindowButton("+ Новый пресет", Modifier.fillMaxWidth(), enabled = controller.phase == CameraController.Phase.ready,
             accent = true) {
             controller.savePreset()?.let(onCreated)
         }
@@ -310,7 +398,8 @@ private fun PresetList(controller: CameraController, screen: ScreenState, select
 
 /**
  * Правая часть окна: выбранный пресет. Имя правится на месте, сразу; кнопки «Применить» и «Взять с камеры» — только при
- * камере на связи. Ниже — настройки группами: у каждой переключатель «менять» и значение.
+ * камере на связи. Выбран изменённый текущий — строка, что поменяли на камере. Ниже — настройки группами: у каждой
+ * переключатель «менять» и значение.
  */
 @Composable
 private fun PresetEditor(controller: CameraController, screen: ScreenState, index: Int, focusName: Boolean, onNameFocused: () -> Unit,
@@ -318,6 +407,7 @@ private fun PresetEditor(controller: CameraController, screen: ScreenState, inde
     // пресет удалили — пока окно перестраивается, номер мог устареть
     val preset = controller.presets.getOrNull(index) ?: return
     val online = controller.phase == CameraController.Phase.ready
+    val changes = if (controller.currentPresetIndex == index) controller.currentPresetChanges else emptyList()
     var deleting by remember { mutableStateOf(false) }
     Column(modifier.padding(horizontal = 20.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         PresetNameField(controller, index, preset.name, focusName, onNameFocused)
@@ -330,6 +420,13 @@ private fun PresetEditor(controller: CameraController, screen: ScreenState, inde
             WindowButton("Дублировать") { controller.duplicatePreset(index)?.let { screen.presetsSelected = it } }
             Box(Modifier.weight(1f))
             WindowButton("Удалить", destructive = true) { deleting = true }
+        }
+        if (changes.isNotEmpty()) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("●", color = Amber, fontSize = 12.sp, modifier = Modifier.padding(top = 3.dp))
+                Text("На камере изменено: ${changes.labels()}. «Взять с камеры» запишет это в пресет.", color = Secondary,
+                    fontSize = 15.sp, lineHeight = 20.sp)
+            }
         }
         HorizontalDivider(color = PanelLight)
         PresetSettings(controller, index, preset, online, Modifier.weight(1f))
@@ -357,7 +454,8 @@ private fun PresetEditor(controller: CameraController, screen: ScreenState, inde
 @Composable
 private fun PresetNameField(controller: CameraController, index: Int, name: String, focus: Boolean, onFocused: () -> Unit) {
     val count = controller.presets.size
-    var field by remember(index, count) { mutableStateOf(TextFieldValue(name)) }
+    // под тем же номером может оказаться другой пресет: сменился режим камеры, список стал короче
+    var field by remember(index, count, controller.presetMode) { mutableStateOf(TextFieldValue(name)) }
     var focused by remember { mutableStateOf(false) }
     val requester = remember { FocusRequester() }
     val focusManager = LocalFocusManager.current

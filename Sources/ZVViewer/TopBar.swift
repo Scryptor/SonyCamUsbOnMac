@@ -1,12 +1,19 @@
 import SwiftUI
 import ZVCore
 
-/// Слева сверху: кнопки гистограммы и строки состояния, пресеты (кнопка со списком), «+» — сохранить текущие
-/// настройки новым пресетом, и настройки.
+/// Слева сверху: кнопки гистограммы и строки состояния, пресеты (кнопка со списком), «☆+» — сохранить настройки
+/// (текущий пресет изменён — в него или новым), и настройки.
 struct TopBar: View {
     let controller: CameraController
     let screen: ScreenState
     @State private var newName = ""
+
+    /// Текущий пресет, если камера от него отличается: имя и что изменилось.
+    private var modified: (name: String, changes: String)? {
+        let changes = controller.currentPresetChanges
+        guard let index = controller.currentPresetIndex, !changes.isEmpty else { return nil }
+        return (controller.presets[index].name, changes.map(\.label).joined(separator: " · "))
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -35,15 +42,28 @@ struct TopBar: View {
 
                 PresetPicker(controller: controller, screen: screen)
 
-                Button { screen.presetNaming = true } label: {
+                Button { screen.pressSavePreset(currentModified: modified != nil) } label: {
                     TopBarIconView(icon: .savePreset)
                         .frame(width: 30, height: 26)
                         .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
                 }
                 .buttonStyle(.plain)
                 .disabled(controller.phase != .ready)
-                .help("Сохранить текущие настройки как пресет")
+                .help(modified.map { "Сохранить настройки: в «\($0.name)» или новым пресетом" } ?? "Новый пресет из текущих настроек")
                 .accessibilityLabel("Сохранить пресет")
+                // текущий изменён — куда сохранять: окошко на этой кнопке, имя нового — на панели
+                .alert("Сохранить настройки", isPresented: Binding(get: { screen.presetSaving }, set: { screen.presetSaving = $0 })) {
+                    if let modified {
+                        Button("Сохранить в «\(modified.name)»") { controller.savePresetChanges() }
+                            .keyboardShortcut(.defaultAction)
+                    }
+                    Button("Новый пресет…") { screen.chooseNewPreset() }
+                    Button("Отмена", role: .cancel) {}
+                } message: {
+                    if let modified {
+                        Text("Камера отличается от «\(modified.name)»: \(modified.changes)")
+                    }
+                }
 
                 SettingsButton()
             }
@@ -67,7 +87,8 @@ struct TopBar: View {
             Button("Сохранить") { controller.savePreset(name: newName) }
             Button("Отмена", role: .cancel) {}
         } message: {
-            Text(PresetCatalog.summary(PresetCatalog.capture(name: "", from: controller.properties)))
+            Text((controller.presetMode == .photo ? "Для фото: " : "Для видео и S&Q: ")
+                 + PresetCatalog.summary(PresetCatalog.capture(name: "", from: controller.properties)))
         }
         .onChange(of: screen.presetNaming) { _, naming in
             if naming { newName = controller.nextPresetName }

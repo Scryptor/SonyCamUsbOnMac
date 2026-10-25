@@ -24,6 +24,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -75,6 +76,8 @@ import local.zve10viewer.settings.LumaHistogram
 import local.zve10viewer.settings.LumaStats
 import local.zve10viewer.settings.Preset
 import local.zve10viewer.settings.PresetCatalog
+import local.zve10viewer.settings.PresetChange
+import local.zve10viewer.settings.PresetLibrary
 import local.zve10viewer.settings.RecordingMode
 import local.zve10viewer.settings.RecordingModeDriver
 import local.zve10viewer.settings.RecordingModes
@@ -222,8 +225,21 @@ class CameraController(private val context: Context, private val scope: Coroutin
     /** Настройки, для которых запрошено новое значение, но камера его ещё не подтвердила. */
     var pending by mutableStateOf<Set<SettingID>>(emptySet())
         private set
-    var presets by mutableStateOf(prefs.presets)
+    /** Все пресеты — и фото, и видео — одним списком, как хранятся. */
+    private var library by mutableStateOf(prefs.presets)
+    /**
+     * Чьи пресеты на экране: режима, в котором камера (S&Q — видео); без связи — в котором она была в последний раз
+     * (запоминается; до первой камеры — фото).
+     */
+    var presetMode by mutableStateOf(prefs.presetMode)
         private set
+    /** Пресеты режима presetMode. Номер пресета везде — на кнопке, в списке, в окне — место в этом списке (с 0). */
+    val presets: List<Preset> by derivedStateOf { library.filter { it.mode == presetMode } }
+    /**
+     * Опора текущего пресета, в каждом режиме своя: номер последнего, который применили, создали, сохранили в него или
+     * обновили «Взять с камеры». Живёт, пока открыта программа; «Посмотреть» её не меняет.
+     */
+    private var presetBase by mutableStateOf<Map<CaptureMode, Int>>(emptyMap())
     var isApplyingPreset by mutableStateOf(false)
     /** Быстрый просмотр: пока держат «Посмотреть», этот пресет стоит на камере; отпустили — камера возвращается как была. */
     var previewingPreset by mutableStateOf<Int?>(null)
@@ -910,17 +926,61 @@ class CameraController(private val context: Context, private val scope: Coroutin
     val activePresetIndex: Int?
         get() = presets.indexOfFirst { PresetCatalog.matches(it, properties) }.takeIf { it >= 0 }
 
+    /**
+     * Текущий пресет — с ним сейчас работают: опора, если стоит на камере; иначе первый, что стоит; иначе опора, хоть на
+     * камере её и поменяли. null — никакого.
+     */
+    val currentPresetIndex: Int?
+        get() {
+            val base = presetBase[presetMode]?.takeIf { it in presets.indices }
+            if (base != null && PresetCatalog.matches(presets[base], properties)) return base
+            return activePresetIndex ?: base
+        }
+
+    /** Что на камере сейчас не так, как в текущем пресете; пусто — не изменён или камера не на связи. */
+    val currentPresetChanges: List<PresetChange>
+        get() {
+            if (phase != Phase.ready) return emptyList()
+            val preset = currentPresetIndex?.let(presets::getOrNull) ?: return emptyList()
+            return PresetCatalog.changes(preset, properties)
+        }
+
+    /** Текущий пресет изменён: на камере поменяли то, что он ставит, — есть что сохранить в него. */
+    val currentPresetModified: Boolean get() = currentPresetChanges.isNotEmpty()
+
     /** Имя, которое получит новый пресет: «Пресет N». */
     val newPresetName: String get() = PresetCatalog.newName(presets)
 
-    /** Текущие настройки камеры — новым пресетом в конец списка. Возвращает его номер (с 0); камера не готова — null. */
+    /** Место в общем списке пресета с номером index в списке режима; нет такого — null. */
+    private fun slot(index: Int): Int? = PresetLibrary.indices(presetMode, library).getOrNull(index)
+
+    /** Опора текущего пресета в режиме на экране; null — нет опоры. */
+    private fun setBase(index: Int?) {
+        presetBase = if (index == null) presetBase - presetMode else presetBase + (presetMode to index)
+    }
+
+    /**
+     * Текущие настройки камеры — новым пресетом в конец списка режима; он же теперь текущий. Возвращает его номер (с 0);
+     * камера не готова — null.
+     */
     fun savePreset(name: String? = null): Int? {
         if (phase != Phase.ready) return null
         val title = name?.trim()?.takeIf { it.isNotEmpty() } ?: newPresetName
-        presets = presets + PresetCatalog.capture(title, properties)
-        prefs.presets = presets
-        showStatus("Сохранено: «$title»")
+        library = library + PresetCatalog.capture(title, properties, presetMode)
+        prefs.presets = library
+        setBase(presets.lastIndex)
+        showStatus("Новый пресет «$title»")
         return presets.lastIndex
+    }
+
+    /** «Сохранить в «Вечер»»: текущий пресет — как сейчас настроена камера (то же, что «Взять с камеры» для него). */
+    fun savePresetChanges() {
+        val index = currentPresetIndex ?: return
+        val preset = presets.getOrNull(index) ?: return
+        if (phase != Phase.ready) return
+        replacePreset(index, PresetCatalog.recapture(preset, properties))
+        setBase(index)
+        showStatus("Сохранено в «${preset.name}»")
     }
 
     fun applyPreset(index: Int) {
@@ -928,6 +988,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
         val session = session ?: return
         if (phase != Phase.ready || isApplyingPreset) return
         if (PresetCatalog.effective(preset).isEmpty()) return showStatus("«${preset.name}» ничего не меняет")
+        setBase(index)
         isApplyingPreset = true
         statusJob?.cancel()
         statusMessage = "Применяю «${preset.name}»…"
@@ -943,15 +1004,16 @@ class CameraController(private val context: Context, private val scope: Coroutin
 
     fun renamePreset(index: Int, name: String) {
         val trimmed = name.trim()
-        if (index !in presets.indices || trimmed.isEmpty()) return
-        presets = presets.toMutableList().also { it[index] = it[index].copy(name = trimmed) }
-        prefs.presets = presets
+        val preset = presets.getOrNull(index) ?: return
+        if (trimmed.isEmpty()) return
+        replacePreset(index, preset.copy(name = trimmed))
     }
 
     fun deletePreset(index: Int) {
-        if (index !in presets.indices) return
-        presets = presets.toMutableList().also { it.removeAt(index) }
-        prefs.presets = presets
+        val slot = slot(index) ?: return
+        library = library.toMutableList().also { it.removeAt(slot) }
+        prefs.presets = library
+        setBase(presetBase[presetMode]?.let { PresetLibrary.afterDelete(it, index) })
     }
 
     /** Начать быстрый просмотр: запомнить, как камера настроена сейчас, и поставить пресет. Отпустили кнопку — endPresetPreview. */
@@ -1016,32 +1078,40 @@ class CameraController(private val context: Context, private val scope: Coroutin
         return true
     }
 
-    /** Переставляет пресет с места from на место to (номера с 0). */
+    /** Переставляет пресет с места from на место to списка режима (номера с 0); пресеты другого режима не трогает. */
     fun movePreset(from: Int, to: Int) {
-        presets = PresetCatalog.moved(presets, from, to) ?: return
-        prefs.presets = presets
+        library = PresetLibrary.moved(library, presetMode, from, to) ?: return
+        prefs.presets = library
+        presetBase[presetMode]?.let { setBase(PresetLibrary.afterMove(it, from, to)) }
     }
 
-    /** Копия пресета («Вечер — копия») — следом за ним. Возвращает её номер. */
+    /** Копия пресета («Вечер — копия») — следом за ним, в том же режиме. Возвращает её номер. */
     fun duplicatePreset(index: Int): Int? {
         val preset = presets.getOrNull(index) ?: return null
-        presets = presets.toMutableList().also { it.add(index + 1, preset.copy(name = PresetCatalog.copyName(preset.name))) }
-        prefs.presets = presets
+        val slot = slot(index) ?: return null
+        library = library.toMutableList().also { it.add(slot + 1, preset.copy(name = PresetCatalog.copyName(preset.name))) }
+        prefs.presets = library
+        presetBase[presetMode]?.let { setBase(PresetLibrary.afterInsert(it, index + 1)) }
         return index + 1
     }
 
-    /** «Взять с камеры»: всё, что камера сейчас даёт менять, — в пресет текущими значениями; выключенное остаётся выключенным. */
+    /**
+     * «Взять с камеры»: всё, что камера сейчас даёт менять, — в пресет текущими значениями; выключенное остаётся выключенным.
+     * Он же теперь текущий.
+     */
     fun recapturePreset(index: Int) {
         val preset = presets.getOrNull(index) ?: return
         if (phase != Phase.ready) return
         replacePreset(index, PresetCatalog.recapture(preset, properties))
+        setBase(index)
         showStatus("«${preset.name}»: значения взяты с камеры")
     }
 
     /** Всё сохраняется сразу: кнопки «Сохранить» у пресетов нет. */
     private fun replacePreset(index: Int, preset: Preset) {
-        presets = presets.toMutableList().also { it[index] = preset }
-        prefs.presets = presets
+        val slot = slot(index) ?: return
+        library = library.toMutableList().also { it[slot] = preset }
+        prefs.presets = library
     }
 
     private fun showStatus(text: String) {
@@ -1751,6 +1821,13 @@ class CameraController(private val context: Context, private val scope: Coroutin
 
     private fun apply(snapshot: Map<Int, SonyProperty>) {
         properties = snapshot
+        // пресеты на экране — режима камеры; запоминаем его: без связи показываем тот же список
+        snapshot[SettingID.exposureProgram.code]?.current?.intValue?.let(CaptureMode::of)?.let { mode ->
+            if (mode != presetMode) {
+                presetMode = mode
+                prefs.presetMode = mode
+            }
+        }
         val recording = snapshot[SonyProp.MOVIE_RECORDING_STATE]?.current?.intValue == 1L
         if (recording && recordingStartedAt == null) recordingStartedAt = System.currentTimeMillis()
         if (!recording) recordingStartedAt = null

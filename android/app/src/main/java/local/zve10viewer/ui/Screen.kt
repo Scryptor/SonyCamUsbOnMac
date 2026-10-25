@@ -113,6 +113,8 @@ val Secondary = Color(0xFF9A9AA0)
 val Accent = Color(0xFF0A84FF)
 /** Предупреждение: пересвет и провалы на гистограмме. Жёлтый, а не красный: красный на тёмном видно плохо. */
 val Warning = Color(0xFFFFD60A)
+/** Пресет изменён на камере: точка на кнопке пресетов, «изменён» в списке. */
+val Amber = Color(0xFFFF9F0A)
 
 /** Что открыто на экране. Меняется касаниями. */
 class ScreenState {
@@ -151,6 +153,8 @@ class ScreenState {
     var presetMenuOpen by mutableStateOf(false)
     /** Окошко «Новый пресет» — имя и что войдёт. */
     var newPresetOpen by mutableStateOf(false)
+    /** Окошко «Сохранить настройки» («☆+», когда текущий пресет изменён): в него или новым пресетом. */
+    var savePresetOpen by mutableStateOf(false)
     /** «Посмотреть» держат: окно пресетов прозрачно — не мешает смотреть на картинку. */
     var presetPeeking by mutableStateOf(false)
     /** Окно пресетов и какой пресет в нём выбран (номер с 0). Переживает обрыв связи: на экране ожидания оно то же. */
@@ -177,7 +181,8 @@ class ScreenState {
     val controlsHidden: Boolean get() = manualHidden || autoHidden
     /** Открыто меню, панель, список пресетов или окошко: элементы не прячутся сами, касание видео закрывает. */
     val overlayOpen: Boolean
-        get() = fnOpen || allSettingsOpen || settingsOpen || pillInfo != null || presetMenuOpen || newPresetOpen || presetsOpen
+        get() = fnOpen || allSettingsOpen || settingsOpen || pillInfo != null || presetMenuOpen || newPresetOpen || savePresetOpen ||
+            presetsOpen
 
     fun togglePillInfo(info: PillInfo) {
         val open = pillInfo != info
@@ -232,6 +237,7 @@ class ScreenState {
         pillInfo = null
         presetMenuOpen = false
         newPresetOpen = false
+        savePresetOpen = false
         presetsOpen = false
     }
 }
@@ -353,7 +359,7 @@ private fun WaitingScreen(controller: CameraController, screen: ScreenState, not
             screen.debugOpen = true
         }, onPresets = {
             settingsOpen = false
-            screen.openPresets(0)
+            screen.openPresets(controller.currentPresetIndex ?: 0)
         })
     }
     // пресеты правятся и без камеры: имена, порядок, что менять; значения — когда она на связи
@@ -386,12 +392,13 @@ private fun LiveScreen(controller: CameraController, screen: ScreenState) {
     LaunchedEffect(controller.shootingMode) {
         if (controller.shootingMode != ShootingMode.slowQuick && screen.pillInfo == PillInfo.slowMotion) screen.pillInfo = null
     }
-    // связь пропала — подсказки к ней больше нет; список пресетов и «Новый пресет» без камеры не нужны
+    // связь пропала — подсказки к ней больше нет; список пресетов, «Новый пресет» и «Сохранить настройки» без камеры не нужны
     DisposableEffect(Unit) {
         onDispose {
             screen.pillInfo = null
             screen.presetMenuOpen = false
             screen.newPresetOpen = false
+            screen.savePresetOpen = false
         }
     }
     // автоскрытие: через заданное в настройках время без касаний, если не открыто меню, панель или просмотр снимка
@@ -492,7 +499,7 @@ private fun LiveScreen(controller: CameraController, screen: ScreenState) {
             SettingsOverlay(controller, onClose = { screen.settingsOpen = false }, onDebug = {
                 screen.settingsOpen = false
                 screen.debugOpen = true
-            }, onPresets = { screen.openPresets(controller.activePresetIndex ?: 0) })
+            }, onPresets = { screen.openPresets(controller.currentPresetIndex ?: 0) })
         }
         if (screen.presetsOpen) PresetsOverlay(controller, screen)
         // быстрый просмотр пресета: окно прозрачно, над картинкой — что сейчас на камере
@@ -504,6 +511,13 @@ private fun LiveScreen(controller: CameraController, screen: ScreenState) {
                     .padding(horizontal = 18.dp, vertical = 10.dp))
         }
         // касания в окошке — в своём окне, экран их не видит: закрыли — считаем касанием, элементы не исчезают сразу
+        if (screen.savePresetOpen) SavePresetDialog(controller, onNew = {
+            screen.savePresetOpen = false
+            screen.newPresetOpen = true
+        }) {
+            screen.savePresetOpen = false
+            screen.noteActivity()
+        }
         if (screen.newPresetOpen) NewPresetDialog(controller) {
             screen.newPresetOpen = false
             screen.noteActivity()
@@ -845,16 +859,22 @@ private fun TopBar(controller: CameraController, screen: ScreenState) {
         }
         // одна кнопка вместо ряда: много пресетов не наезжают на строку состояния
         PresetButton(controller, screen, Modifier.onGloballyPositioned { screen.presetButtonLeft = it.positionInRoot().x })
+        // текущий пресет изменён — «☆+» спрашивает, куда сохранить: в него или новым; иначе сразу «Новый пресет»
+        val changed = controller.currentPresetIndex?.takeIf { controller.currentPresetModified }
+            ?.let { controller.presets.getOrNull(it)?.name }
         Box(
             Modifier.size(44.dp).background(PanelLight, RoundedCornerShape(9.dp))
-                .semantics { contentDescription = "Новый пресет" }
+                .semantics {
+                    contentDescription = changed?.let { "Сохранить настройки: в «$it» или новым пресетом" }
+                        ?: "Новый пресет из текущих настроек"
+                }
                 .clickable(enabled = controller.phase == CameraController.Phase.ready) {
                     screen.closeOverlays()
-                    screen.newPresetOpen = true
+                    if (changed != null) screen.savePresetOpen = true else screen.newPresetOpen = true
                 },
             contentAlignment = Alignment.Center,
         ) {
-            // сохранить текущие настройки новым пресетом — сразу с именем: звезда с плюсом
+            // сохранить текущие настройки — сразу с именем: звезда с плюсом
             TopBarIcon(TopBarGlyph.savePreset)
         }
         Box(

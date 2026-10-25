@@ -33,7 +33,18 @@ final class CameraController {
     /// Настройки, для которых запрошено новое значение, но камера его ещё не подтвердила.
     private(set) var pending: Set<SettingID> = []
     private(set) var isRecording = false
-    private(set) var presets: [Preset] = []
+    /// Все пресеты — и фото, и видео; на экране — только `presets`.
+    private var library: [Preset] = []
+    /// Пресеты режима камеры. Номер в этом списке — номер на экране и в окне, клавиша 1–9 и номер в API.
+    var presets: [Preset] { library.filter { $0.mode == presetMode } }
+    /// Чьи пресеты показаны: режим камеры (S&Q — видео); без связи — тот, в котором она была.
+    private(set) var presetMode: CaptureMode = .photo
+    /// Опора текущего пресета — в каждом режиме своя: последний применённый, созданный или сохранённый с камеры.
+    /// Номер в списке режима; живёт, пока открыта программа.
+    private var presetBase: [CaptureMode: Int] = [:]
+    /// Растёт, когда пресеты в списке сдвигаются: новый, удалили, переставили, копия. Под тем же номером тогда может
+    /// оказаться другой пресет — окно по нему пересоздаёт поле имени.
+    private(set) var presetListVersion = 0
     private(set) var isApplyingPreset = false
     /// Быстрый просмотр: пока держат «Посмотреть», этот пресет стоит на камере; отпустили — камера возвращается как была.
     private(set) var previewingPreset: Int?
@@ -117,6 +128,7 @@ final class CameraController {
     @ObservationIgnored private var wifiTransport: PTPIPTransport?
     @ObservationIgnored private var statusTask: Task<Void, Never>?
     @ObservationIgnored private let presetsKey = "presets"
+    @ObservationIgnored private let presetModeKey = "presetMode"
     @ObservationIgnored private var previewApply: Task<Void, Never>?
     @ObservationIgnored private var previewStop: PresetStop?
     @ObservationIgnored private var previewRestore: [SettingID: Int64] = [:]
@@ -193,7 +205,8 @@ final class CameraController {
     @ObservationIgnored private var cableAccessWatch = CableAccessWatch()
 
     init() {
-        presets = Self.loadPresets(key: presetsKey)
+        library = Self.loadPresets(key: presetsKey)
+        presetMode = UserDefaults.standard.string(forKey: presetModeKey).flatMap(CaptureMode.init(rawValue:)) ?? .photo
         discovery.start()
         let events = discovery.events
         Task { [weak self] in
@@ -690,15 +703,56 @@ final class CameraController {
     /// Какой пресет сейчас стоит на камере: первый, у которого всё, что он ставит, совпадает; nil — никакой.
     var activePresetIndex: Int? { presets.firstIndex { PresetCatalog.matches($0, properties) } }
 
-    /// Сохраняет текущие настройки камеры новым пресетом; возвращает его номер.
+    /// Текущий пресет: опора, если стоит на камере; иначе первый, что стоит; иначе опора. nil — никакого.
+    var currentPresetIndex: Int? {
+        let list = presets
+        let base = presetBase[presetMode].flatMap { list.indices.contains($0) ? $0 : nil }
+        if let base, PresetCatalog.matches(list[base], properties) { return base }
+        return list.firstIndex { PresetCatalog.matches($0, properties) } ?? base
+    }
+
+    /// Чем камера сейчас отличается от текущего пресета; пусто — не изменён или камера не на связи.
+    var currentPresetChanges: [PresetChange] {
+        guard phase == .ready, let index = currentPresetIndex else { return [] }
+        return PresetCatalog.changes(presets[index], properties)
+    }
+
+    /// Камера сменила режим — показываем его пресеты и запоминаем: без связи список — того, в котором она была.
+    private func followPresetMode() {
+        guard let value = properties[SonyProp.exposureProgram]?.current.intValue else { return }
+        let mode = CaptureMode(exposureProgram: value)
+        guard mode != presetMode else { return }
+        presetMode = mode
+        UserDefaults.standard.set(mode.rawValue, forKey: presetModeKey)
+    }
+
+    /// Сколько пресетов у режима — для API.
+    func presetCount(_ mode: CaptureMode) -> Int { library.filter { $0.mode == mode }.count }
+
+    /// Место в общем списке пресета с номером `index` в списке режима.
+    private func slot(_ index: Int) -> Int? {
+        let slots = PresetLibrary.indices(of: presetMode, in: library)
+        return slots.indices.contains(index) ? slots[index] : nil
+    }
+
+    /// Сохраняет текущие настройки камеры новым пресетом в конец списка режима; возвращает его номер.
     @discardableResult
     func savePreset(name: String? = nil) -> Int? {
         guard phase == .ready else { return nil }
         let title = name?.trimmingCharacters(in: .whitespaces).isEmpty == false ? name! : nextPresetName
-        presets.append(PresetCatalog.capture(name: title, from: properties))
+        library.append(PresetCatalog.capture(name: title, mode: presetMode, from: properties))
         storePresets()
-        showStatus("Сохранено: «\(title)»")
-        return presets.count - 1
+        presetListVersion += 1
+        let index = presets.count - 1
+        presetBase[presetMode] = index
+        showStatus("Новый пресет «\(title)»")
+        return index
+    }
+
+    /// «Сохранить в «…»»: текущий пресет — как сейчас настроена камера.
+    func savePresetChanges() {
+        guard let index = currentPresetIndex, recapture(index) else { return }
+        showStatus("Сохранено в «\(presets[index].name)»")
     }
 
     func applyPreset(_ index: Int) {
@@ -706,6 +760,7 @@ final class CameraController {
         let preset = presets[index]
         // всё выключено — писать нечего, а «применено 0 из 0» ничего не объясняет
         guard !PresetCatalog.effective(preset).isEmpty else { return showStatus("«\(preset.name)» ничего не меняет") }
+        presetBase[presetMode] = index
         isApplyingPreset = true
         statusMessage = "Применяю «\(preset.name)»…"
         Task { [weak self] in
@@ -723,15 +778,17 @@ final class CameraController {
 
     func renamePreset(_ index: Int, to name: String) {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
-        guard presets.indices.contains(index), !trimmed.isEmpty else { return }
-        presets[index].name = trimmed
+        guard let slot = slot(index), !trimmed.isEmpty else { return }
+        library[slot].name = trimmed
         storePresets()
     }
 
     func deletePreset(_ index: Int) {
-        guard presets.indices.contains(index) else { return }
-        presets.remove(at: index)
+        guard let slot = slot(index) else { return }
+        library.remove(at: slot)
         storePresets()
+        presetListVersion += 1
+        if let base = presetBase[presetMode] { presetBase[presetMode] = base == index ? nil : base > index ? base - 1 : base }
     }
 
     /// Начать быстрый просмотр: запомнить, как камера настроена сейчас, и поставить пресет. Отпустили кнопку —
@@ -787,28 +844,28 @@ final class CameraController {
 
     /// Значение настройки в пресете — камера при этом не меняется.
     func setPresetValue(_ index: Int, _ id: SettingID, _ value: Int64) {
-        guard presets.indices.contains(index), PresetCatalog.order.contains(id) else { return }
-        presets[index].values[id] = value
+        guard let slot = slot(index), PresetCatalog.order.contains(id) else { return }
+        library[slot].values[id] = value
         storePresets()
     }
 
     /// Можно ли включить настройку: значение уже есть в пресете или его есть откуда взять.
     func canIncludeInPreset(_ index: Int, _ id: SettingID) -> Bool {
-        guard presets.indices.contains(index) else { return false }
-        return presets[index].values[id] != nil || presetDefault(id) != nil
+        guard let slot = slot(index) else { return false }
+        return library[slot].values[id] != nil || presetDefault(id) != nil
     }
 
     /// Включить или выключить настройку в пресете. Выключенная помнит значение; включают без значения — текущее с камеры.
     func setPresetIncluded(_ index: Int, _ id: SettingID, _ included: Bool) {
-        guard presets.indices.contains(index), PresetCatalog.order.contains(id) else { return }
+        guard let slot = slot(index), PresetCatalog.order.contains(id) else { return }
         if included {
-            if presets[index].values[id] == nil {
+            if library[slot].values[id] == nil {
                 guard let value = presetDefault(id) else { return }
-                presets[index].values[id] = value
+                library[slot].values[id] = value
             }
-            presets[index].skip.remove(id)
+            library[slot].skip.remove(id)
         } else {
-            presets[index].skip.insert(id)
+            library[slot].skip.insert(id)
         }
         storePresets()
     }
@@ -820,39 +877,56 @@ final class CameraController {
         return id == .colorTemperature ? 5600 : nil
     }
 
-    /// Переставляет пресет на место `to` — номер и клавиша 1–9 меняются вместе с местом.
+    /// Переставляет пресет на место `to` своего списка — номер и клавиша 1–9 меняются вместе с местом.
     func movePreset(from: Int, to: Int) {
-        guard presets.indices.contains(from), presets.indices.contains(to), from != to else { return }
-        presets.insert(presets.remove(at: from), at: to)
+        guard from != to, let moved = PresetLibrary.moved(library, mode: presetMode, from: from, to: to) else { return }
+        library = moved
         storePresets()
+        presetListVersion += 1
+        guard let base = presetBase[presetMode] else { return }
+        if base == from {
+            presetBase[presetMode] = to
+        } else if from < base, to >= base {
+            presetBase[presetMode] = base - 1
+        } else if from > base, to <= base {
+            presetBase[presetMode] = base + 1
+        }
     }
 
-    /// Копия пресета сразу за ним; возвращает её номер.
+    /// Копия пресета сразу за ним, в том же режиме; возвращает её номер.
     @discardableResult
     func duplicatePreset(_ index: Int) -> Int? {
-        guard presets.indices.contains(index) else { return nil }
-        var copy = presets[index]
+        guard let slot = slot(index) else { return nil }
+        var copy = library[slot]
         copy.name += " — копия"
-        presets.insert(copy, at: index + 1)
+        library.insert(copy, at: slot + 1)
         storePresets()
+        presetListVersion += 1
+        if let base = presetBase[presetMode], base > index { presetBase[presetMode] = base + 1 }
         return index + 1
     }
 
     /// «Взять с камеры»: всё, что камера сейчас даёт менять, — в пресет её текущими значениями.
     func recapturePreset(_ index: Int) {
-        guard presets.indices.contains(index), phase == .ready else { return }
-        presets[index] = PresetCatalog.recapture(presets[index], from: properties)
-        storePresets()
+        guard recapture(index) else { return }
         showStatus("«\(presets[index].name)»: значения взяты с камеры")
     }
 
+    /// Пресет — текущими значениями камеры; он же теперь текущий. Возвращает, вышло ли.
+    private func recapture(_ index: Int) -> Bool {
+        guard phase == .ready, let slot = slot(index) else { return false }
+        library[slot] = PresetCatalog.recapture(library[slot], from: properties)
+        storePresets()
+        presetBase[presetMode] = index
+        return true
+    }
+
     private func storePresets() {
-        if let data = try? JSONEncoder().encode(presets) { UserDefaults.standard.set(data, forKey: presetsKey) }
+        if let data = try? JSONEncoder().encode(library) { UserDefaults.standard.set(data, forKey: presetsKey) }
     }
 
     private static func loadPresets(key: String) -> [Preset] {
-        guard let data = UserDefaults.standard.data(forKey: key) else { return [] }
-        return (try? JSONDecoder().decode([Preset].self, from: data)) ?? []
+        UserDefaults.standard.data(forKey: key).map(PresetLibrary.decode) ?? []
     }
 
     private func showStatus(_ text: String) {
@@ -1400,6 +1474,7 @@ final class CameraController {
 
     private func apply(_ snapshot: [UInt16: SonyProperty]) {
         properties = snapshot
+        followPresetMode()
         let recording = snapshot[SonyProp.movieRecordingState]?.current.intValue == 1
         if recording, recordingStartedAt == nil { recordingStartedAt = Date() }
         if !recording { recordingStartedAt = nil }

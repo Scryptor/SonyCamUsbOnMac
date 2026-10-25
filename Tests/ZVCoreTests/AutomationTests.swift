@@ -100,4 +100,8 @@ import Testing
     #expect(try decode(#"{"action":"recapturePreset","index":1}"#) == .recapturePreset(1))
     #expect(try decode(#"{"action":"beginPresetPreview","index":0}"#) == .beginPresetPreview(0))
     #expect(try decode(#"{"action":"endPresetPreview"}"#) == .endPresetPreview)
+    #expect(try decode(#"{"action":"savePresetChanges"}"#) == .savePresetChanges)
+    #expect(try decode(#"{"action":"openSavePreset"}"#) == .openSavePreset)
+    #expect(try decode(#"{"action":"chooseNewPreset"}"#) == .chooseNewPreset)
+    #expect(try decode(#"{"action":"closeSavePreset"}"#) == .closeSavePreset)
 }
