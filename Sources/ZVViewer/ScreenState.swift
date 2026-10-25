@@ -48,6 +48,9 @@ final class ScreenState {
     var debugOpen = false
     var debugTab: DebugTab = .link
 
+    /// Стоп-кадр, к миниатюре которого сейчас летит кадр: миниатюра пока спрятана.
+    var flyingShot: UUID?
+
     func toggleDebug() {
         debugOpen.toggle()
     }

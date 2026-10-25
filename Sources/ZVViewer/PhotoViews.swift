@@ -3,6 +3,7 @@ import SwiftUI
 import ZVCore
 
 /// Справа по центру: «Фото / Видео» и под ним спуск (фото) или стоп-кадр и запись (видео).
+/// Палец (курсор) закрывает кнопку — отклик вокруг неё: кольцо, волна, дуга ожидания, подпись слева.
 struct RightColumn: View {
     let controller: CameraController
 
@@ -49,15 +50,24 @@ private struct ShutterButton: View {
     let controller: CameraController
 
     var body: some View {
+        let busy = controller.isCapturing
         Button(action: controller.capturePhoto) {
             ZStack {
-                Circle().strokeBorder(.white.opacity(0.9), lineWidth: 4).frame(width: 64, height: 64)
-                Circle().fill(controller.isCapturing ? Color.gray : Color.white).frame(width: 48, height: 48)
-                if controller.isCapturing { ProgressView().controlSize(.small) }
+                // пока камера занята снимком — вместо кольца дуга: доля загрузки или вращение
+                if busy {
+                    PendingArc(fraction: controller.capturePhase.flatMap(CaptureFeedback.fraction), color: .white)
+                } else {
+                    Circle().strokeBorder(.white.opacity(0.9), lineWidth: 4)
+                }
+                Circle().fill(.white.opacity(busy ? 0.55 : 1)).frame(width: busy ? 42 : 48, height: busy ? 42 : 48)
             }
+            .frame(width: 64, height: 64)
+            .animation(.easeInOut(duration: 0.2), value: busy)
         }
-        .buttonStyle(.plain)
-        .disabled(controller.phase != .ready || controller.isCapturing)
+        .buttonStyle(CaptureButtonStyle())
+        .captureFeedback(controller, .shutter, color: .white)
+        .pendingCaption(busy ? controller.capturePhase.map(CaptureFeedback.caption) : nil)
+        .disabled(controller.phase != .ready || busy)
         .help("Снимок (пробел)")
     }
 }
@@ -72,7 +82,8 @@ private struct GrabButton: View {
                 .frame(width: 42, height: 42)
                 .background(.ultraThinMaterial, in: Circle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(CaptureButtonStyle())
+        .captureFeedback(controller, .grab, color: .white)
         .disabled(controller.frame == nil)
         .help("Стоп-кадр из видео (S) — запись не прерывается")
     }
@@ -82,20 +93,30 @@ struct RecordButton: View {
     let controller: CameraController
 
     var body: some View {
+        let request = controller.recordingToggle.request
+        let recording = controller.isRecording
         Button(action: controller.toggleRecording) {
             ZStack {
-                Circle().strokeBorder(.white.opacity(0.9), lineWidth: 4).frame(width: 64, height: 64)
-                if controller.isRecording {
-                    RoundedRectangle(cornerRadius: 6).fill(.red).frame(width: 26, height: 26)
+                // пока камера не подтвердила — дуга: красная — запускаю, белая — останавливаю
+                if let request {
+                    PendingArc(fraction: nil, color: request == .starting ? .red : .white)
                 } else {
-                    Circle().fill(.red).frame(width: 46, height: 46)
+                    Circle().strokeBorder(.white.opacity(0.9), lineWidth: 4)
                 }
+                // круг ↔ квадрат — только когда камера подтвердила
+                RoundedRectangle(cornerRadius: recording ? 6 : 23)
+                    .fill(.red)
+                    .frame(width: recording ? 26 : 46, height: recording ? 26 : 46)
             }
+            .frame(width: 64, height: 64)
+            .animation(.easeInOut(duration: 0.25), value: recording)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(CaptureButtonStyle())
+        .captureFeedback(controller, .record, color: .red)
+        .pendingCaption(request.map { $0 == .starting ? "Запуск записи…" : "Остановка…" })
         .disabled(controller.phase != .ready)
         .opacity(controller.phase == .ready ? 1 : 0.4)
-        .help(controller.isRecording ? "Остановить запись" : "Начать запись")
+        .help(recording ? "Остановить запись" : "Начать запись")
     }
 }
 
@@ -117,20 +138,13 @@ struct RecBadge: View {
 /// Последние снимки и стоп-кадры: клик — открыть поверх видео, правый клик — Finder или «Просмотр».
 struct ShotsStrip: View {
     let controller: CameraController
+    let screen: ScreenState
 
     var body: some View {
         HStack(spacing: 5) {
             ForEach(Array(controller.shots.prefix(6).enumerated()), id: \.element.id) { index, shot in
                 Button { controller.openShot(index) } label: {
-                    Group {
-                        if let thumbnail = shot.thumbnail {
-                            Image(decorative: thumbnail, scale: 1).resizable().aspectRatio(contentMode: .fill)
-                        } else {
-                            Color.white.opacity(0.1)
-                        }
-                    }
-                    .frame(width: 44, height: 44)
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    ShotThumb(shot: shot, flying: screen.flyingShot == shot.id)
                 }
                 .buttonStyle(.plain)
                 .help(shot.title)
@@ -138,6 +152,8 @@ struct ShotsStrip: View {
                     Button("Показать в Finder") { NSWorkspace.shared.activateFileViewerSelecting(shot.urls) }
                     if let first = shot.urls.first { Button("Открыть") { NSWorkspace.shared.open(first) } }
                 }
+                // сюда улетает стоп-кадр
+                .anchorPreference(key: FirstShotSlotKey.self, value: .bounds) { index == 0 ? $0 : nil }
             }
             if controller.shots.count > 6 {
                 Text("+\(controller.shots.count - 6)").font(.caption).foregroundStyle(.secondary).padding(.horizontal, 4)
@@ -148,9 +164,62 @@ struct ShotsStrip: View {
     }
 }
 
+/// Миниатюра в ленте. Новый снимок появляется «пружинкой» с белой рамкой; стоп-кадр прячется, пока к нему летит
+/// кадр, и вспыхивает рамкой, когда долетел.
+private struct ShotThumb: View {
+    let shot: CameraController.Shot
+    let flying: Bool
+    @State private var scale: CGFloat = 1
+    @State private var border = 0.0
+    @State private var hidden = false
+
+    var body: some View {
+        Group {
+            if let thumbnail = shot.thumbnail {
+                Image(decorative: thumbnail, scale: 1).resizable().aspectRatio(contentMode: .fill)
+            } else {
+                Color.white.opacity(0.1)
+            }
+        }
+        .frame(width: 44, height: 44)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.white, lineWidth: 2).opacity(border))
+        .scaleEffect(scale)
+        .opacity(hidden || flying ? 0 : 1)
+        .onAppear {
+            // только что снятое — а не лента, вернувшаяся вместе с элементами
+            guard Date().timeIntervalSince(shot.takenAt) < 1 else { return }
+            if shot.isFrameGrab {
+                // к миниатюре летит кадр: появится, когда долетит, или сама, если полёта не было
+                hidden = true
+                Task {
+                    try? await Task.sleep(for: .milliseconds(650))
+                    if hidden { reveal() }
+                }
+            } else {
+                scale = 0.6
+                border = 1
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.55)) { scale = 1 }
+                withAnimation(.easeOut(duration: 0.6)) { border = 0 }
+            }
+        }
+        .onChange(of: flying) { _, now in
+            if !now { reveal() }
+        }
+    }
+
+    private func reveal() {
+        hidden = false
+        border = 1
+        withAnimation(.easeOut(duration: 0.6)) { border = 0 }
+    }
+}
+
 /// Просмотр снимка поверх видео: по таймеру после съёмки или до закрытия, если открыт из ленты.
 struct ReviewOverlay: View {
     let review: CameraController.Review
+    /// Пока снимок качается — «Загрузка 42 %» вместо «Загружаю…».
+    var progress: String?
     let onClose: () -> Void
 
     var body: some View {
@@ -170,7 +239,9 @@ struct ReviewOverlay: View {
                 Spacer()
                 HStack(spacing: 14) {
                     Text(review.title).fontWeight(.semibold)
-                    if !review.detail.isEmpty { Text(review.detail).foregroundStyle(.secondary) }
+                    if let detail = progress ?? (review.detail.isEmpty ? nil : review.detail) {
+                        Text(detail).foregroundStyle(.secondary).monospacedDigit()
+                    }
                     if !review.urls.isEmpty {
                         Button("Показать в Finder") { NSWorkspace.shared.activateFileViewerSelecting(review.urls) }
                         Button("Открыть") { NSWorkspace.shared.open(review.urls[0]) }

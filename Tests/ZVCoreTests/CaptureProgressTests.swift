@@ -24,6 +24,14 @@ import Testing
     let unknown = CapturePhase.downloading(file: 1, files: 1, received: 5_000_000, expected: nil)
     #expect(CaptureFeedback.caption(unknown) == "Загрузка…")
     #expect(CaptureFeedback.fraction(unknown) == nil)
+    let secondSmall = CapturePhase.downloading(file: 2, files: 2, received: 100_000, expected: 300_000)
+    #expect(CaptureFeedback.caption(secondSmall) == "Загрузка 2/2…")
+}
+
+@Test func capturePercentRoundsDown() {
+    // 100 % — только когда пришло всё
+    let almost = CapturePhase.downloading(file: 1, files: 1, received: 8_388_000, expected: 8_388_608)
+    #expect(CaptureFeedback.caption(almost) == "Загрузка 99 %")
 }
 
 @Test func captureShareIsClamped() {

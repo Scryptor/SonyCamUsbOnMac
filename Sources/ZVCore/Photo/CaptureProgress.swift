@@ -18,7 +18,7 @@ public enum CaptureFeedback {
         case .focusing: return "Фокусировка…"
         case .exposing: return "Снимаю…"
         case let .downloading(file, files, _, _):
-            guard let share = fraction(phase) else { return "Загрузка…" }
+            guard let share = fraction(phase) else { return files > 1 ? "Загрузка \(file)/\(files)…" : "Загрузка…" }
             let percent = "\(Int((share * 100).rounded(.down))) %"
             return files > 1 ? "Загрузка \(file)/\(files) · \(percent)" : "Загрузка \(percent)"
         }

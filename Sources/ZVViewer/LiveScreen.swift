@@ -12,45 +12,8 @@ struct LiveScreen: View {
     private var showControls: Bool { !screen.controlsHidden || screen.fnOpen || screen.allSettingsOpen || screen.pillInfo != nil }
 
     var body: some View {
-        ZStack {
-            Color.black
-            video
-            if showControls {
-                controls.transition(.opacity)
-            } else if let started = controller.recordingStartedAt {
-                VStack {
-                    HStack {
-                        Spacer()
-                        RecBadge(startedAt: started)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
-                    }
-                    Spacer()
-                }
-                .padding(16)
-            }
-            if screen.allSettingsOpen {
-                GeometryReader { geo in
-                    AllSettingsPanel(controller: controller, screen: screen)
-                        .frame(width: geo.size.width * 0.6, height: geo.size.height * 0.78)
-                        .position(x: geo.size.width / 2, y: geo.size.height / 2)
-                }
-            }
-            if let review = controller.review {
-                ReviewOverlay(review: review) { controller.dismissReview() }
-            }
-            if showHiddenHint {
-                VStack {
-                    Spacer()
-                    Text("Элементы скрыты · H — показать")
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
-                        .padding(.bottom, 24)
-                }
-                .transition(.opacity)
-            }
+        GeometryReader { geometry in
+            layers(size: geometry.size)
         }
         .animation(.easeInOut(duration: 0.2), value: showControls)
         .contentShape(Rectangle())
@@ -124,16 +87,83 @@ struct LiveScreen: View {
         .onKeyPress(.rightArrow) { step(1) }
     }
 
-    @ViewBuilder private var video: some View {
+    /// Слои снизу вверх: видео с рамкой записи, элементы, панели, просмотр снимка, шторка и вспышка, летящий кадр.
+    private func layers(size: CGSize) -> some View {
+        ZStack {
+            Color.black
+            video(size: size)
+            if showControls {
+                controls.transition(.opacity)
+            } else if let started = controller.recordingStartedAt {
+                VStack {
+                    HStack {
+                        Spacer()
+                        RecBadge(startedAt: started)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
+                    }
+                    Spacer()
+                }
+                .padding(16)
+            }
+            if screen.allSettingsOpen {
+                AllSettingsPanel(controller: controller, screen: screen)
+                    .frame(width: size.width * 0.6, height: size.height * 0.78)
+                    .position(x: size.width / 2, y: size.height / 2)
+            }
+            if let review = controller.review {
+                // пока снимок качается — сколько уже пришло
+                ReviewOverlay(review: review, progress: controller.capturePhase.flatMap(Self.downloadCaption)) {
+                    controller.dismissReview()
+                }
+            }
+            CaptureFlash(controller: controller)
+            if showHiddenHint {
+                VStack {
+                    Spacer()
+                    Text("Элементы скрыты · H — показать")
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+                        .padding(.bottom, 24)
+                }
+                .transition(.opacity)
+            }
+        }
+        // стоп-кадр улетает на место первой миниатюры ленты, а без ленты — в левый нижний угол
+        .overlayPreferenceValue(FirstShotSlotKey.self) { anchor in
+            GeometryReader { proxy in
+                GrabFlightLayer(controller: controller, screen: screen, source: fitRect(size),
+                                target: anchor.map { proxy[$0] },
+                                fallback: CGRect(x: 21, y: size.height - 132, width: 44, height: 44))
+            }
+        }
+    }
+
+    @ViewBuilder private func video(size: CGSize) -> some View {
         if let frame = controller.frame {
             Image(decorative: frame, scale: 1)
                 .resizable()
                 .aspectRatio(contentMode: .fit)
                 .opacity(controller.linkIndicator.dimsPicture ? 0.55 : 1)
+            TallyBorder(recording: controller.isRecording,
+                        rect: fitRect(size).intersection(CGRect(origin: .zero, size: size)))
             LinkOverlay(controller: controller)
         } else {
             ProgressView().controlSize(.large)
         }
+    }
+
+    private static func downloadCaption(_ phase: CapturePhase) -> String? {
+        guard case .downloading = phase else { return nil }
+        return CaptureFeedback.caption(phase)
+    }
+
+    /// Где весь кадр на экране без увеличения.
+    private func fitRect(_ size: CGSize) -> CGRect {
+        guard let frame = controller.frame else { return CGRect(origin: .zero, size: size) }
+        return ViewZoom.identity.imageRect(view: size, frame: CGSize(width: frame.width, height: frame.height))
     }
 
     private var controls: some View {
@@ -151,7 +181,7 @@ struct LiveScreen: View {
                             HistogramView(bins: controller.histogram, stats: controller.histogramStats)
                         }
                         if !controller.shots.isEmpty {
-                            ShotsStrip(controller: controller)
+                            ShotsStrip(controller: controller, screen: screen)
                         }
                     }
                 }
