@@ -1,0 +1,360 @@
+import AppKit
+import ImageIO
+import SwiftUI
+import ZVCore
+
+/// Галерея снимков и стоп-кадров сеанса поверх экрана: листание (← →, смахивание двумя пальцами, ‹ ›), лента
+/// внизу, увеличение снимка (щипок, двойной щелчок) с догрузкой полного разрешения. Держит снимок по id: новый
+/// снимок, пока галерея открыта, её не сбивает.
+struct GalleryOverlay: View {
+    let controller: CameraController
+    let screen: ScreenState
+    @State private var model = GalleryModel()
+    @Environment(\.displayScale) private var displayScale
+
+    private var shots: [CameraController.Shot] { controller.shots }
+    private var index: Int? { shots.firstIndex { $0.id == screen.galleryShot } }
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack {
+                Color.black
+                if let index {
+                    page(shots[index], size: geometry.size)
+                        .id(shots[index].id)
+                        .transition(.opacity)
+                }
+                if model.chrome {
+                    chrome(size: geometry.size)
+                        .transition(.opacity)
+                }
+            }
+            .onAppear { model.viewSize = geometry.size }
+            .onChange(of: geometry.size) { _, size in model.viewSize = size }
+        }
+        .animation(.easeInOut(duration: 0.15), value: screen.galleryShot)
+        .animation(.easeInOut(duration: 0.2), value: model.chrome)
+        .onAppear {
+            model.prepare(shots, around: index)
+            model.startScroll(page: step)
+        }
+        .onDisappear { model.stopScroll() }
+        .onChange(of: screen.galleryShot) { _, _ in
+            model.zoom = .identity
+            model.prepare(shots, around: index)
+        }
+        .onChange(of: shots.count) { _, _ in
+            // снимок, открытый в галерее, пропал — закрываем
+            if index == nil { screen.galleryShot = nil }
+        }
+    }
+
+    /// Соседний снимок: +1 — старше (дальше по ленте), −1 — новее.
+    private func step(_ offset: Int) {
+        guard let index, !model.zoom.isZoomed else { return }
+        let next = min(max(index + offset, 0), shots.count - 1)
+        if next != index { screen.galleryShot = shots[next].id }
+    }
+
+    // MARK: - Снимок
+
+    private func page(_ shot: CameraController.Shot, size: CGSize) -> some View {
+        let image = model.image(for: shot)
+        let frame = image.map { CGSize(width: $0.width, height: $0.height) } ?? shot.pixelSize ?? CGSize(width: 3, height: 2)
+        let rect = model.zoom.imageRect(view: size, frame: frame)
+        return ZStack {
+            if let image {
+                Image(decorative: image, scale: 1)
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: rect.width, height: rect.height)
+                    .position(x: rect.midX, y: rect.midY)
+            } else {
+                ProgressView().controlSize(.large)
+            }
+        }
+        .frame(width: size.width, height: size.height)
+        .contentShape(Rectangle())
+        // двойной щелчок — вписать ↔ 2,5× в этой точке; одиночный — спрятать или вернуть верх и ленту
+        .onTapGesture(count: 2) { location in
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                model.zoom = model.zoom.isZoomed ? .identity
+                    : ViewZoom.identity.zoomed(by: 2.5, around: location, view: size, frame: frame, elastic: false)
+            }
+        }
+        .onTapGesture { model.chrome.toggle() }
+        .simultaneousGesture(
+            MagnifyGesture()
+                .onChanged { value in
+                    let base = model.pinchBase ?? model.zoom
+                    model.pinchBase = base
+                    model.zoom = base.zoomed(by: value.magnification, around: value.startLocation, view: size, frame: frame,
+                                             elastic: true)
+                }
+                .onEnded { _ in
+                    model.pinchBase = nil
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { model.zoom = model.zoom.settled(view: size, frame: frame) }
+                }
+        )
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 2)
+                .onChanged { value in
+                    guard model.zoom.isZoomed else { return }
+                    let base = model.dragBase ?? model.zoom
+                    model.dragBase = base
+                    model.zoom = base.panned(by: value.translation, view: size, frame: frame)
+                }
+                .onEnded { _ in model.dragBase = nil }
+        )
+        .onChange(of: model.zoom) { _, zoom in
+            model.imageSize = frame
+            // увеличили сильнее, чем позволяет картинка под экран, — догружаем полное разрешение
+            if let image, zoom.imageRect(view: size, frame: frame).width * displayScale > CGFloat(image.width) * 1.05 {
+                model.loadFull(shot)
+            }
+        }
+        .onAppear { model.imageSize = frame }
+    }
+
+    // MARK: - Верх, подпись, лента
+
+    private func chrome(size: CGSize) -> some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                GalleryButton(systemImage: "xmark", help: "Закрыть (Esc)") { screen.galleryShot = nil }
+                Spacer()
+                if let index {
+                    Text("\(index + 1) из \(shots.count)").font(.headline.monospacedDigit())
+                }
+                Spacer()
+                if let index {
+                    let urls = shots[index].urls
+                    Button("Показать в Finder") { NSWorkspace.shared.activateFileViewerSelecting(urls) }
+                    Button("Открыть") { if let first = urls.first { NSWorkspace.shared.open(first) } }
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(.ultraThinMaterial)
+            Spacer()
+            HStack {
+                if let index, index > 0 {
+                    GalleryButton(systemImage: "chevron.left", help: "Новее (←)") { step(-1) }
+                }
+                Spacer()
+                if let index, index < shots.count - 1 {
+                    GalleryButton(systemImage: "chevron.right", help: "Старше (→)") { step(1) }
+                }
+            }
+            .padding(.horizontal, 16)
+            .opacity(model.zoom.isZoomed ? 0 : 1)
+            Spacer()
+            VStack(spacing: 8) {
+                if let index { GalleryCaption(shot: shots[index]) }
+                filmstrip(width: size.width)
+            }
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity)
+            .background(.ultraThinMaterial)
+        }
+    }
+
+    /// Лента всех снимков сеанса; короткая — по центру.
+    private func filmstrip(width: CGFloat) -> some View {
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 6) {
+                    ForEach(shots) { shot in
+                        Button { screen.galleryShot = shot.id } label: {
+                            Group {
+                                if let thumbnail = shot.thumbnail {
+                                    Image(decorative: thumbnail, scale: 1).resizable().aspectRatio(contentMode: .fill)
+                                } else {
+                                    Color.white.opacity(0.1)
+                                }
+                            }
+                            .frame(width: 56, height: 56)
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .overlay(RoundedRectangle(cornerRadius: 6)
+                                .strokeBorder(.white, lineWidth: shot.id == screen.galleryShot ? 2 : 0))
+                            .opacity(shot.id == screen.galleryShot ? 1 : 0.6)
+                        }
+                        .buttonStyle(.plain)
+                        .help(shot.title)
+                        .id(shot.id)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .frame(minWidth: width)
+            }
+            .frame(height: 60)
+            .onAppear { proxy.scrollTo(screen.galleryShot, anchor: .center) }
+            .onChange(of: screen.galleryShot) { _, id in
+                withAnimation(.easeInOut(duration: 0.2)) { proxy.scrollTo(id, anchor: .center) }
+            }
+        }
+    }
+}
+
+/// Подпись снимка: имя, что это (стоп-кадр, снимок, RAW + JPEG) и размер, сколько весит, когда снят.
+private struct GalleryCaption: View {
+    let shot: CameraController.Shot
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Text(shot.title).fontWeight(.semibold)
+            Text(details).foregroundStyle(.secondary).monospacedDigit()
+        }
+        .lineLimit(1)
+        .font(.callout)
+    }
+
+    private var details: String {
+        let size = shot.pixelSize.map { "\(Int($0.width))×\(Int($0.height))" }
+        let kinds = Set(shot.urls.map { $0.pathExtension.lowercased() })
+        let kind: String
+        if shot.isFrameGrab {
+            kind = ["Стоп-кадр", size].compactMap { $0 }.joined(separator: " ")
+        } else if kinds.contains("arw"), kinds.contains("jpg") || kinds.contains("jpeg") {
+            kind = ["RAW + JPEG", size].compactMap { $0 }.joined(separator: " · ")
+        } else {
+            kind = ["Снимок", size].compactMap { $0 }.joined(separator: " ")
+        }
+        let bytes = shot.urls.reduce(0) { total, url in
+            total + ((try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0)
+        }
+        let megabytes = String(format: "%.1f МБ", Double(bytes) / 1_048_576).replacingOccurrences(of: ".", with: ",")
+        return [kind, megabytes, shot.takenAt.formatted(date: .omitted, time: .standard)].joined(separator: " · ")
+    }
+}
+
+private struct GalleryButton: View {
+    let systemImage: String
+    let help: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 15, weight: .semibold))
+                .frame(width: 36, height: 36)
+                .background(.ultraThinMaterial, in: Circle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+}
+
+/// Что на экране галереи: увеличение, видны ли верх и лента, картинки снимков (текущий и соседние — под экран,
+/// текущий при сильном увеличении — в полном разрешении).
+@MainActor
+@Observable
+final class GalleryModel {
+    var zoom = ViewZoom.identity
+    var chrome = true
+    var pinchBase: ViewZoom?
+    var dragBase: ViewZoom?
+    /// Для прокрутки двумя пальцами: где и какого размера снимок на экране.
+    var viewSize = CGSize.zero
+    var imageSize = CGSize(width: 3, height: 2)
+    private var display: [UUID: CGImage] = [:]
+    private var full: (id: UUID, image: CGImage)?
+    @ObservationIgnored private var loading: Set<UUID> = []
+    @ObservationIgnored private var loadingFull: UUID?
+    @ObservationIgnored private var scrollToken: Any?
+    @ObservationIgnored private var swipe: CGFloat = 0
+    @ObservationIgnored private var swiped = false
+
+    /// Картинка под экран — до 2560 точек: на большее хватит догрузки полного разрешения.
+    static let displayPixels = 2560
+
+    func image(for shot: CameraController.Shot) -> CGImage? {
+        if let full, full.id == shot.id { return full.image }
+        return display[shot.id] ?? shot.thumbnail
+    }
+
+    /// Текущий и соседние снимки — под экран; остальное из памяти долой.
+    func prepare(_ shots: [CameraController.Shot], around index: Int?) {
+        guard let index, shots.indices.contains(index) else { return }
+        let near = shots[max(0, index - 1)...min(shots.count - 1, index + 1)]
+        let wanted = Set(near.map(\.id))
+        display = display.filter { wanted.contains($0.key) }
+        if let full, full.id != shots[index].id { self.full = nil }
+        for shot in near where display[shot.id] == nil && !loading.contains(shot.id) {
+            loading.insert(shot.id)
+            let urls = shot.urls
+            let id = shot.id
+            Task {
+                let image = await Self.decode(urls, maxPixels: Self.displayPixels)
+                loading.remove(id)
+                if let image { display[id] = image }
+            }
+        }
+    }
+
+    func loadFull(_ shot: CameraController.Shot) {
+        guard full?.id != shot.id, loadingFull != shot.id else { return }
+        loadingFull = shot.id
+        let urls = shot.urls
+        let id = shot.id
+        Task {
+            let image = await Self.decode(urls, maxPixels: nil)
+            if loadingFull == id { loadingFull = nil }
+            if let image, image.width > display[id]?.width ?? 0 { full = (id, image) }
+        }
+    }
+
+    /// Смахивание двумя пальцами по трекпаду — соседний снимок (один за жест); при увеличении прокрутка двигает
+    /// снимок. Колесо мыши — листает.
+    func startScroll(page: @escaping (Int) -> Void) {
+        stopScroll()
+        scrollToken = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+            guard let self else { return event }
+            if self.zoom.isZoomed {
+                self.zoom = self.zoom.panned(by: CGSize(width: event.scrollingDeltaX, height: event.scrollingDeltaY),
+                                             view: self.viewSize, frame: self.imageSize)
+                return nil
+            }
+            if event.hasPreciseScrollingDeltas {
+                if event.phase == .began {
+                    self.swipe = 0
+                    self.swiped = false
+                }
+                if event.momentumPhase.isEmpty {
+                    self.swipe += event.scrollingDeltaX
+                    if !self.swiped, abs(self.swipe) > 60 {
+                        self.swiped = true
+                        page(self.swipe < 0 ? 1 : -1)
+                    }
+                }
+                if event.phase == .ended || event.phase == .cancelled {
+                    self.swipe = 0
+                    self.swiped = false
+                }
+            } else if event.scrollingDeltaY != 0 {
+                page(event.scrollingDeltaY < 0 ? 1 : -1)
+            }
+            return nil
+        }
+    }
+
+    func stopScroll() {
+        if let scrollToken { NSEvent.removeMonitor(scrollToken) }
+        scrollToken = nil
+    }
+
+    /// JPEG раньше RAW: быстрее. maxPixels nil — полный размер, с поворотом по EXIF.
+    nonisolated static func decode(_ urls: [URL], maxPixels: Int?) async -> CGImage? {
+        await Task.detached(priority: .userInitiated) {
+            func isJPEG(_ url: URL) -> Bool { ["jpg", "jpeg"].contains(url.pathExtension.lowercased()) }
+            for url in urls.sorted(by: { isJPEG($0) && !isJPEG($1) }) {
+                guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { continue }
+                var options: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true,
+                                                kCGImageSourceCreateThumbnailWithTransform: true]
+                if let maxPixels { options[kCGImageSourceThumbnailMaxPixelSize] = maxPixels }
+                if let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) { return image }
+            }
+            return nil
+        }.value
+    }
+}

@@ -34,7 +34,8 @@ struct LiveScreen: View {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(500))
                 screen.tickAutoHide(enabled: Prefs.autoHide, delay: TimeInterval(Prefs.autoHideSeconds),
-                                    busy: screen.fnOpen || screen.allSettingsOpen || screen.pillInfo != nil || controller.review != nil)
+                                    busy: screen.fnOpen || screen.allSettingsOpen || screen.pillInfo != nil || controller.review != nil
+                                        || screen.galleryShot != nil)
             }
         }
         .environment(\.colorScheme, .dark)
@@ -59,6 +60,10 @@ struct LiveScreen: View {
             return .handled
         }
         .onKeyPress(.space) {
+            if screen.galleryShot != nil {
+                screen.galleryShot = nil
+                return .handled
+            }
             if controller.review != nil {
                 controller.dismissReview()
                 return .handled
@@ -77,6 +82,10 @@ struct LiveScreen: View {
                 screen.debugOpen = false
                 return .handled
             }
+            if screen.galleryShot != nil {
+                screen.galleryShot = nil
+                return .handled
+            }
             if controller.review != nil {
                 controller.dismissReview()
                 return .handled
@@ -85,8 +94,8 @@ struct LiveScreen: View {
             screen.closeOverlays()
             return .handled
         }
-        .onKeyPress(.leftArrow) { step(-1) }
-        .onKeyPress(.rightArrow) { step(1) }
+        .onKeyPress(.leftArrow) { screen.galleryShot != nil ? galleryStep(-1) : step(-1) }
+        .onKeyPress(.rightArrow) { screen.galleryShot != nil ? galleryStep(1) : step(1) }
     }
 
     /// Слои снизу вверх: видео с рамкой записи, элементы, панели, просмотр снимка, шторка и вспышка, летящий кадр.
@@ -123,6 +132,9 @@ struct LiveScreen: View {
                 ReviewOverlay(review: review, progress: controller.capturePhase.flatMap(Self.downloadCaption)) {
                     controller.dismissReview()
                 }
+            }
+            if screen.galleryShot != nil {
+                GalleryOverlay(controller: controller, screen: screen)
             }
             CaptureFlash(controller: controller)
             if showHiddenHint {
@@ -204,6 +216,13 @@ struct LiveScreen: View {
             }
             .padding(.trailing, 20)
         }
+    }
+
+    /// Галерея: соседний снимок; +1 — старше.
+    private func galleryStep(_ offset: Int) -> KeyPress.Result {
+        guard let id = screen.galleryShot, let index = controller.shots.firstIndex(where: { $0.id == id }) else { return .ignored }
+        screen.galleryShot = controller.shots[min(max(index + offset, 0), controller.shots.count - 1)].id
+        return .handled
     }
 
     private func step(_ offset: Int) -> KeyPress.Result {

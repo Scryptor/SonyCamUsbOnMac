@@ -581,18 +581,6 @@ final class CameraController {
         }
     }
 
-    /// Открывает снимок из ленты поверх видео (пока не закроют).
-    func openShot(_ index: Int) {
-        guard shots.indices.contains(index) else { return }
-        let shot = shots[index]
-        Task { [weak self] in
-            let preview = await Self.previews(of: shot.urls)
-            self?.showReview(Review(image: preview.image ?? shot.thumbnail, title: shot.title,
-                                    detail: shot.urls.first.map { "«\($0.deletingLastPathComponent().lastPathComponent)»" } ?? "",
-                                    urls: shot.urls, source: "Снимок из ленты", endsAt: nil), timed: false)
-        }
-    }
-
     func dismissReview() {
         reviewTask?.cancel()
         review = nil

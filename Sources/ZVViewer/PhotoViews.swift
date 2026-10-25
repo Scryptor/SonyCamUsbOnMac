@@ -135,7 +135,7 @@ struct RecBadge: View {
     }
 }
 
-/// Последние снимки и стоп-кадры: клик — открыть поверх видео, правый клик — Finder или «Просмотр».
+/// Последние снимки и стоп-кадры: клик — галерея на этом снимке, правый клик — Finder или «Просмотр».
 struct ShotsStrip: View {
     let controller: CameraController
     let screen: ScreenState
@@ -143,7 +143,7 @@ struct ShotsStrip: View {
     var body: some View {
         HStack(spacing: 5) {
             ForEach(Array(controller.shots.prefix(6).enumerated()), id: \.element.id) { index, shot in
-                Button { controller.openShot(index) } label: {
+                Button { screen.openGallery(shot.id) } label: {
                     ShotThumb(shot: shot, flying: screen.flyingShot == shot.id)
                 }
                 .buttonStyle(.plain)
@@ -156,7 +156,13 @@ struct ShotsStrip: View {
                 .anchorPreference(key: FirstShotSlotKey.self, value: .bounds) { index == 0 ? $0 : nil }
             }
             if controller.shots.count > 6 {
-                Text("+\(controller.shots.count - 6)").font(.caption).foregroundStyle(.secondary).padding(.horizontal, 4)
+                // остальные — в галерее, с седьмого
+                Button { screen.openGallery(controller.shots[6].id) } label: {
+                    Text("+\(controller.shots.count - 6)").font(.caption).foregroundStyle(.secondary).padding(.horizontal, 4)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Все снимки сеанса")
             }
         }
         .padding(5)
