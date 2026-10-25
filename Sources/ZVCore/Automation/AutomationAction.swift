@@ -45,9 +45,21 @@ public enum AutomationAction: Equatable, Sendable, Decodable {
     case resetZoom
     /// Строка состояния: закрепить или открепить — закреплённая остаётся на экране, когда элементы спрятаны.
     case toggleStatusPin
+    /// Пресеты: список под кнопкой; окно «Пресеты» — открыть (на пресете), закрыть, выбрать в нём пресет.
+    case openPresetMenu
+    case closePresetMenu
+    case openPresets(Int?)
+    case closePresets
+    case selectPreset(Int)
+    /// Правка пресета — камера не меняется: значение настройки, менять ли её, место в списке, копия, «Взять с камеры».
+    case setPresetValue(Int, SettingID, Int64)
+    case setPresetIncluded(Int, SettingID, Bool)
+    case movePreset(from: Int, to: Int)
+    case duplicatePreset(Int)
+    case recapturePreset(Int)
 
     private enum Keys: String, CodingKey {
-        case action, key, setting, offset, value, group, name, index, confirm, mode, x, y, factor
+        case action, key, setting, offset, value, group, name, index, confirm, mode, x, y, factor, included, from, to
     }
 
     public init(from decoder: Decoder) throws {
@@ -90,6 +102,20 @@ public enum AutomationAction: Equatable, Sendable, Decodable {
                             y: try c.decodeIfPresent(Double.self, forKey: .y))
         case "resetZoom": self = .resetZoom
         case "toggleStatusPin": self = .toggleStatusPin
+        case "openPresetMenu": self = .openPresetMenu
+        case "closePresetMenu": self = .closePresetMenu
+        case "openPresets": self = .openPresets(try c.decodeIfPresent(Int.self, forKey: .index))
+        case "closePresets": self = .closePresets
+        case "selectPreset": self = .selectPreset(try c.decode(Int.self, forKey: .index))
+        case "setPresetValue":
+            self = .setPresetValue(try c.decode(Int.self, forKey: .index), try c.decode(SettingID.self, forKey: .setting),
+                                   try c.decode(Int64.self, forKey: .value))
+        case "setPresetIncluded":
+            self = .setPresetIncluded(try c.decode(Int.self, forKey: .index), try c.decode(SettingID.self, forKey: .setting),
+                                      try c.decode(Bool.self, forKey: .included))
+        case "movePreset": self = .movePreset(from: try c.decode(Int.self, forKey: .from), to: try c.decode(Int.self, forKey: .to))
+        case "duplicatePreset": self = .duplicatePreset(try c.decode(Int.self, forKey: .index))
+        case "recapturePreset": self = .recapturePreset(try c.decode(Int.self, forKey: .index))
         default:
             throw DecodingError.dataCorruptedError(forKey: .action, in: c, debugDescription: "неизвестная команда \(action)")
         }

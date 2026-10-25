@@ -97,7 +97,9 @@ final class AutomationServer {
                 return Self.json(400, ["error": "\(error)"])
             }
         case ("GET", "/screenshot"):
-            guard let png = screenshot() else { return Self.json(409, ["error": "no window"]) }
+            // ?window=presets — окно «Пресеты» вместо главного
+            let title = request.query["window"] == "presets" ? "Пресеты" : "ZV-E10 Viewer"
+            guard let png = screenshot(title: title) else { return Self.json(409, ["error": "no window"]) }
             return HTTPResponse.encode(status: 200, contentType: "image/png", body: png)
         case ("GET", "/frame"):
             guard let jpeg = controller.lastJPEG else { return Self.json(409, ["error": "no frame"]) }
@@ -148,7 +150,10 @@ final class AutomationServer {
             guard controller.presets.indices.contains(index) else { return "no preset \(index)" }
             controller.applyPreset(index)
         case let .renamePreset(index, name): controller.renamePreset(index, to: name)
-        case let .deletePreset(index): controller.deletePreset(index)
+        case let .deletePreset(index):
+            guard controller.presets.indices.contains(index) else { return "no preset \(index)" }
+            controller.deletePreset(index)
+            screen.followPresetDelete(index, remaining: controller.presets.count)
         case let .toggleRecording(confirm):
             guard confirm else { return "recording writes a clip to the card: pass \"confirm\": true" }
             controller.toggleRecording()
@@ -216,6 +221,50 @@ final class AutomationServer {
             screen.zoom = .identity
         case .toggleStatusPin:
             screen.toggleStatusPin()
+        case .openPresetMenu:
+            screen.closeOverlays()
+            // кнопка пресетов — среди элементов: если они спрятаны, сначала показываем их, а список открываем,
+            // когда кнопка уже на экране, — иначе списку не к чему привязаться
+            let hidden = !screen.controlsShown
+            if screen.manualHidden { screen.toggleControls() } else { screen.noteActivity() }
+            if hidden {
+                Task { @MainActor [screen] in
+                    try? await Task.sleep(for: .milliseconds(400))
+                    screen.presetMenuOpen = true
+                }
+            } else {
+                screen.presetMenuOpen = true
+            }
+        case .closePresetMenu:
+            screen.presetMenuOpen = false
+        case let .openPresets(index):
+            if let index, !controller.presets.indices.contains(index) { return "no preset \(index)" }
+            screen.openPresetsWindow(selecting: index)
+        case .closePresets:
+            screen.presetsWindowCloseRequest += 1
+        case let .selectPreset(index):
+            guard controller.presets.indices.contains(index) else { return "no preset \(index)" }
+            screen.presetsSelected = index
+        case let .setPresetValue(index, id, value):
+            guard controller.presets.indices.contains(index) else { return "no preset \(index)" }
+            guard PresetCatalog.order.contains(id) else { return "\(id.rawValue) is not in presets" }
+            controller.setPresetValue(index, id, value)
+        case let .setPresetIncluded(index, id, included):
+            guard controller.presets.indices.contains(index) else { return "no preset \(index)" }
+            guard PresetCatalog.order.contains(id) else { return "\(id.rawValue) is not in presets" }
+            guard !included || controller.canIncludeInPreset(index, id) else { return "no value for \(id.rawValue)" }
+            controller.setPresetIncluded(index, id, included)
+        case let .movePreset(from, to):
+            guard controller.presets.indices.contains(from), controller.presets.indices.contains(to) else { return "no preset" }
+            controller.movePreset(from: from, to: to)
+            screen.followPresetMove(from: from, to: to)
+        case let .duplicatePreset(index):
+            guard let copy = controller.duplicatePreset(index) else { return "no preset \(index)" }
+            screen.presetsSelected = copy
+        case let .recapturePreset(index):
+            guard controller.presets.indices.contains(index) else { return "no preset \(index)" }
+            guard controller.phase == .ready else { return "not ready" }
+            controller.recapturePreset(index)
         }
         return nil
     }
@@ -333,6 +382,8 @@ final class AutomationServer {
         }
         ui["zoom"] = ["factor": screen.zoom.factor, "centerX": screen.zoom.center.x, "centerY": screen.zoom.center.y]
         ui["statusBar"] = ["pinned": screen.statusBarPinned, "visible": screen.controlsShown || screen.statusBarPinned]
+        ui["presetMenu"] = screen.presetMenuOpen
+        ui["presetsWindow"] = screen.presetsWindowOpen ? ["selected": screen.presetsSelected ?? NSNull()] as [String: Any] : NSNull()
         var result: [String: Any] = [
             "phase": controller.phase.rawValue,
             "model": controller.deviceInfo?.model ?? NSNull(),
@@ -387,8 +438,12 @@ final class AutomationServer {
             "cameraDestination": controller.properties[SonyProp.stillImageStoreDestination]?.current.intValue ?? NSNull(),
             "presets": controller.presets.map { preset in
                 ["name": preset.name,
-                 "values": Dictionary(uniqueKeysWithValues: preset.values.map { ($0.key.rawValue, $0.value) })] as [String: Any]
+                 "values": Dictionary(uniqueKeysWithValues: preset.values.map { ($0.key.rawValue, $0.value) }),
+                 "skip": preset.skip.map(\.rawValue).sorted(),
+                 "summary": PresetCatalog.summary(preset),
+                 "active": PresetCatalog.matches(preset, controller.properties)] as [String: Any]
             },
+            "activePreset": controller.activePresetIndex ?? NSNull(),
             "ui": ui,
             "settings": settings,
         ]
@@ -398,12 +453,16 @@ final class AutomationServer {
 
     /// Снимок собственного окна (без разрешения на запись экрана) вместе с открытыми подсказками:
     /// popover — отдельное окно, его дорисовываем поверх на своё место.
-    private func screenshot() -> Data? {
-        guard let window = NSApp.windows.first(where: { $0.isVisible && $0.title == "ZV-E10 Viewer" }) ?? NSApp.mainWindow,
+    private func screenshot(title: String) -> Data? {
+        let main = title == "ZV-E10 Viewer" ? NSApp.mainWindow : nil
+        guard let window = NSApp.windows.first(where: { $0.isVisible && $0.title == title }) ?? main,
               let view = window.contentView,
               let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return nil }
         view.cacheDisplay(in: view.bounds, to: rep)
-        let popovers = NSApp.windows.filter { $0 !== window && $0.isVisible && String(describing: type(of: $0)).contains("Popover") }
+        // подсказки и список пресетов — у главного окна; на снимок окна пресетов их не кладём
+        let popovers = main == nil ? [] : NSApp.windows.filter {
+            $0 !== window && $0.isVisible && String(describing: type(of: $0)).contains("Popover")
+        }
         if !popovers.isEmpty, let context = NSGraphicsContext(bitmapImageRep: rep) {
             NSGraphicsContext.saveGraphicsState()
             NSGraphicsContext.current = context

@@ -65,6 +65,49 @@ final class ScreenState {
     /// Цифровое увеличение live view — только на экране, камера о нём не знает.
     var zoom: ViewZoom = .identity
 
+    /// Список пресетов под кнопкой вверху слева.
+    var presetMenuOpen = false
+    /// Окно «Пресеты»: открыто ли и какой пресет в нём выбран.
+    var presetsWindowOpen = false
+    var presetsSelected: Int?
+    /// Просьбы открыть и закрыть окно пресетов — из API и из списка: окна открывает и закрывает вид.
+    var presetsWindowRequest = 0
+    var presetsWindowCloseRequest = 0
+    /// Окошко «Новый пресет» с полем имени.
+    var presetNaming = false
+    /// Новый пресет из окна: поле имени — сразу в фокус.
+    var presetsFocusName = false
+
+    func openPresetsWindow(selecting index: Int?) {
+        presetMenuOpen = false
+        if let index { presetsSelected = index }
+        presetsWindowRequest += 1
+    }
+
+    /// Пресет переставили: выбранный в окне остаётся тем же пресетом.
+    func followPresetMove(from: Int, to: Int) {
+        guard let selected = presetsSelected else { return }
+        if selected == from {
+            presetsSelected = to
+        } else if from < selected, to >= selected {
+            presetsSelected = selected - 1
+        } else if from > selected, to <= selected {
+            presetsSelected = selected + 1
+        }
+    }
+
+    /// Пресет удалили: выбран тот же, а на месте удалённого — соседний.
+    func followPresetDelete(_ index: Int, remaining count: Int) {
+        guard let selected = presetsSelected else { return }
+        if count == 0 {
+            presetsSelected = nil
+        } else if selected > index {
+            presetsSelected = selected - 1
+        } else if selected == index {
+            presetsSelected = min(index, count - 1)
+        }
+    }
+
     func placeHistogram(_ placement: FloatingPlacement) {
         histogramPlacement = placement
         if let data = try? JSONEncoder().encode(placement) { defaults.set(data, forKey: "histogramPlacement") }
@@ -94,7 +137,7 @@ final class ScreenState {
     var controlsHidden: Bool { manualHidden || autoHidden }
 
     /// Элементы на экране: не спрятаны, или открыто то, с чем они не прячутся, — меню, панель, подсказка.
-    var controlsShown: Bool { !controlsHidden || fnOpen || allSettingsOpen || pillInfo != nil }
+    var controlsShown: Bool { !controlsHidden || fnOpen || allSettingsOpen || pillInfo != nil || presetMenuOpen || presetNaming }
 
     func togglePillInfo(_ info: PillInfo) {
         let open = pillInfo != info
@@ -136,6 +179,7 @@ final class ScreenState {
         if let id { selected = id }
         allSettingsOpen = false
         pillInfo = nil
+        presetMenuOpen = false
         fnOpen = true
     }
 
@@ -146,6 +190,7 @@ final class ScreenState {
         }
         fnOpen = false
         pillInfo = nil
+        presetMenuOpen = false
         allSettingsOpen = true
     }
 
@@ -154,6 +199,7 @@ final class ScreenState {
         allSettingsOpen = false
         editing = nil
         pillInfo = nil
+        presetMenuOpen = false
     }
 
     func toggleStatusPin() {

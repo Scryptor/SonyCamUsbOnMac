@@ -24,6 +24,7 @@ struct ZVViewerApp: App {
         .windowResizability(.contentMinSize)
         .commands {
             CommandGroup(after: .toolbar) {
+                PresetsCommand()
                 Button(screen.debugOpen ? "Скрыть отладку" : "Отладка") { screen.toggleDebug() }
                     .keyboardShortcut("d", modifiers: [.option, .command])
                 Divider()
@@ -39,6 +40,12 @@ struct ZVViewerApp: App {
                     .disabled(screen.zoom == .identity)
             }
         }
+        // пресеты настраивают в своём окне, рядом с картинкой
+        Window("Пресеты", id: PresetsWindow.id) {
+            PresetsWindow(controller: controller, screen: screen)
+        }
+        .defaultSize(width: 760, height: 520)
+        .windowResizability(.contentMinSize)
         Settings {
             SettingsView(controller: controller)
         }
@@ -48,6 +55,7 @@ struct ZVViewerApp: App {
 struct RootView: View {
     let controller: CameraController
     let screen: ScreenState
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -60,6 +68,8 @@ struct RootView: View {
                 LiveScreen(controller: controller, screen: screen)
             }
         }
+        // окно пресетов просят открыть список и API, а открыть окно может только вид
+        .onChange(of: screen.presetsWindowRequest) { openWindow(id: PresetsWindow.id) }
         // панель отладки — поверх любого экрана, и ожидания тоже: там видно, куда программа стучится
         .overlay(alignment: .topLeading) {
             if screen.debugOpen {

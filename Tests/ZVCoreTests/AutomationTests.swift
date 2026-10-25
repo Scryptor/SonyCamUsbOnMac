@@ -83,3 +83,19 @@ import Testing
     #expect(try decode(#"{"action":"resetZoom"}"#) == .resetZoom)
     #expect(try decode(#"{"action":"toggleStatusPin"}"#) == .toggleStatusPin)
 }
+
+@Test func decodesPresetWindowActions() throws {
+    func decode(_ json: String) throws -> AutomationAction { try JSONDecoder().decode(AutomationAction.self, from: Data(json.utf8)) }
+    #expect(try decode(#"{"action":"openPresetMenu"}"#) == .openPresetMenu)
+    #expect(try decode(#"{"action":"closePresetMenu"}"#) == .closePresetMenu)
+    #expect(try decode(#"{"action":"openPresets"}"#) == .openPresets(nil))
+    #expect(try decode(#"{"action":"openPresets","index":2}"#) == .openPresets(2))
+    #expect(try decode(#"{"action":"closePresets"}"#) == .closePresets)
+    #expect(try decode(#"{"action":"selectPreset","index":1}"#) == .selectPreset(1))
+    #expect(try decode(#"{"action":"setPresetValue","index":0,"setting":"iso","value":800}"#) == .setPresetValue(0, .iso, 800))
+    #expect(try decode(#"{"action":"setPresetIncluded","index":0,"setting":"shutter","included":false}"#)
+        == .setPresetIncluded(0, .shutter, false))
+    #expect(try decode(#"{"action":"movePreset","from":2,"to":0}"#) == .movePreset(from: 2, to: 0))
+    #expect(try decode(#"{"action":"duplicatePreset","index":1}"#) == .duplicatePreset(1))
+    #expect(try decode(#"{"action":"recapturePreset","index":1}"#) == .recapturePreset(1))
+}

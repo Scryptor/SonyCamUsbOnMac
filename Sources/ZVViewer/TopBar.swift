@@ -1,11 +1,11 @@
 import SwiftUI
 import ZVCore
 
-/// Слева сверху: кнопка гистограммы, пресеты (клик — применить), «+» для сохранения текущих настроек и настройки.
+/// Слева сверху: кнопки гистограммы и строки состояния, пресеты (кнопка со списком), «+» — сохранить текущие
+/// настройки новым пресетом, и настройки.
 struct TopBar: View {
     let controller: CameraController
     let screen: ScreenState
-    @State private var renaming: Int?
     @State private var newName = ""
 
     var body: some View {
@@ -33,26 +33,9 @@ struct TopBar: View {
                       : "Закрепить строку состояния: останется на экране, когда элементы спрятаны")
                 .accessibilityLabel("Закрепить строку состояния")
 
-                ForEach(Array(controller.presets.enumerated()), id: \.offset) { index, preset in
-                    Button { controller.applyPreset(index) } label: {
-                        Text(index < 9 ? "\(index + 1) · \(preset.name)" : preset.name)
-                            .lineLimit(1)
-                            .padding(.horizontal, 10)
-                            .frame(height: 26)
-                            .background(Color.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 7))
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(controller.phase != .ready || controller.isApplyingPreset)
-                    .contextMenu {
-                        Button("Переименовать…") {
-                            newName = preset.name
-                            renaming = index
-                        }
-                        Button("Удалить", role: .destructive) { controller.deletePreset(index) }
-                    }
-                }
+                PresetPicker(controller: controller, screen: screen)
 
-                Button { controller.savePreset() } label: {
+                Button { screen.presetNaming = true } label: {
                     TopBarIconView(icon: .savePreset)
                         .frame(width: 30, height: 26)
                         .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
@@ -78,13 +61,16 @@ struct TopBar: View {
                 .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
             }
         }
-        .alert("Название пресета", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
+        // новый пресет — сразу с именем; под полем — что войдёт
+        .alert("Новый пресет", isPresented: Binding(get: { screen.presetNaming }, set: { screen.presetNaming = $0 })) {
             TextField("Название", text: $newName)
-            Button("Сохранить") {
-                if let index = renaming { controller.renamePreset(index, to: newName) }
-                renaming = nil
-            }
-            Button("Отмена", role: .cancel) { renaming = nil }
+            Button("Сохранить") { controller.savePreset(name: newName) }
+            Button("Отмена", role: .cancel) {}
+        } message: {
+            Text(PresetCatalog.summary(PresetCatalog.capture(name: "", from: controller.properties)))
+        }
+        .onChange(of: screen.presetNaming) { _, naming in
+            if naming { newName = controller.nextPresetName }
         }
     }
 }

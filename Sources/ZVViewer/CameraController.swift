@@ -677,12 +677,21 @@ final class CameraController {
 
     // MARK: - Пресеты
 
-    func savePreset(name: String? = nil) {
-        guard phase == .ready else { return }
-        let title = name?.trimmingCharacters(in: .whitespaces).isEmpty == false ? name! : "Пресет \(presets.count + 1)"
+    /// Имя нового пресета, если его не назвали.
+    var nextPresetName: String { "Пресет \(presets.count + 1)" }
+
+    /// Какой пресет сейчас стоит на камере: первый, у которого всё, что он ставит, совпадает; nil — никакой.
+    var activePresetIndex: Int? { presets.firstIndex { PresetCatalog.matches($0, properties) } }
+
+    /// Сохраняет текущие настройки камеры новым пресетом; возвращает его номер.
+    @discardableResult
+    func savePreset(name: String? = nil) -> Int? {
+        guard phase == .ready else { return nil }
+        let title = name?.trimmingCharacters(in: .whitespaces).isEmpty == false ? name! : nextPresetName
         presets.append(PresetCatalog.capture(name: title, from: properties))
         storePresets()
         showStatus("Сохранено: «\(title)»")
+        return presets.count - 1
     }
 
     func applyPreset(_ index: Int) {
@@ -714,6 +723,67 @@ final class CameraController {
         guard presets.indices.contains(index) else { return }
         presets.remove(at: index)
         storePresets()
+    }
+
+    /// Значение настройки в пресете — камера при этом не меняется.
+    func setPresetValue(_ index: Int, _ id: SettingID, _ value: Int64) {
+        guard presets.indices.contains(index), PresetCatalog.order.contains(id) else { return }
+        presets[index].values[id] = value
+        storePresets()
+    }
+
+    /// Можно ли включить настройку: значение уже есть в пресете или его есть откуда взять.
+    func canIncludeInPreset(_ index: Int, _ id: SettingID) -> Bool {
+        guard presets.indices.contains(index) else { return false }
+        return presets[index].values[id] != nil || presetDefault(id) != nil
+    }
+
+    /// Включить или выключить настройку в пресете. Выключенная помнит значение; включают без значения — текущее с камеры.
+    func setPresetIncluded(_ index: Int, _ id: SettingID, _ included: Bool) {
+        guard presets.indices.contains(index), PresetCatalog.order.contains(id) else { return }
+        if included {
+            if presets[index].values[id] == nil {
+                guard let value = presetDefault(id) else { return }
+                presets[index].values[id] = value
+            }
+            presets[index].skip.remove(id)
+        } else {
+            presets[index].skip.insert(id)
+        }
+        storePresets()
+    }
+
+    /// Чем заполнить настройку, которой в пресете не было: текущим значением камеры. Температуру камера отдаёт в любом
+    /// режиме — сохранённую ручную; без связи — 5600 K.
+    private func presetDefault(_ id: SettingID) -> Int64? {
+        if let value = property(id)?.current.intValue { return value }
+        return id == .colorTemperature ? 5600 : nil
+    }
+
+    /// Переставляет пресет на место `to` — номер и клавиша 1–9 меняются вместе с местом.
+    func movePreset(from: Int, to: Int) {
+        guard presets.indices.contains(from), presets.indices.contains(to), from != to else { return }
+        presets.insert(presets.remove(at: from), at: to)
+        storePresets()
+    }
+
+    /// Копия пресета сразу за ним; возвращает её номер.
+    @discardableResult
+    func duplicatePreset(_ index: Int) -> Int? {
+        guard presets.indices.contains(index) else { return nil }
+        var copy = presets[index]
+        copy.name += " — копия"
+        presets.insert(copy, at: index + 1)
+        storePresets()
+        return index + 1
+    }
+
+    /// «Взять с камеры»: всё, что камера сейчас даёт менять, — в пресет её текущими значениями.
+    func recapturePreset(_ index: Int) {
+        guard presets.indices.contains(index), phase == .ready else { return }
+        presets[index] = PresetCatalog.recapture(presets[index], from: properties)
+        storePresets()
+        showStatus("«\(presets[index].name)»: значения взяты с камеры")
     }
 
     private func storePresets() {

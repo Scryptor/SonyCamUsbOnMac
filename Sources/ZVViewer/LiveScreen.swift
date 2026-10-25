@@ -48,7 +48,7 @@ struct LiveScreen: View {
                 try? await Task.sleep(for: .milliseconds(500))
                 screen.tickAutoHide(enabled: Prefs.autoHide, delay: TimeInterval(Prefs.autoHideSeconds),
                                     busy: screen.fnOpen || screen.allSettingsOpen || screen.pillInfo != nil || controller.review != nil
-                                        || screen.galleryShot != nil)
+                                        || screen.galleryShot != nil || screen.presetMenuOpen || screen.presetNaming)
             }
         }
         .environment(\.colorScheme, .dark)
