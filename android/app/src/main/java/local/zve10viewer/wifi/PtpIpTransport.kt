@@ -94,6 +94,8 @@ data class PtpIpLink(
  */
 class PtpIpTransport private constructor(
     val host: String,
+    /** Порт PTP/IP: у настоящих камер 15740, другой — только у виртуальных. */
+    val port: Int,
     private val command: Socket,
     private val event: Socket,
     private val commandReader: PtpIpPacketReader,
@@ -480,12 +482,13 @@ class PtpIpTransport private constructor(
          * network — сеть Wi-Fi, к которой привязать сокеты (null — сеть по умолчанию).
          * linkCheckUrl — только для отладки через прокси: чем проверять связь во время провала вместо ping.
          * onSocket — сокет команд ещё до соединения: закрыв его, можно оборвать ожидание (до минуты при сопряжении).
+         * port — порт PTP/IP: у настоящих камер 15740, другой бывает только у виртуальных.
          */
         fun connect(host: String, identity: PtpIpIdentity, network: Network? = null, connectTimeoutMs: Int = 5000,
                     initTimeoutMs: Int = 5000, timeoutMs: Int = 8000, linkCheckUrl: String? = null,
-                    onSocket: (Socket) -> Unit = {}): Pair<PtpIpTransport, String> {
+                    port: Int = PtpIp.PORT, onSocket: (Socket) -> Unit = {}): Pair<PtpIpTransport, String> {
             closing.get()?.awaitClosed(1000)
-            val command = open(host, network, connectTimeoutMs, onSocket)
+            val command = open(host, port, network, connectTimeoutMs, onSocket)
             try {
                 command.soTimeout = initTimeoutMs
                 command.getOutputStream().write(PtpIp.initCommandRequest(identity.guid, identity.name))
@@ -493,7 +496,7 @@ class PtpIpTransport private constructor(
                 when (val reply = PtpIp.parseInitReply(readPacket(command, commandReader))) {
                     is PtpIpInitResult.Rejected -> throw PtpIpRejected(reply.reason)
                     is PtpIpInitResult.Accepted -> {
-                        val event = open(host, network, connectTimeoutMs)
+                        val event = open(host, port, network, connectTimeoutMs)
                         try {
                             event.soTimeout = minOf(initTimeoutMs, 5000)
                             event.getOutputStream().write(PtpIp.initEventRequest(reply.connectionNumber))
@@ -506,7 +509,8 @@ class PtpIpTransport private constructor(
                             if (ack.type != PtpIp.INIT_EVENT_ACK) throw TransportException("камера не открыла канал событий")
                             event.soTimeout = 0
                             command.soTimeout = POLL_MS
-                            val transport = PtpIpTransport(host, command, event, commandReader, eventReader, timeoutMs, network, linkCheckUrl)
+                            val transport = PtpIpTransport(host, port, command, event, commandReader, eventReader, timeoutMs, network,
+                                linkCheckUrl)
                             return transport to reply.cameraName
                         } catch (e: Exception) {
                             runCatching { event.close() }
@@ -523,7 +527,7 @@ class PtpIpTransport private constructor(
             }
         }
 
-        private fun open(host: String, network: Network?, timeoutMs: Int, onSocket: (Socket) -> Unit = {}): Socket {
+        private fun open(host: String, port: Int, network: Network?, timeoutMs: Int, onSocket: (Socket) -> Unit = {}): Socket {
             val socket = Socket()
             try {
                 socket.tcpNoDelay = true
@@ -534,7 +538,7 @@ class PtpIpTransport private constructor(
                 network?.bindSocket(socket)
                 // сокет отдаём ещё до соединения: закрыть его можно и пока идёт TCP-подключение
                 onSocket(socket)
-                socket.connect(InetSocketAddress(host, PtpIp.PORT), timeoutMs)
+                socket.connect(InetSocketAddress(host, port), timeoutMs)
                 tune(socket)
                 return socket
             } catch (e: ConnectException) {
@@ -604,7 +608,8 @@ object WiFiDiscovery {
                     try {
                         val packet = DatagramPacket(buffer, buffer.size)
                         socket.receive(packet)
-                        Ssdp.parse(String(packet.data, 0, packet.length))?.let { found[it.usn] = it }
+                        // у виртуальных камер на одном адресе — разные порты: одна камера — одна пара адрес и USN
+                        Ssdp.parse(String(packet.data, 0, packet.length))?.let { found["${it.usn} ${it.host}:${it.port}"] = it }
                     } catch (e: SocketTimeoutException) {
                         // ждём дальше
                     }

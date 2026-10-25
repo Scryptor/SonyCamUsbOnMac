@@ -105,3 +105,15 @@ import Testing
     #expect(try decode(#"{"action":"chooseNewPreset"}"#) == .chooseNewPreset)
     #expect(try decode(#"{"action":"closeSavePreset"}"#) == .closeSavePreset)
 }
+
+@Test func decodesCameraActions() throws {
+    func decode(_ json: String) throws -> AutomationAction {
+        try JSONDecoder().decode(AutomationAction.self, from: Data(json.utf8))
+    }
+    #expect(try decode(#"{"action":"selectCamera","id":"wifi:127.0.0.1:15741"}"#) == .selectCamera("wifi:127.0.0.1:15741"))
+    #expect(try decode(#"{"action":"renameCamera","id":"3f2a","name":"Левая"}"#) == .renameCamera("3f2a", "Левая"))
+    #expect(try decode(#"{"action":"forgetCamera","id":"3f2a"}"#) == .forgetCamera("3f2a"))
+    #expect(try decode(#"{"action":"pairCamera","id":"wifi:127.0.0.1:15742"}"#) == .pairCamera("wifi:127.0.0.1:15742"))
+    #expect(try decode(#"{"action":"searchCameras"}"#) == .searchCameras)
+    #expect(throws: (any Error).self) { try decode(#"{"action":"selectCamera"}"#) }
+}

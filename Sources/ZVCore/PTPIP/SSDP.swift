@@ -11,11 +11,16 @@ public enum SSDP {
         public let host: String
         /// Постоянный идентификатор камеры (в нём её MAC-адрес).
         public let usn: String
+        /// Порт PTP/IP: у настоящих камер всегда 15740, другой сообщают только виртуальные (`X-PTPIP-Port`).
+        public let port: UInt16
 
-        public init(host: String, usn: String) {
+        public init(host: String, usn: String, port: UInt16 = PTPIP.port) {
             self.host = host
             self.usn = usn
+            self.port = port
         }
+
+        public var endpoint: CameraEndpoint { CameraEndpoint(host: host, port: port) }
     }
 
     public static func searchRequest() -> Data {
@@ -33,6 +38,7 @@ public enum SSDP {
         guard headers["ST"] == searchTarget || headers["NT"] == searchTarget,
               let location = headers["LOCATION"], let host = URL(string: location)?.host else { return nil }
         let usn = headers["USN"].map { $0.components(separatedBy: "::").first ?? $0 } ?? host
-        return Response(host: host, usn: usn)
+        let port = headers["X-PTPIP-PORT"].flatMap(UInt16.init).flatMap { $0 > 0 ? $0 : nil } ?? PTPIP.port
+        return Response(host: host, usn: usn, port: port)
     }
 }

@@ -14,6 +14,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
+import local.zve10viewer.settings.WiFiAddress
 import local.zve10viewer.ui.App
 
 class MainActivity : ComponentActivity() {
@@ -81,13 +82,14 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Только отладочная сборка: прокси стенда (scripts/badnet.py) между программой и камерой, например
-     * `adb shell am start -n local.zve10viewer/.MainActivity --es ptpipHost 192.168.1.123
-     * --es linkCheckUrl http://192.168.1.123:15798/link`. Релизная сборка эти параметры не читает.
+     * Только отладочная сборка: прокси стенда (scripts/badnet.py) или виртуальная камера между программой и камерой,
+     * например `adb shell am start -n local.zve10viewer/.MainActivity --es ptpipHost 192.168.1.123
+     * --es linkCheckUrl http://192.168.1.123:15798/link`; с портом — `--es ptpipHost 192.168.1.123:15741`. Релизная сборка
+     * эти параметры не читает.
      */
     private fun applyDebugExtras(intent: Intent?) {
         if (!BuildConfig.DEBUG || intent == null) return
-        val host = intent.getStringExtra(EXTRA_PTPIP_HOST)?.trim()?.takeIf { it.isNotEmpty() }
+        val host = intent.getStringExtra(EXTRA_PTPIP_HOST)?.let(WiFiAddress::parse)
         val linkCheck = intent.getStringExtra(EXTRA_LINK_CHECK_URL)?.trim()?.takeIf { it.isNotEmpty() }
         if (host != null || linkCheck != null) controller.setDebugTarget(host, linkCheck)
         // поворот экрана для проверки без настроек системы: только своё окно, `--es orientation portrait|landscape|auto`

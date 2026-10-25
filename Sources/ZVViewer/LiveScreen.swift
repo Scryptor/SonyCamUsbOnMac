@@ -304,7 +304,7 @@ private struct StatusPill: View {
             PillButton(info: .connection, screen: screen) {
                 HStack(spacing: 6) {
                     Circle().fill(controller.phase == .ready ? .green : .orange).frame(width: 8, height: 8)
-                    Text("\(controller.deviceInfo?.model ?? "Камера") · \(controller.transportLabel)")
+                    Text("\(controller.currentCameraName) · \(controller.transportLabel)")
                 }
             } popover: {
                 ConnectionInfo(controller: controller, screen: screen)
@@ -378,6 +378,9 @@ private struct ConnectionInfo: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            // какие камеры есть и к какой подключиться — сверху; ниже — о текущем подключении
+            CameraList(controller: controller)
+            Divider()
             Text("Подключение по \(controller.transportLabel)").font(.headline)
             Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
                 if let info = controller.deviceInfo {

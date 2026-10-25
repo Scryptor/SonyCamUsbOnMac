@@ -175,7 +175,8 @@ final class AutomationServer {
         case let .setPreference(key, value):
             if let problem = setPreference(key, value) { return problem }
         case .pairWiFi:
-            guard controller.phase == .searching else { return "camera is already connected" }
+            // как «Сопрячь новую камеру…»: при камере на связи сеанс с ней закрывается
+            guard !controller.isRecording else { return "recording" }
             controller.startPairing()
         case .cancelPairing:
             controller.cancelPairing()
@@ -288,6 +289,23 @@ final class AutomationServer {
         case .closeSavePreset:
             screen.presetSaving = false
             screen.presetNaming = false
+        case let .selectCamera(id):
+            guard let entry = controller.cameras.first(where: { $0.id == id }) else { return "no camera \(id)" }
+            guard entry.state != .current else { return "camera \(id) is current" }
+            guard !controller.isRecording else { return "recording" }
+            controller.selectCamera(id)
+        case let .renameCamera(id, name):
+            guard controller.roster.camera(id) != nil else { return "no known camera \(id)" }
+            controller.renameCamera(id, to: name)
+        case let .forgetCamera(id):
+            guard controller.roster.camera(id) != nil else { return "no known camera \(id)" }
+            guard id != controller.currentCameraID else { return "camera \(id) is current" }
+            controller.forgetCamera(id)
+        case let .pairCamera(id):
+            guard controller.cameras.first(where: { $0.id == id })?.endpoint != nil else { return "no Wi-Fi camera \(id)" }
+            controller.pairCamera(id)
+        case .searchCameras:
+            Task { await controller.searchCameras() }
         }
         return nil
     }
@@ -462,6 +480,24 @@ final class AutomationServer {
             ] as [String: Any],
             "link": linkState(),
             "cameraDestination": controller.properties[SonyProp.stillImageStoreDestination]?.current.intValue ?? NSNull(),
+            "cameras": controller.cameras.map { entry in
+                var item: [String: Any] = ["id": entry.id, "name": entry.name, "model": entry.model, "state": entry.state.rawValue,
+                                           "stateLabel": entry.stateLabel, "detail": entry.detail, "paired": entry.paired,
+                                           "known": entry.knownID != nil]
+                switch entry.link {
+                case .usb?: item["link"] = "usb"
+                case .wifi?: item["link"] = "wifi"
+                case nil: item["link"] = NSNull()
+                }
+                if let endpoint = entry.endpoint {
+                    item["host"] = endpoint.host
+                    item["port"] = Int(endpoint.port)
+                }
+                return item
+            },
+            "currentCamera": controller.currentCameraID ?? NSNull(),
+            "cameraName": controller.currentCameraName,
+            "pairing": controller.isPairing,
             "presetMode": controller.presetMode.rawValue,
             "presets": controller.presets.map { preset in
                 ["name": preset.name,

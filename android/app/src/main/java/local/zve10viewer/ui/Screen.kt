@@ -10,6 +10,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -292,7 +294,10 @@ private fun WaitingScreen(controller: CameraController, screen: ScreenState, not
     // настройки (Wi-Fi, «Забыть») нужны и без камеры: иначе выключенный Wi-Fi не включить без кабеля
     var settingsOpen by remember { mutableStateOf(false) }
     Box(Modifier.fillMaxSize()) {
-    Column(Modifier.fillMaxSize().padding(48.dp), verticalArrangement = Arrangement.Center) {
+    // со списком камер может не поместиться — тогда прокручивается; помещается — по центру, как раньше
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+    Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).heightIn(min = maxHeight).padding(48.dp),
+        verticalArrangement = Arrangement.Center) {
         Text(
             if (notPcRemote) "Камера подключена, но не в режиме PC Remote" else "Подключите камеру",
             color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.SemiBold,
@@ -329,10 +334,10 @@ private fun WaitingScreen(controller: CameraController, screen: ScreenState, not
                             .clickable { if (pairing) controller.cancelPairing() else controller.startPairing() }
                             .padding(horizontal = 18.dp, vertical = 12.dp))
                     if (pairing) CircularProgressIndicator(Modifier.size(22.dp), color = Color.White, strokeWidth = 2.dp)
-                    val name = controller.prefs.wifiCameraName
-                    if (!pairing && controller.prefs.wifiEnabled && name != null) {
+                    val searching = controller.wifiSearchLabel
+                    if (!pairing && controller.prefs.wifiEnabled && searching != null) {
                         CircularProgressIndicator(Modifier.size(18.dp), color = Secondary, strokeWidth = 2.dp)
-                        Text("Ищу $name в сети…", color = Secondary, fontSize = 16.sp)
+                        Text(searching, color = Secondary, fontSize = 16.sp)
                     }
                 }
                 controller.wifiStatus?.let { Text(it, color = Color(0xFFFF9F0A), fontSize = 16.sp, modifier = Modifier.padding(top = 10.dp)) }
@@ -341,10 +346,16 @@ private fun WaitingScreen(controller: CameraController, screen: ScreenState, not
                 }
             }
         }
+        // знакомые и видимые камеры — выбрать, к какой подключаться; сопряжение новой — кнопка выше
+        if (controller.cameraEntries.isNotEmpty()) {
+            Spacer(Modifier.height(24.dp))
+            CameraList(controller, Modifier.widthIn(max = 640.dp), pairButton = false, titleSize = 22.sp)
+        }
         controller.message?.let {
             Spacer(Modifier.height(18.dp))
             Text(it, color = Secondary, fontSize = 17.sp)
         }
+    }
     }
     Box(
         Modifier.align(Alignment.TopStart).padding(18.dp).size(44.dp).background(PanelLight, RoundedCornerShape(9.dp))
@@ -680,7 +691,7 @@ private fun StatusPill(controller: CameraController, screen: ScreenState) {
         val ready = controller.phase == CameraController.Phase.ready
         Box(Modifier.size(10.dp).background(if (ready) Color(0xFF34C759) else Color(0xFFFF9F0A), CircleShape))
         // касание — подсказка: адреса и сигнал / что это за кадры
-        PillText("${controller.deviceInfo?.model ?: "Камера"} · ${transportLabel(controller)}",
+        PillText("${controller.cameraName} · ${transportLabel(controller)}",
             Modifier.clickable { screen.togglePillInfo(PillInfo.connection) })
         // превью снижено из-за слабого сигнала — видно сразу, рядом с частотой
         val reduced = if (controller.liveViewQuality == LiveViewQuality.low) " · 360p" else ""
@@ -737,6 +748,8 @@ private fun PillInfoCard(controller: CameraController, info: PillInfo) {
                         details = controller.connectionDetails()
                     }
                 }
+                CameraList(controller)
+                Box(Modifier.fillMaxWidth().height(1.dp).background(PanelLight))
                 InfoTitle("Подключение по ${transportLabel(controller)}")
                 controller.deviceInfo?.let { InfoRow("Камера", "${it.model}, прошивка ${it.firmware}") }
                 if (wifi) {
@@ -1078,7 +1091,6 @@ private fun SettingsPanel(controller: CameraController, modifier: Modifier, onDe
     var autoHideSeconds by remember { mutableIntStateOf(prefs.autoHideSeconds) }
     var wifiEnabled by remember { mutableStateOf(prefs.wifiEnabled) }
     var adaptiveQuality by remember { mutableStateOf(controller.adaptiveQuality) }
-    var wifiCamera by remember { mutableStateOf(prefs.wifiCameraName?.let { name -> prefs.wifiHost?.let { "$name · $it" } ?: name }) }
     // переключатель вибрации — только если у планшета есть мотор
     val context = LocalContext.current
     val hasVibrator = remember { Haptics.deviceHasVibrator(context) }
@@ -1150,17 +1162,18 @@ private fun SettingsPanel(controller: CameraController, modifier: Modifier, onDe
             controller.applyAdaptiveQuality(it)
         }
         Text("1024×576 → 640×360, только когда сигнала не хватает", color = Secondary, fontSize = 13.sp)
-        val cameraName = wifiCamera
-        if (cameraName != null) {
+        val paired = controller.cameraBook.cameras.filter { it.paired }
+        if (paired.isNotEmpty()) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Камера: $cameraName", color = Color.White, fontSize = 16.sp, modifier = Modifier.weight(1f))
-                Text("Забыть", color = Accent, fontSize = 16.sp, modifier = Modifier.clickable {
-                    controller.forgetWiFiCamera()
-                    wifiCamera = null
-                }.padding(8.dp))
+                Text((if (paired.size == 1) "Сопряжена: " else "Сопряжены: ") + paired.joinToString(", ") { it.name },
+                    color = Color.White, fontSize = 16.sp, modifier = Modifier.weight(1f))
+                Text("Забыть сопряжение", color = Accent, fontSize = 16.sp,
+                    modifier = Modifier.clickable { controller.forgetPairing() }.padding(8.dp))
             }
+            Text("Камеры перестанут узнавать планшет — их придётся сопрячь заново; имена в списке камер останутся.",
+                color = Secondary, fontSize = 13.sp)
         } else {
-            Text("Камера ещё не подключалась по Wi-Fi", color = Secondary, fontSize = 14.sp)
+            Text("С камерами по Wi-Fi ещё не сопрягались", color = Secondary, fontSize = 14.sp)
         }
         Spacer(Modifier.height(8.dp))
         Row(Modifier.fillMaxWidth().clickable(onClick = onPresets).padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {

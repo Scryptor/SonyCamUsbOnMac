@@ -113,9 +113,20 @@ class Prefs(context: Context) {
         get() = prefs.getString("wifiHost", null)
         set(value) = prefs.edit().putString("wifiHost", value).apply()
 
+    /** Имя камеры, с которой сопряжены, — память прежних версий на одну камеру; пишется и теперь, для них. */
     var wifiCameraName: String?
         get() = prefs.getString("wifiCameraName", null)
         set(value) = prefs.edit().putString("wifiCameraName", value).apply()
+
+    /** Камеры, которые программа знает (JSON, см. CameraBook); null — ключа нет: память ещё прежняя, на одну камеру. */
+    var cameras: String?
+        get() = prefs.getString("cameras", null)
+        set(value) = prefs.edit().putString("cameras", value).apply()
+
+    /** id камеры, к которой подключались последней. */
+    var preferredCamera: String?
+        get() = prefs.getString("preferredCamera", null)
+        set(value) = prefs.edit().putString("preferredCamera", value).apply()
 
     /** Снижать качество превью по Wi-Fi (1024×576 → 640×360), только когда сигнала на полное не хватает. */
     var adaptiveLiveViewQuality: Boolean

@@ -87,17 +87,20 @@ struct SettingsView: View {
             }
             Section("Wi-Fi") {
                 Toggle("Подключаться по Wi-Fi, когда камеры нет на кабеле", isOn: $wifiEnabled)
-                LabeledContent("Камера:") {
-                    if let name = wifiCameraName {
-                        HStack {
-                            Text(wifiHost.map { "\(name) · \($0)" } ?? name)
-                            Button("Забыть") { controller.forgetWiFiCamera() }
-                        }
+                LabeledContent("Сопряжённые камеры:") {
+                    let paired = controller.roster.known.filter(\.paired).map(\.name)
+                    if paired.isEmpty {
+                        Text("пока нет").foregroundStyle(.secondary)
                     } else {
-                        Text("ещё не подключалась по Wi-Fi").foregroundStyle(.secondary)
+                        HStack {
+                            Text(paired.joined(separator: ", ")).lineLimit(2)
+                            Button("Забыть сопряжение") { controller.forgetWiFiCamera() }
+                                .help("У программы будет новое имя для камер — все придётся сопрячь заново. Имена камер останутся")
+                        }
                     }
                 }
-                Text("Сопряжение — на экране ожидания: «Сопрячь с камерой…». Камера помнит его, пока её не сбросят.")
+                Text("Сопряжение — на экране ожидания («Сопрячь с камерой…») или в списке камер: щелчок по имени камеры в "
+                     + "строке состояния. Камера помнит его, пока её не сбросят.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Toggle("Снижать качество превью при слабом Wi-Fi", isOn: $wifiAdaptiveQuality)

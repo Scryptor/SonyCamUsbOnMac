@@ -62,6 +62,7 @@ import local.zve10viewer.ptp.PtpIpRejected
 import local.zve10viewer.ptp.PtpTransport
 import local.zve10viewer.ptp.PtpType
 import local.zve10viewer.ptp.PtpValue
+import local.zve10viewer.ptp.Ssdp
 import local.zve10viewer.ptp.TransportException
 import local.zve10viewer.session.CameraSession
 import local.zve10viewer.session.CapturePhase
@@ -70,6 +71,12 @@ import local.zve10viewer.session.LiveViewQualityPolicy
 import local.zve10viewer.session.LiveViewSample
 import local.zve10viewer.session.RecordingToggle
 import local.zve10viewer.session.SessionException
+import local.zve10viewer.settings.CameraBook
+import local.zve10viewer.settings.CameraEntry
+import local.zve10viewer.settings.CameraLink
+import local.zve10viewer.settings.CameraSighting
+import local.zve10viewer.settings.CameraState
+import local.zve10viewer.settings.CurrentCamera
 import local.zve10viewer.settings.CaptureMode
 import local.zve10viewer.settings.FileNaming
 import local.zve10viewer.settings.LumaHistogram
@@ -89,6 +96,7 @@ import local.zve10viewer.settings.SettingID
 import local.zve10viewer.settings.SettingOptions
 import local.zve10viewer.settings.ValueFormatter
 import local.zve10viewer.settings.WhiteBalanceTemperature
+import local.zve10viewer.settings.WiFiAddress
 import local.zve10viewer.settings.WriteCoalescer
 import local.zve10viewer.settings.apply
 import local.zve10viewer.settings.restore
@@ -293,6 +301,25 @@ class CameraController(private val context: Context, private val scope: Coroutin
     /** Что сейчас с Wi-Fi: «ищу камеру», «камера найдена, нужно сопряжение» и т.п. */
     var wifiStatus by mutableStateOf<String?>(null)
         private set
+    /** Камеры, которые программа знает, и та, к которой подключались последней. */
+    var cameraBook by mutableStateOf(CameraBook.load(prefs.cameras, prefs.preferredCamera, prefs.wifiCameraName, prefs.wifiHost))
+        private set
+    /** Кого видно сейчас: по кабелю — устройства на шине, по Wi-Fi — ответы на поиск (30 с после последнего). */
+    private var usbSightings by mutableStateOf<List<CameraSighting>>(emptyList())
+    private var wifiSightings by mutableStateOf<Map<WiFiAddress, CameraSighting>>(emptyMap())
+    /** С какой камерой сеанс (подключение, тихое восстановление) и какая это камера из знакомых. */
+    private var currentLink by mutableStateOf<CameraLink?>(null)
+    private var currentCameraId by mutableStateOf<String?>(null)
+    /**
+     * Камера, которую выбрали в списке (или «Сопрячь» у неё): подключаемся к ней, а не как обычно, — по Wi-Fi даже когда на
+     * кабеле есть другая. Подключились или попытка не удалась — выбора больше нет, дальше как обычно.
+     */
+    private var choice by mutableStateOf<CameraLink?>(null)
+    private var choiceName: String? = null
+    /** Сопряжение только с этой камерой («Сопрячь» в списке); null — с любой («Сопрячь новую камеру…»). */
+    private var pairingTarget: WiFiAddress? = null
+    /** Поиск в сети, пока открыт список камер. */
+    private var searchJob: Job? = null
     /** Провал связи по Wi-Fi: ждём ответа, а ничего не приходит. Сеанс держим, кадр остаётся на экране. */
     var linkOutage by mutableStateOf(false)
         private set
@@ -327,8 +354,8 @@ class CameraController(private val context: Context, private val scope: Coroutin
         debugCommandFlow.tryEmit(command)
     }
 
-    /** Отладка (только debug-сборка): прокси стенда вместо камеры — только этот адрес, без памяти и поиска. */
-    var debugHost: String? = null
+    /** Отладка (только debug-сборка): прокси стенда или виртуальная камера — только этот адрес, без памяти и поиска. */
+    var debugHost: WiFiAddress? = null
         private set
     /** Отладка: связь во время провала проверять HTTP-запросом сюда вместо ping (ping ответил бы сам прокси). */
     var debugLinkCheckUrl: String? = null
@@ -378,7 +405,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
     private var quietFrom = 0L
 
     /** Тихое восстановление оборвавшегося сеанса по Wi-Fi. */
-    private class Reconnect(val host: String, val cause: LinkLoss, val startedAt: Long) {
+    private class Reconnect(val address: WiFiAddress, val cause: LinkLoss, val startedAt: Long) {
         var attempts = 0
     }
     private var reconnect: Reconnect? = null
@@ -420,7 +447,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
     /** Последний обрыв: почему и когда — виден и на экране ожидания. */
     private var lastLoss: Pair<String, Long>? = null
     /** Что нашёл последний поиск в сети: в журнал — только когда это меняется, а не каждые 5 с. */
-    private var lastFound: List<String>? = null
+    private var lastFound: List<WiFiAddress>? = null
 
     fun property(id: SettingID): SonyProperty? = properties[id.code]
 
@@ -1123,6 +1150,153 @@ class CameraController(private val context: Context, private val scope: Coroutin
         }
     }
 
+    // MARK: - Камеры
+
+    /** Список камер: текущая (или та, к которой подключаемся), видимые, знакомые невидимые. */
+    val cameraEntries: List<CameraEntry>
+        get() {
+            // сопряжение с камерой из списка: она «сопрягаю…», а не текущая
+            val target = pairingTarget?.takeIf { isPairing }
+            // камера на кабеле не в PC Remote — не «на связи»: её можно выбрать снова
+            val link = currentLink?.takeIf { phase != Phase.notPcRemote }
+                ?: choice?.takeIf { transportKind == null && (target == null || it != CameraLink.WiFi(target)) }
+            val current = link?.let {
+                val live = it == currentLink
+                CurrentCamera(it, if (live) currentCameraId else null, live && phase == Phase.ready, if (live) deviceInfo?.model else null)
+            }
+            val entries = cameraBook.entries(usbSightings + wifiSightings.values, current, System.currentTimeMillis())
+            return if (target == null) entries
+            else entries.map { if (it.state != CameraState.current && it.address == target) it.copy(pairing = true) else it }
+        }
+
+    /** Имя текущей камеры для строки состояния: как назвали; незнакомая — модель. */
+    val cameraName: String get() = currentCameraId?.let(cameraBook::find)?.name ?: deviceInfo?.model ?: "Камера"
+
+    /**
+     * Что ищем в сети, пока камеры нет, — для экрана ожидания, без модели: программа не только для одной камеры.
+     * Сопряжённых нет — null.
+     */
+    val wifiSearchLabel: String?
+        get() = when (cameraBook.cameras.count { it.paired }) {
+            0 -> null
+            1 -> "Ищу камеру в сети…"
+            else -> "Ищу камеры в сети…"
+        }
+
+    /**
+     * Камеру выбрали в списке: текущая — ничего; несопряжённая — сопряжение с ней; иначе связь с текущей закрывается и
+     * программа подключается к выбранной (невидимую знакомую — один раз по последнему адресу). Пока идёт запись — нет.
+     */
+    fun selectCamera(id: String) {
+        val entry = cameraEntries.firstOrNull { it.id == id } ?: return
+        if (entry.state == CameraState.current) return
+        if (entry.state == CameraState.needsPairing) return pairCamera(id)
+        val link = entry.link ?: entry.known?.address?.let { CameraLink.WiFi(it) } ?: return
+        if (!freeForSwitch()) return
+        isPairing = false
+        pairingTarget = null
+        wifiStatus = null
+        choose(link, entry.name)
+    }
+
+    /** «Сопрячь» в строке камеры: сопряжение только с ней — она же и выбрана. */
+    fun pairCamera(id: String) {
+        val entry = cameraEntries.firstOrNull { it.id == id } ?: return
+        val address = (entry.link as? CameraLink.WiFi)?.address ?: entry.known?.address ?: return
+        if (!freeForSwitch()) return
+        pairingTarget = address
+        isPairing = true
+        wifiStatus = "Камера найдена ($address). Включите на камере PC Remote Function → Pairing и подтвердите сопряжение"
+        choose(CameraLink.WiFi(address), entry.name)
+    }
+
+    fun renameCamera(id: String, name: String) = updateBook(cameraBook.renamed(id, name))
+
+    /** «Забыть»: у текущей нельзя — она на связи. */
+    fun forgetCamera(id: String) {
+        if (id == currentCameraId) return
+        updateBook(cameraBook.forgotten(id))
+    }
+
+    /** Список камер на экране: поиск в сети сейчас (экран зовёт сразу и раз в 10 с, пока список открыт). */
+    fun searchCameras() {
+        if (searchJob?.isActive == true || !foreground) return
+        val network = wifiNetwork
+        searchJob = scope.launch {
+            noteSearch(withContext(Dispatchers.IO) { WiFiDiscovery.search(network = network) })
+        }
+    }
+
+    /** Перед переключением камеры: пока идёт запись — нельзя; связь есть — закрываем. */
+    private fun freeForSwitch(): Boolean {
+        if (recordingStartedAt != null) {
+            showStatus("Идёт запись — остановите её, чтобы переключить камеру")
+            return false
+        }
+        closeConnectingSocket()
+        if (transportKind != null || reconnect != null || device != null) teardown()
+        failures = 0
+        retryAt = 0
+        return true
+    }
+
+    private fun choose(link: CameraLink, name: String) {
+        journal("выбрана камера «$name» (${(link as? CameraLink.WiFi)?.address ?: "по кабелю"})")
+        choice = link
+        choiceName = name
+        message = "Подключаю «$name»…"
+        showStatus("Подключаю «$name»…")
+        when (link) {
+            is CameraLink.Usb -> findCamera()
+            is CameraLink.WiFi -> wifiWake.trySend(Unit)
+        }
+    }
+
+    /** Ответы на поиск — в список: камера по Wi-Fi видна 30 с после последнего ответа. */
+    private fun noteSearch(found: List<Ssdp.Response>) {
+        if (found.isEmpty()) return
+        val now = System.currentTimeMillis()
+        wifiSightings = wifiSightings + found.associate { r ->
+            val address = WiFiAddress(r.host, r.port)
+            address to CameraSighting(CameraLink.WiFi(address), null, CameraBook.usnFingerprint(r.usn), now)
+        }
+    }
+
+    /** Раз в полсекунды: кто на шине USB и кто по Wi-Fi давно не отвечал на поиск. */
+    private fun tickCameras() {
+        val now = System.currentTimeMillis()
+        val usb = usbManager.deviceList.values.filter(::isSonyCamera)
+            .map { CameraSighting(CameraLink.Usb(it.deviceName), it.productName, usbFingerprint(it), now) }
+        if (usb.map { it.link to it.fingerprint } != usbSightings.map { it.link to it.fingerprint }) usbSightings = usb
+        if (wifiSightings.values.any { now - it.seenAt >= CameraBook.WIFI_VISIBLE_MS }) {
+            wifiSightings = wifiSightings.filterValues { now - it.seenAt < CameraBook.WIFI_VISIBLE_MS }
+        }
+    }
+
+    /** Отпечаток серийного номера USB — только с доступом к камере: без него Android номер не отдаёт. */
+    private fun usbFingerprint(camera: UsbDevice): String? =
+        if (!usbManager.hasPermission(camera)) null
+        else runCatching { camera.serialNumber }.getOrNull()?.trim()?.takeIf { it.isNotEmpty() }?.let(CameraBook::serialFingerprint)
+
+    /** Камера подключилась (пришёл DeviceInfo): запомнить её, адрес и сопряжение, сделать предпочтённой. */
+    private fun noteCameraConnected(info: DeviceInfo?) {
+        val link = currentLink ?: return
+        val prints = when (link) {
+            is CameraLink.Usb -> listOfNotNull(device?.let(::usbFingerprint))
+            is CameraLink.WiFi -> listOfNotNull(wifiSightings[link.address]?.fingerprint)
+        }
+        val (book, id) = cameraBook.connected(info?.serial, info?.model ?: "Камера", link, prints, System.currentTimeMillis())
+        updateBook(book)
+        currentCameraId = id
+    }
+
+    private fun updateBook(book: CameraBook) {
+        if (book == cameraBook) return
+        cameraBook = book
+        prefs.cameras = CameraBook.toJson(book.cameras)
+        prefs.preferredCamera = book.preferred
+    }
+
     // MARK: - Подключение
 
     fun start() {
@@ -1142,7 +1316,10 @@ class CameraController(private val context: Context, private val scope: Coroutin
             while (isActive) {
                 // по Wi-Fi идёт сеанс — кабель не трогаем: камера в режиме Wi-Fi на кабеле (например, на зарядке) видна
                 // как накопитель и PC Remote по USB не даст; кабельную камеру подхватим, когда Wi-Fi закончится
-                if (foreground && device == null && transportKind == null && System.currentTimeMillis() >= retryAt) findCamera()
+                // камеру по Wi-Fi выбрали в списке или сопрягают — кабель не перебивает
+                if (foreground && device == null && transportKind == null && System.currentTimeMillis() >= retryAt &&
+                    choice !is CameraLink.WiFi && !isPairing) findCamera()
+                tickCameras()
                 tickFrameStats()
                 tickShownStats()
                 tickTabletBattery()
@@ -1183,7 +1360,9 @@ class CameraController(private val context: Context, private val scope: Coroutin
         backgroundJob?.cancel()
         quietFrom = System.currentTimeMillis()
         liveViewWanted.value = true
-        if (device == null && transportKind == null && System.currentTimeMillis() >= retryAt) findCamera()
+        if (device == null && transportKind == null && System.currentTimeMillis() >= retryAt && choice !is CameraLink.WiFi && !isPairing) {
+            findCamera()
+        }
         wifiWake.trySend(Unit)
     }
 
@@ -1203,8 +1382,8 @@ class CameraController(private val context: Context, private val scope: Coroutin
         }
     }
 
-    /** Отладка (только debug-сборка): прокси стенда между программой и камерой. */
-    fun setDebugTarget(host: String?, linkCheckUrl: String?) {
+    /** Отладка (только debug-сборка): прокси стенда или виртуальная камера между программой и камерой. */
+    fun setDebugTarget(host: WiFiAddress?, linkCheckUrl: String?) {
         debugHost = host
         debugLinkCheckUrl = linkCheckUrl
         journal("отладка: камера — ${host ?: "как обычно"}, проверка связи — ${linkCheckUrl ?: "ping"}")
@@ -1266,8 +1445,16 @@ class CameraController(private val context: Context, private val scope: Coroutin
     private fun isSonyCamera(device: UsbDevice): Boolean = device.vendorId == Sony.VENDOR_ID &&
         (0 until device.interfaceCount).any { device.getInterface(it).interfaceClass == UsbConstants.USB_CLASS_STILL_IMAGE }
 
+    /** Камера на кабеле: выбранная в списке, иначе предпочтённая (если её узнать по серийному номеру USB), иначе первая. */
     private fun findCamera() {
-        val camera = usbManager.deviceList.values.firstOrNull(::isSonyCamera) ?: return
+        val cameras = usbManager.deviceList.values.filter(::isSonyCamera)
+        val chosen = (choice as? CameraLink.Usb)?.let { c -> cameras.firstOrNull { it.deviceName == c.device } }
+        // выбранной уже нет на шине — дальше как обычно
+        if (choice is CameraLink.Usb && chosen == null) choice = null
+        val preferred = cameraBook.preferred?.let(cameraBook::find)?.let { known ->
+            cameras.firstOrNull { camera -> usbFingerprint(camera)?.let(known::knows) == true }
+        }
+        val camera = chosen ?: preferred ?: cameras.firstOrNull() ?: return
         device = camera
         if (usbManager.hasPermission(camera)) {
             connect(camera)
@@ -1289,6 +1476,8 @@ class CameraController(private val context: Context, private val scope: Coroutin
                     } else {
                         message = "Нет разрешения на доступ к камере. Отключите и снова подключите кабель."
                         journal("USB: доступ к камере не разрешили")
+                        // выбирали её в списке — выбора больше нет: «подключаю…» не висит
+                        if (choice is CameraLink.Usb) choice = null
                         device = null
                         phase = Phase.searching
                         retryAt = Long.MAX_VALUE
@@ -1319,6 +1508,9 @@ class CameraController(private val context: Context, private val scope: Coroutin
     private fun connect(camera: UsbDevice) {
         phase = Phase.connecting
         message = null
+        currentLink = CameraLink.Usb(camera.deviceName)
+        currentCameraId = null
+        if (choice is CameraLink.Usb) choice = null
         journal("USB: подключаюсь к камере…")
         val usbInterface = (0 until camera.interfaceCount).map(camera::getInterface)
             .firstOrNull { it.interfaceClass == UsbConstants.USB_CLASS_STILL_IMAGE } ?: camera.getInterface(0)
@@ -1369,6 +1561,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
             try {
                 session.start(this)
                 deviceInfo = session.deviceInfo
+                noteCameraConnected(session.deviceInfo)
                 phase = Phase.settling
                 journal("рукопожатие прошло: ${session.deviceInfo?.model ?: "камера"}, прошивка ${session.deviceInfo?.firmware ?: "?"} — " +
                     "пошёл live view")
@@ -1402,30 +1595,43 @@ class CameraController(private val context: Context, private val scope: Coroutin
 
     // MARK: - Wi-Fi
 
-    /** Начать сопряжение: программа ищет камеру и стучится, пока на камере включено Pairing. */
+    /**
+     * «Сопрячь новую камеру…»: программа ищет камеру и стучится, пока на камере включено Pairing, — сначала к
+     * несопряжённым. Связь с камерой уже есть — она закрывается: двух сеансов сразу не бывает. Пока идёт запись — нельзя.
+     */
     fun startPairing() {
+        if (!freeForSwitch()) return
+        pairingTarget = null
+        if (choice is CameraLink.WiFi) choice = null
         isPairing = true
         wifiStatus = "Ищу камеру в сети…"
+        wifiWake.trySend(Unit)
     }
 
     fun cancelPairing() {
         isPairing = false
+        // «Сопрячь» у одной камеры — это и её выбор: отменили — дальше как обычно
+        pairingTarget?.let { if (choice == CameraLink.WiFi(it)) choice = null }
+        pairingTarget = null
         wifiStatus = null
         // идущая попытка ждёт подтверждения на камере до минуты — обрываем её
         closeConnectingSocket()
     }
 
     /**
-     * Забыть камеру: новый GUID, и сопряжение в камере к программе больше не относится — сама она подключаться
-     * не будет, пока не сопрячь заново.
+     * «Забыть сопряжение»: новый GUID — ни одна камера программу больше не знает и сама подключаться не будет, пока не
+     * сопрячь заново; имена камер в списке остаются.
      */
-    fun forgetWiFiCamera() {
+    fun forgetPairing() {
         prefs.wifiHost = null
         prefs.wifiCameraName = null
         identity = PtpIpIdentity.reset(context)
+        updateBook(cameraBook.unpairedAll())
         wifiPolicy.connected()
         wifiPolicy.sessionReady()
         wifiStatus = null
+        if (choice is CameraLink.WiFi) choice = null
+        pairingTarget = null
         closeConnectingSocket()
         if (transportKind == TransportKind.wifi) teardown()
     }
@@ -1437,6 +1643,10 @@ class CameraController(private val context: Context, private val scope: Coroutin
     /** Нужна ли ещё связь по Wi-Fi: сеанса нет (камера на кабеле не в PC Remote — тоже), Wi-Fi включён или идёт сопряжение. */
     private val wifiWanted: Boolean
         get() {
+            // камеру по Wi-Fi выбрали в списке или сопрягают — нужна, даже когда на кабеле есть другая
+            if (choice is CameraLink.WiFi || isPairing) {
+                return transportKind == null || (phase == Phase.notPcRemote && transportKind == TransportKind.usb)
+            }
             // камера на кабеле подключается или ждёт повтора — кабель важнее сети; доступ к ней запретили
             // или она не в PC Remote по USB (например, на зарядке в режиме Wi-Fi) — можно по сети
             val cableWaiting = retryAt != Long.MAX_VALUE && usbManager.deviceList.values.any(::isSonyCamera)
@@ -1456,24 +1666,35 @@ class CameraController(private val context: Context, private val scope: Coroutin
         dropped,
     }
 
-    /** Раз в секунду (и сразу, когда появилась сеть): если связи нет — ищем камеру в сети и подключаемся. */
+    /**
+     * Раз в секунду (и сразу, когда появилась сеть или выбрали камеру): если связи нет — ищем камеру в сети и подключаемся.
+     * Выбранная в списке — только она; иначе предпочтённая по последнему адресу, потом найденные сопряжённые.
+     */
     private suspend fun wifiTick() {
         // в фоне не подключаемся: сеанс, закрытый через минуту в фоне, откроется, когда программа снова на экране
         if (!foreground) return
-        if (!wifiWanted || wifiBusy || !wifiPolicy.mayAttempt(prefs.wifiEnabled, isPairing, System.currentTimeMillis())) return
+        val chosen = (choice as? CameraLink.WiFi)?.address
+        if (!wifiWanted || wifiBusy) return
+        // выбранную в списке камеру, как и сопряжение, пауза после обрыва не держит
+        if (chosen == null && !wifiPolicy.mayAttempt(prefs.wifiEnabled, isPairing, System.currentTimeMillis())) return
         wifiBusy = true
         try {
-            // отладка: прокси стенда вместо камеры — только этот адрес, без памяти и поиска
-            debugHost?.let { host ->
-                if (wifiPolicy.maySendInit(prefs.wifiCameraName != null, isPairing)) {
-                    tryWiFi(host, discovered = false, remember = false)
+            if (chosen != null) {
+                tryChosen(chosen)
+                return
+            }
+            // отладка: прокси стенда или виртуальная камера — только этот адрес, без памяти и поиска
+            debugHost?.let { address ->
+                // как в прежних версиях: сопряжена хоть одна камера — стучимся (виртуальная примет любой GUID)
+                if (wifiPolicy.maySendInit(cameraBook.isPaired(address) || cameraBook.cameras.any { it.paired }, isPairing)) {
+                    tryWiFi(address, discovered = false, remember = false)
                 } else if (wifiStatus == null) {
-                    wifiStatus = "Отладка: камера за $host — нажмите «Сопрячь с камерой», чтобы подключаться по Wi-Fi"
+                    wifiStatus = "Отладка: камера за $address — нажмите «Сопрячь с камерой», чтобы подключаться по Wi-Fi"
                 }
                 return
             }
-            // сначала — последний адрес камеры: так подключение после перерыва занимает секунду, а не поиск
-            val last = if (isPairing || prefs.wifiCameraName == null) null else prefs.wifiHost
+            // сначала — предпочтённая камера по последнему адресу: так подключение после перерыва занимает секунду, а не поиск
+            val last = if (isPairing) null else cameraBook.firstAddress()
             var lastFailed = false
             if (last != null) {
                 when (tryWiFi(last, discovered = false)) {
@@ -1482,38 +1703,46 @@ class CameraController(private val context: Context, private val scope: Coroutin
                     WiFiAttempt.failed -> lastFailed = true
                 }
             }
-            if (!wifiWanted) return
+            // пока стучались, камеру выбрали в списке — ею займётся следующий такт
+            if (!wifiWanted || choice is CameraLink.WiFi) return
             if (isPairing && wifiStatus == null) wifiStatus = "Ищу камеру в сети…"
             val network = wifiNetwork
-            val found = withContext(Dispatchers.IO) { WiFiDiscovery.search(network = network) }.map { it.host }
-            if (found != lastFound) {
-                journal(if (found.isEmpty()) "поиск в сети: камер не видно" else "поиск в сети: камера на ${found.joinToString(", ")}")
-                lastFound = found
+            val responses = withContext(Dispatchers.IO) { WiFiDiscovery.search(network = network) }
+            noteSearch(responses)
+            val found = responses.map { WiFiAddress(it.host, it.port) to CameraBook.usnFingerprint(it.usn) }
+            val addresses = found.map { it.first }
+            if (addresses != lastFound) {
+                journal(if (addresses.isEmpty()) "поиск в сети: камер не видно" else "поиск в сети: камера на ${addresses.joinToString(", ")}")
+                lastFound = addresses
             }
-            if (!wifiWanted) return
+            if (!wifiWanted || choice is CameraLink.WiFi) return
             if (found.isEmpty()) {
                 wifiPolicy.nothingFound()
                 wifiStatus = if (isPairing) "Камеру в сети не вижу. Проверьте, что она подключена к той же сети Wi-Fi" else null
                 return
             }
-            // сопряжение могло только что оказаться недействительным (камера отказала) — смотрим заново
-            val paired = prefs.wifiCameraName != null
-            // не сопряжены — не стучимся (камера в режиме Pairing показала бы чужой запрос), только подсказываем
-            if (!wifiPolicy.maySendInit(paired, isPairing)) {
+            // сопряжение — сначала несопряжённые (новая камера), потом остальные, как прежде; иначе — только сопряжённые:
+            // камера в режиме Pairing показала бы чужой запрос
+            val candidates = if (isPairing) {
+                found.sortedBy { (address, print) -> cameraBook.isPaired(address, print) }.map { it.first }
+            } else {
+                found.filter { (address, print) -> cameraBook.isPaired(address, print) }.map { it.first }
+            }
+            if (candidates.isEmpty()) {
                 if (wifiStatus == null) {
-                    wifiStatus = "В сети есть камера (${found[0]}) — нажмите «Сопрячь с камерой», чтобы подключаться по Wi-Fi"
+                    wifiStatus = "В сети есть камера (${addresses[0]}) — нажмите «Сопрячь с камерой», чтобы подключаться по Wi-Fi"
                 }
                 return
             }
             // камера видна по последнему адресу, но не ответила — это неудача к найденной камере
-            if (last != null && lastFailed && last in found) {
+            if (last != null && lastFailed && last in addresses) {
                 wifiPolicy.attemptFailed(discovered = true)
                 showStaleHintIfNeeded(last)
             }
-            for (host in found) {
-                if (host == last) continue
-                if (!wifiWanted) return
-                when (tryWiFi(host, discovered = true)) {
+            for (address in candidates) {
+                if (address == last) continue
+                if (!wifiWanted || choice is CameraLink.WiFi) return
+                when (tryWiFi(address, discovered = true)) {
                     WiFiAttempt.connected, WiFiAttempt.dropped -> return
                     WiFiAttempt.rejected, WiFiAttempt.failed -> Unit
                 }
@@ -1523,47 +1752,72 @@ class CameraController(private val context: Context, private val scope: Coroutin
         }
     }
 
-    private fun showStaleHintIfNeeded(host: String) {
+    /**
+     * Одна попытка к камере, выбранной в списке. Ждём подтверждения сопряжения на ней — пробуем на следующем такте;
+     * иначе выбора больше нет, дальше как обычно.
+     */
+    private suspend fun tryChosen(address: WiFiAddress) {
+        when (tryWiFi(address, discovered = false)) {
+            WiFiAttempt.connected, WiFiAttempt.dropped -> return
+            WiFiAttempt.rejected, WiFiAttempt.failed -> Unit
+        }
+        if (isPairing && pairingTarget == address) return
+        if (choice != CameraLink.WiFi(address)) return
+        choice = null
+        val name = choiceName ?: address.toString()
+        journal("выбранная камера «$name» не подключилась — дальше как обычно")
+        message = "«$name» не отвечает"
+    }
+
+    private fun showStaleHintIfNeeded(address: WiFiAddress) {
         if (!wifiPolicy.showsStaleHint || isPairing) return
-        wifiStatus = "Камера найдена ($host), но пока не отвечает — видимо, держит прошлое подключение. " +
+        wifiStatus = "Камера найдена ($address), но пока не отвечает — видимо, держит прошлое подключение. " +
             "Обычно это проходит за 1–2 минуты; если нет — выключите и снова включите на камере PC Remote"
     }
 
     /**
      * Одна попытка подключиться к камере по адресу. discovered — адрес найден поиском сейчас, а не взят из памяти;
-     * remember — запомнить адрес (адрес прокси отладки не запоминаем).
+     * remember — запомнить адрес для прежних версий (адрес прокси отладки не запоминаем).
      */
-    private suspend fun tryWiFi(host: String, discovered: Boolean, remember: Boolean = true): WiFiAttempt {
+    private suspend fun tryWiFi(address: WiFiAddress, discovered: Boolean, remember: Boolean = true): WiFiAttempt {
         val pairing = isPairing
-        if (pairing) wifiStatus = "Камера найдена ($host). Включите на камере PC Remote Function → Pairing и подтвердите сопряжение"
+        if (pairing) wifiStatus = "Камера найдена ($address). Включите на камере PC Remote Function → Pairing и подтвердите сопряжение"
         val me = identity ?: PtpIpIdentity.load(context).also { identity = it }
         // если корутину отменят, пока ждём камеру, готовое соединение иначе потерялось бы незакрытым
         val created = AtomicReference<PtpIpTransport?>()
         val network = wifiNetwork
         val linkCheck = debugLinkCheckUrl
         val started = System.currentTimeMillis()
-        journal("подключаюсь к $host" + (if (pairing) " (сопряжение)" else "") + "…")
+        journal("подключаюсь к $address" + (if (pairing) " (сопряжение)" else "") + "…")
         return try {
             // при сопряжении камера ждёт подтверждения на экране — ответа ждём дольше
             val (transport, name) = withContext(Dispatchers.IO) {
-                PtpIpTransport.connect(host, me, network, initTimeoutMs = if (pairing) 60_000 else 5000, linkCheckUrl = linkCheck,
-                    onSocket = { connectingSocket = it }).also { created.set(it.first) }
+                PtpIpTransport.connect(address.host, me, network, initTimeoutMs = if (pairing) 60_000 else 5000, linkCheckUrl = linkCheck,
+                    port = address.port, onSocket = { connectingSocket = it }).also { created.set(it.first) }
             }
             created.set(null)
-            // камера приняла программу — значит, сопряжены, даже если связь уже не нужна
-            if (remember) prefs.wifiHost = host
+            // камера приняла программу — значит, сопряжены, даже если связь уже не нужна. Прежние версии помнили одну камеру
+            // без порта: её адрес пишем и для них
+            if (remember && address.port == PtpIp.PORT) prefs.wifiHost = address.host
             prefs.wifiCameraName = name
-            // пока ждали, связь стала не нужна: подключили кабель, выключили Wi-Fi, отменили сопряжение
-            if (!wifiWanted || pairing != isPairing) {
+            // пока ждали, связь стала не нужна: подключили кабель, выключили Wi-Fi, отменили сопряжение, выбрали в списке
+            // другую камеру
+            val other = (choice as? CameraLink.WiFi)?.let { it.address != address } ?: false
+            if (!wifiWanted || pairing != isPairing || other) {
                 transport.close()
                 return WiFiAttempt.dropped
             }
             // камера на кабеле не в PC Remote — та попытка не нужна, закрываем её до сеанса по Wi-Fi
             if (phase == Phase.notPcRemote) teardown()
-            wifiDirect = PtpIp.isCameraAccessPoint(host)
+            wifiDirect = PtpIp.isCameraAccessPoint(address.host)
             wifiPolicy.connected()
             message = null
-            journal("подключился к $host ($name) за ${System.currentTimeMillis() - started} мс")
+            journal("подключился к $address ($name) за ${System.currentTimeMillis() - started} мс")
+            currentLink = CameraLink.WiFi(address)
+            currentCameraId = null
+            // выбранная камера на связи — дальше её ведёт сеанс, а не выбор
+            if (choice == CameraLink.WiFi(address)) choice = null
+            pairingTarget = null
             runSession(transport, TransportKind.wifi, onFailure = { wifiSessionStopped(it) }, onEnded = { wifiSessionStopped(null) })
             WiFiAttempt.connected
         } catch (e: PtpIpRejected) {
@@ -1571,18 +1825,18 @@ class CameraController(private val context: Context, private val scope: Coroutin
             if (!WiFiPolicy.forgetsPairing(e.reason)) {
                 // камера занята (например, ещё держит прошлое подключение) или отказала без причины — это проходит,
                 // сопряжение не трогаем
-                journal("$host: камера отказала (Init Fail ${e.reason}) — занята, повторю")
+                journal("$address: камера отказала (Init Fail ${e.reason}) — занята, повторю")
                 wifiPolicy.attemptFailed(discovered)
-                showStaleHintIfNeeded(host)
+                showStaleHintIfNeeded(address)
                 return WiFiAttempt.failed
             }
-            journal("$host: камера отказала (Init Fail ${e.reason})" + if (pairing) "" else " — программа с ней не сопряжена")
+            journal("$address: камера отказала (Init Fail ${e.reason})" + if (pairing) "" else " — программа с ней не сопряжена")
             if (pairing) {
-                wifiStatus = "Камера найдена ($host). Включите на камере PC Remote Function → Pairing"
+                wifiStatus = "Камера найдена ($address). Включите на камере PC Remote Function → Pairing"
             } else {
                 // камера нас больше не знает (её сбросили или сопрягали заново) — перестаём стучаться
-                prefs.wifiCameraName = null
-                wifiStatus = "В сети есть камера ($host), но планшет с ней не сопряжён — нажмите «Сопрячь с камерой»"
+                forgetPairingWith(address)
+                wifiStatus = "В сети есть камера ($address), но планшет с ней не сопряжён — нажмите «Сопрячь с камерой»"
             }
             WiFiAttempt.rejected
         } catch (e: CancellationException) {
@@ -1591,13 +1845,19 @@ class CameraController(private val context: Context, private val scope: Coroutin
         } catch (e: Exception) {
             // отменили или стало не нужно — это не неудача
             if (!wifiWanted || pairing != isPairing) return WiFiAttempt.dropped
-            journal("$host: не подключилось — ${e.message ?: e.javaClass.simpleName}")
+            journal("$address: не подключилось — ${e.message ?: e.javaClass.simpleName}")
             wifiPolicy.attemptFailed(discovered)
-            showStaleHintIfNeeded(host)
+            showStaleHintIfNeeded(address)
             WiFiAttempt.failed
         } finally {
             connectingSocket = null
         }
+    }
+
+    /** Камера по этому адресу ответила «не знаю программу»: она больше не сопряжена. */
+    private fun forgetPairingWith(address: WiFiAddress) {
+        updateBook(cameraBook.pairingLost(address, wifiSightings[address]?.fingerprint))
+        if (prefs.wifiHost == address.host) prefs.wifiCameraName = null
     }
 
     /** Сеанс по Wi-Fi оборвался: повтор с растущей паузой; камеру на кабеле, если она есть, подхватит опрос USB. */
@@ -1625,7 +1885,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
                 phase = Phase.connecting
                 continueReconnect()
             }
-            wifi != null && sessionFrames > 0 && loss.reconnects && prefs.wifiEnabled -> beginReconnect(wifi.host, loss)
+            wifi != null && sessionFrames > 0 && loss.reconnects && prefs.wifiEnabled -> beginReconnect(WiFiAddress(wifi.host, wifi.port), loss)
             else -> {
                 journal("сеанс по Wi-Fi кончился: ${error?.message ?: loss.title} — жду камеру с поиском в сети")
                 wifiLost()
@@ -1638,15 +1898,15 @@ class CameraController(private val context: Context, private val scope: Coroutin
      * connecting). Старые соединения — RST (камера освобождает сеанс сразу), попытки — по тому же адресу, без поиска:
      * сразу, затем через 0,5, 1, 2, 3, 5, 5… с, с короткими тайм-аутами.
      */
-    private fun beginReconnect(host: String, cause: LinkLoss) {
+    private fun beginReconnect(address: WiFiAddress, cause: LinkLoss) {
         stopSession(abort = true)
         phase = Phase.connecting
         isReconnecting = true
-        val episode = Reconnect(host, cause, System.currentTimeMillis())
+        val episode = Reconnect(address, cause, System.currentTimeMillis())
         reconnect = episode
         reconnects++
         while (reconnectWake.tryReceive().isSuccess) Unit
-        journal("сеанс по Wi-Fi оборвался (${cause.title}) — переподключаюсь к $host")
+        journal("сеанс по Wi-Fi оборвался (${cause.title}) — переподключаюсь к $address")
         continueReconnect()
     }
 
@@ -1677,11 +1937,11 @@ class CameraController(private val context: Context, private val scope: Coroutin
         val created = AtomicReference<PtpIpTransport?>()
         val network = wifiNetwork
         val linkCheck = debugLinkCheckUrl
-        journal("подключаюсь к ${episode.host} (восстановление, попытка ${episode.attempts})…")
+        journal("подключаюсь к ${episode.address} (восстановление, попытка ${episode.attempts})…")
         try {
             val (transport, _) = withContext(Dispatchers.IO) {
-                PtpIpTransport.connect(episode.host, me, network, connectTimeoutMs = 2000, initTimeoutMs = 3000,
-                    linkCheckUrl = linkCheck, onSocket = { connectingSocket = it }).also { created.set(it.first) }
+                PtpIpTransport.connect(episode.address.host, me, network, connectTimeoutMs = 2000, initTimeoutMs = 3000,
+                    linkCheckUrl = linkCheck, port = episode.address.port, onSocket = { connectingSocket = it }).also { created.set(it.first) }
             }
             created.set(null)
             // пока ждали, восстановление отменили (выход, «Забыть», Wi-Fi выключили)
@@ -1700,14 +1960,14 @@ class CameraController(private val context: Context, private val scope: Coroutin
         } catch (e: PtpIpRejected) {
             if (WiFiPolicy.forgetsPairing(e.reason)) {
                 reconnectFailed(episode, "камера больше не знает планшет")
-                prefs.wifiCameraName = null
-                wifiStatus = "В сети есть камера (${episode.host}), но планшет с ней не сопряжён — нажмите «Сопрячь с камерой»"
+                forgetPairingWith(episode.address)
+                wifiStatus = "В сети есть камера (${episode.address}), но планшет с ней не сопряжён — нажмите «Сопрячь с камерой»"
             } else {
-                journal("${episode.host}: камера отказала (Init Fail ${e.reason}) — занята, повторю")
+                journal("${episode.address}: камера отказала (Init Fail ${e.reason}) — занята, повторю")
                 continueReconnect()
             }
         } catch (e: Exception) {
-            journal("${episode.host}: не подключилось — ${e.message ?: e.javaClass.simpleName}")
+            journal("${episode.address}: не подключилось — ${e.message ?: e.javaClass.simpleName}")
             continueReconnect()
         } finally {
             connectingSocket = null
@@ -2062,7 +2322,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
             caps?.takeIf { it.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) }?.signalStrength
                 ?.takeIf { it != NetworkCapabilities.SIGNAL_STRENGTH_UNSPECIFIED }
         }.getOrNull()
-        return ConnectionDetails(wifi?.host ?: reconnect?.host, wifi?.localHost, signal)
+        return ConnectionDetails((wifi?.let { WiFiAddress(it.host, it.port) } ?: reconnect?.address)?.toString(), wifi?.localHost, signal)
     }
 
     /** fps за последние 2 с. */
@@ -2122,6 +2382,8 @@ class CameraController(private val context: Context, private val scope: Coroutin
         transportKind = null
         wifiDirect = false
         device = null
+        currentLink = null
+        currentCameraId = null
         deviceInfo = null
         properties = emptyMap()
         frame = null
@@ -2204,7 +2466,9 @@ class CameraController(private val context: Context, private val scope: Coroutin
             else -> "связь есть"
         })
         val details = connectionDetails()
-        details.cameraHost?.let { rows += DebugRow("Камера", "$it:${PtpIp.PORT}") }
+        ((transport as? PtpIpTransport)?.let { WiFiAddress(it.host, it.port) } ?: reconnect?.address)?.let {
+            rows += DebugRow("Камера", "${it.host}:${it.port}")
+        }
         details.localHost?.let { rows += DebugRow("Планшет", it) }
         rows += DebugRow("Wi-Fi планшета", wifiSignal())
         rttWindow.stats(now)?.let { rows += DebugRow("Отклик камеры", "${it.lastMs} мс · мин ${it.minMs} · среднее ${it.averageMs} за минуту") }
@@ -2219,7 +2483,8 @@ class CameraController(private val context: Context, private val scope: Coroutin
         lastLoss?.let { (why, at) -> rows += DebugRow("Последний обрыв", "$why, ${DebugFormat.clock(now - at)} назад") }
         (wifiStatus ?: message)?.let { rows += DebugRow("Сообщение", it) }
         rows += DebugRow("Wi-Fi в программе", if (prefs.wifiEnabled) "включён" else "выключен")
-        rows += DebugRow("Сопряжена", prefs.wifiCameraName?.let { name -> name + (prefs.wifiHost?.let { ", была на $it" } ?: "") } ?: "нет")
+        val paired = cameraBook.cameras.filter { it.paired }
+        rows += DebugRow("Сопряжены", if (paired.isEmpty()) "нет" else paired.joinToString("; ") { c -> c.name + (c.address?.let { ", была на $it" } ?: "") })
         if (debugHost != null || debugLinkCheckUrl != null) {
             rows += DebugRow("Отладка", "камера — ${debugHost ?: "как обычно"}, проверка связи — ${debugLinkCheckUrl ?: "ping"}")
         }

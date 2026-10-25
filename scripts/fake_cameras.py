@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+"""fake_cameras.py — несколько разных виртуальных ZV-E10 одной командой (scripts/fake_camera.py на соседних портах).
+
+У каждой свой серийный номер (программа отличает их по нему), своя картинка (у B кадр отражён, у C повёрнут, у D
+перевёрнут), свой заряд и режим. Все отвечают на поиск в сети (SSDP) с портом в X-PTPIP-Port. Ctrl+C гасит все.
+
+  scripts/fake_cameras.py [--host 127.0.0.1] [--count 3] [--pairing B] [--busy C] [--no-ssdp]
+  scripts/fake_cameras.py --host 192.168.1.123      # для планшета: адрес Mac в сети
+"""
+import argparse, os, signal, subprocess, sys, threading
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+CAMERAS = [
+    {"letter": "A", "mark": None, "battery": 80, "mode": "video"},
+    {"letter": "B", "mark": "flip", "battery": 45, "mode": "photo"},
+    {"letter": "C", "mark": "rotate", "battery": 12, "mode": "video"},
+    {"letter": "D", "mark": "flop", "battery": 100, "mode": "photo"},
+]
+
+
+def relay(letter, stream):
+    for line in stream:
+        print(f"[{letter}] {line}", end="", flush=True)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--host", default="127.0.0.1", help="адрес, на котором слушают все камеры")
+    ap.add_argument("--port", type=int, default=15740, help="порт первой камеры; следующие — по порядку")
+    ap.add_argument("--count", type=int, default=3, choices=range(1, len(CAMERAS) + 1))
+    ap.add_argument("--pairing", default="", help="буквы камер, которым нужно сопряжение, например B")
+    ap.add_argument("--busy", default="", help="буквы камер, которые не отвечают на приветствие, например C")
+    ap.add_argument("--no-ssdp", action="store_true", help="не отвечать на поиск в сети")
+    a = ap.parse_args()
+    children = []
+    for i, cam in enumerate(CAMERAS[:a.count]):
+        letter = cam["letter"]
+        args = [sys.executable, os.path.join(HERE, "fake_camera.py"), "--listen", f"{a.host}:{a.port + i}",
+                "--serial", f"{'FAKE' + letter:0>32}", "--battery", str(cam["battery"]), "--mode", cam["mode"]]
+        if cam["mark"]:
+            args += ["--mark", cam["mark"]]
+        if not a.no_ssdp:
+            args.append("--ssdp")
+        if letter in a.pairing.upper():
+            args.append("--pairing")
+        if letter in a.busy.upper():
+            args.append("--busy")
+        child = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        threading.Thread(target=relay, args=(letter, child.stdout), daemon=True).start()
+        children.append(child)
+
+    def stop(*_):
+        for child in children:
+            child.terminate()
+    signal.signal(signal.SIGTERM, stop)
+    try:
+        for child in children:
+            child.wait()
+    except KeyboardInterrupt:
+        stop()
+        for child in children:
+            child.wait()
+
+
+if __name__ == "__main__":
+    main()

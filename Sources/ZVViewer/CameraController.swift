@@ -202,10 +202,33 @@ final class CameraController {
     private(set) var wifiStatus: String?
     /// Камера на кабеле видна на шине USB, а macOS её программе не отдаёт — ждёт «Разрешить» в окне доступа.
     private(set) var cableAccessHint = false
+    /// Знакомые камеры (имена, где были в сети, сопряжение) и к какой подключались последней — в настройках.
+    private(set) var roster = CameraRoster()
+    /// Кого видно сейчас: камеры на шине USB и ответившие на поиск в сети.
+    private(set) var usbSightings: [CameraSighting] = []
+    private(set) var wifiSightings: [CameraEndpoint: CameraSighting] = [:]
+    /// С какой камерой сеанс (или попытка): как подключена и чья запись (после DeviceInfo).
+    private(set) var currentLink: CameraSighting.Link?
+    private(set) var currentCameraID: String?
+    /// Камеру по Wi-Fi выбрали в списке: подключаемся к ней, даже если на кабеле есть другая.
+    private(set) var choosing: CameraSighting.Link?
+    /// Сопряжение только с этой камерой («Сопрячь» в списке); nil — с любой новой.
+    private(set) var pairingTarget: CameraEndpoint?
+    @ObservationIgnored private var wifiUSN: [CameraEndpoint: String] = [:]
+    @ObservationIgnored private var usbKeys: [String: ObjectIdentifier] = [:]
+    @ObservationIgnored private var currentUSBSerial: String?
+    /// Сколько списков камер на экране: пока хоть один открыт, камеры ищутся в сети раз в 10 с.
+    @ObservationIgnored private var cameraListViewers = 0
+    @ObservationIgnored private var cameraSearchTask: Task<Void, Never>?
+    @ObservationIgnored private let camerasKey = "cameras"
+    @ObservationIgnored private let preferredCameraKey = "preferredCamera"
     @ObservationIgnored private var cableAccessWatch = CableAccessWatch()
 
     init() {
         library = Self.loadPresets(key: presetsKey)
+        roster = CameraRoster.load(cameras: UserDefaults.standard.data(forKey: camerasKey),
+                                   preferred: UserDefaults.standard.string(forKey: preferredCameraKey),
+                                   legacyName: Prefs.wifiCameraName, legacyHost: Prefs.wifiHost)
         presetMode = UserDefaults.standard.string(forKey: presetModeKey).flatMap(CaptureMode.init(rawValue:)) ?? .photo
         discovery.start()
         let events = discovery.events
@@ -943,6 +966,8 @@ final class CameraController {
     private func handleAppeared(_ device: ICCameraDevice) {
         let id = ObjectIdentifier(device)
         devices[id] = device
+        usbKeys[Self.usbKey(device)] = id
+        refreshUSBSightings()
         perform(tracker.appeared(id))
     }
 
@@ -950,6 +975,8 @@ final class CameraController {
         let id = ObjectIdentifier(device)
         let action = tracker.disappeared(id)
         devices[id] = nil
+        usbKeys[Self.usbKey(device)] = nil
+        refreshUSBSightings()
         // кабель вынули, а связь идёт по Wi-Fi — её не трогаем
         guard transportKind != .wifi else { return }
         perform(action)
@@ -983,11 +1010,15 @@ final class CameraController {
     }
 
     private func connect(_ device: ICCameraDevice) {
-        // по Wi-Fi уже идёт сеанс: не рвём его — камера в режиме Wi-Fi видна на кабеле как накопитель (например, на
-        // зарядке) и PC Remote по USB всё равно не даст; кабельную камеру подключим, когда Wi-Fi закончится
-        guard transportKind != .wifi else { return }
+        // по Wi-Fi уже идёт сеанс (или его выбрали в списке): не рвём его — камера в режиме Wi-Fi видна на кабеле как
+        // накопитель (например, на зарядке) и PC Remote по USB всё равно не даст; кабельную камеру подключим, когда
+        // Wi-Fi закончится
+        guard transportKind != .wifi, choosing == nil else { return }
         let id = ObjectIdentifier(device)
         self.device = device
+        currentLink = .usb(Self.usbKey(device))
+        currentCameraID = nil
+        currentUSBSerial = device.serialNumberString
         // транспорт становится делегатом устройства ещё до открытия сессии: колбэки ICC идут живому объекту
         let transport = ICCameraTransport(device: device)
         runSession(transport: transport, kind: .usb, close: { await transport.close() },
@@ -1030,6 +1061,7 @@ final class CameraController {
                 try await session.start()
                 guard let self, !Task.isCancelled else { return }
                 self.deviceInfo = await session.deviceInfo
+                self.noteCameraIdentity()
                 self.phase = .settling
                 self.startStreams(session, onEnded: onFailure)
                 try await session.waitUntilReady()
@@ -1058,16 +1090,176 @@ final class CameraController {
         })
     }
 
+    // MARK: - Камеры
+
+    /// Список камер: текущая, видимые, знакомые.
+    var cameras: [CameraEntry] {
+        roster.entries(sightings: usbSightings + Array(wifiSightings.values),
+                       current: currentLink.map { ($0, currentCameraID, phase == .ready) }, now: Date())
+            .map { entry in
+                var entry = entry
+                entry.pairing = isPairing && pairingTarget != nil && entry.endpoint == pairingTarget && entry.state != .current
+                return entry
+            }
+    }
+
+    /// Как называть камеру, с которой сеанс: своё имя, иначе модель.
+    var currentCameraName: String { roster.camera(currentCameraID)?.name ?? deviceInfo?.model ?? "Камера" }
+
+    /// Выбрали камеру в списке: закрыть сеанс с текущей и подключиться к ней. Пока идёт запись — нельзя: камера
+    /// осталась бы писать без программы.
+    func selectCamera(_ id: String) {
+        guard let entry = cameras.first(where: { $0.id == id }), entry.state != .current else { return }
+        guard !isRecording else { return showStatus("Идёт запись — остановите её, чтобы переключить камеру") }
+        if entry.state == .needsPairing { return pairCamera(id) }
+        if case let .usb(key)? = entry.link {
+            guard let device = usbKeys[key] else { return }
+            choosing = nil
+            pairingTarget = nil
+            isPairing = false
+            showStatus("Подключаю «\(entry.name)»…")
+            perform(tracker.choose(device))
+            return
+        }
+        guard let endpoint = entry.endpoint else { return }
+        connectChosen(endpoint, name: entry.name, pairing: false)
+    }
+
+    /// «Сопрячь» в списке: сопряжение только с этой камерой.
+    func pairCamera(_ id: String) {
+        guard let entry = cameras.first(where: { $0.id == id }), let endpoint = entry.endpoint else { return }
+        guard !isRecording else { return showStatus("Идёт запись — остановите её, чтобы переключить камеру") }
+        connectChosen(endpoint, name: entry.name, pairing: true)
+    }
+
+    /// К выбранной камере по Wi-Fi: сеанс с текущей закрывается, стучимся сразу — не ждём секундного тика.
+    private func connectChosen(_ endpoint: CameraEndpoint, name: String, pairing: Bool) {
+        choosing = .wifi(endpoint)
+        pairingTarget = pairing ? endpoint : nil
+        isPairing = pairing
+        teardown()
+        connectionMessage = nil
+        wifiPolicy = WiFiPolicy()
+        if pairing {
+            wifiStatus = "Камера найдена (\(endpoint)). Включите на камере PC Remote Function → Pairing и подтвердите сопряжение"
+        } else {
+            showStatus("Подключаю «\(name)»…")
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            // секундный тик мог как раз стучаться — ждём его
+            while self.wifiBusy { try? await Task.sleep(for: .milliseconds(100)) }
+            guard self.choosing == .wifi(endpoint), self.transportKind == nil else { return }
+            self.wifiBusy = true
+            let result = await self.tryWiFi(endpoint, discovered: true)
+            self.wifiBusy = false
+            guard self.choosing == .wifi(endpoint) || result == .connected else { return }
+            if result != .connected, !pairing {
+                // не ответила — дальше как обычно: кабель, последняя камера по Wi-Fi
+                self.choosing = nil
+                self.showStatus("«\(name)» не отвечает")
+                self.connectAttachedIfAny()
+            }
+        }
+    }
+
+    func renameCamera(_ id: String, to name: String) {
+        roster.rename(id, to: name)
+        storeRoster()
+    }
+
+    /// Забыть камеру: она пропадает из списка (если не на связи — тогда она остаётся текущей).
+    func forgetCamera(_ id: String) {
+        guard id != currentCameraID else { return }
+        roster.forget(id)
+        storeRoster()
+    }
+
+    /// Список камер показан: ищем камеры в сети сразу и раз в 10 с, пока он открыт.
+    func cameraListAppeared() {
+        cameraListViewers += 1
+        guard cameraSearchTask == nil else { return }
+        cameraSearchTask = Task { [weak self] in
+            while let self, !Task.isCancelled, self.cameraListViewers > 0 {
+                await self.searchCameras()
+                try? await Task.sleep(for: .seconds(10))
+            }
+            self?.cameraSearchTask = nil
+        }
+    }
+
+    func cameraListDisappeared() {
+        cameraListViewers = max(0, cameraListViewers - 1)
+        if cameraListViewers == 0 {
+            cameraSearchTask?.cancel()
+            cameraSearchTask = nil
+        }
+    }
+
+    /// Поиск камер в сети сейчас.
+    func searchCameras() async {
+        noteSightings(await WiFiDiscovery.search(seconds: 3))
+    }
+
+    /// Ответы на поиск: камера видна `CameraRoster.wifiVisibility` после последнего ответа.
+    private func noteSightings(_ responses: [SSDP.Response]) {
+        let now = Date()
+        var sightings = wifiSightings.filter { now.timeIntervalSince($0.value.seenAt) <= CameraRoster.wifiVisibility }
+        for response in responses {
+            sightings[response.endpoint] = CameraSighting(link: .wifi(response.endpoint),
+                                                          fingerprint: CameraFingerprint.usn(response.usn), seenAt: now)
+            wifiUSN[response.endpoint] = response.usn
+        }
+        if sightings != wifiSightings { wifiSightings = sightings }
+    }
+
+    private func refreshUSBSightings() {
+        let now = Date()
+        usbSightings = devices.values.map { device in
+            CameraSighting(link: .usb(Self.usbKey(device)), model: device.name,
+                           fingerprint: device.serialNumberString.flatMap(CameraFingerprint.serial), seenAt: now)
+        }
+        .sorted { "\($0.link)" < "\($1.link)" }
+    }
+
+    private static func usbKey(_ device: ICCameraDevice) -> String {
+        device.uuidString ?? String(describing: ObjectIdentifier(device))
+    }
+
+    /// Камера назвала себя (DeviceInfo): запомнить её, она же — предпочтённая.
+    private func noteCameraIdentity() {
+        guard let link = currentLink else { return }
+        var usn: String?
+        if case let .wifi(endpoint) = link { usn = wifiUSN[endpoint] }
+        currentCameraID = roster.connected(serial: deviceInfo?.serial, model: deviceInfo?.model ?? "Камера", link: link,
+                                           usbSerial: currentUSBSerial, usn: usn, now: Date())
+        storeRoster()
+    }
+
+    private func storeRoster() {
+        if let data = roster.encoded() { UserDefaults.standard.set(data, forKey: camerasKey) }
+        if let preferred = roster.preferred {
+            UserDefaults.standard.set(preferred, forKey: preferredCameraKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: preferredCameraKey)
+        }
+    }
+
     // MARK: - Wi-Fi
 
     /// Начать сопряжение: программа ищет камеру и стучится, пока на камере включено Pairing.
     func startPairing() {
+        pairingTarget = nil
+        // одна камера на связи за раз: новую ищем без сеанса
+        if transportKind != nil { teardown() }
         isPairing = true
         wifiStatus = "Ищу камеру в сети…"
     }
 
     func cancelPairing() {
         isPairing = false
+        pairingTarget = nil
+        choosing = nil
         wifiStatus = nil
         // идущая попытка ждёт подтверждения на камере до минуты — обрываем её
         closeConnectingTransport()
@@ -1078,6 +1270,8 @@ final class CameraController {
     func forgetWiFiCamera() {
         Prefs.wifiHost = nil
         Prefs.wifiCameraName = nil
+        roster.unpairAll()
+        storeRoster()
         identity = PTPIPIdentity.reset()
         wifiPolicy = WiFiPolicy()
         wifiStatus = nil
@@ -1092,11 +1286,12 @@ final class CameraController {
 
     /// Нужна ли ещё связь по Wi-Fi: сеанса нет (камера на кабеле не в PC Remote — тоже), Wi-Fi включён или идёт сопряжение.
     private var wifiWanted: Bool {
-        // камера на кабеле подключается или ждёт повтора — кабель важнее сети;
-        // на кабеле, но не в PC Remote по USB (например, на зарядке в режиме Wi-Fi) — можно по сети
-        let free = (phase == .searching && transportKind == nil && tracker.attached.isEmpty)
+        // камера на кабеле подключается или ждёт повтора — кабель важнее сети, если камеру по Wi-Fi не выбрали в
+        // списке; на кабеле, но не в PC Remote по USB (например, на зарядке в режиме Wi-Fi) — можно по сети
+        let chosen = choosing != nil || pairingTarget != nil
+        let free = (phase == .searching && transportKind == nil && (tracker.attached.isEmpty || chosen))
             || (phase == .notPCRemote && transportKind == .usb)
-        return free && (Prefs.wifiEnabled || isPairing)
+        return free && (Prefs.wifiEnabled || isPairing || chosen)
     }
 
     /// Чем кончилась попытка подключиться по Wi-Fi.
@@ -1113,18 +1308,22 @@ final class CameraController {
     /// Раз в секунду: если связи нет — ищем камеру в сети и подключаемся.
     private func wifiTick() async {
         guard wifiWanted, reconnectingSince == nil, !wifiBusy,
-              wifiPolicy.mayAttempt(enabled: Prefs.wifiEnabled, pairing: isPairing, now: Date()) else { return }
+              wifiPolicy.mayAttempt(enabled: Prefs.wifiEnabled || choosing != nil, pairing: isPairing, now: Date()) else { return }
         wifiBusy = true
         defer { wifiBusy = false }
         // тесты через прокси «плохой сети» (scripts/badnet.py): только этот адрес, без поиска камеры в сети
-        if AutomationServer.isRequested, let forced = ProcessInfo.processInfo.environment["ZV_PTPIP_HOST"] {
-            if wifiPolicy.maySendInit(paired: Prefs.wifiCameraName != nil, pairing: isPairing) {
+        if AutomationServer.isRequested,
+           let forced = ProcessInfo.processInfo.environment["ZV_PTPIP_HOST"].flatMap(CameraEndpoint.init) {
+            if wifiPolicy.maySendInit(paired: roster.isPaired(forced) || Prefs.wifiCameraName != nil, pairing: isPairing) {
                 _ = await tryWiFi(forced, discovered: false)
             }
             return
         }
-        // сначала — последний адрес камеры: так подключение после перерыва занимает секунду, а не поиск
-        let last = isPairing || Prefs.wifiCameraName == nil ? nil : Prefs.wifiHost
+        // сначала — выбранная в списке, та, что сопрягаем, или к которой подключались последней: так подключение после
+        // перерыва занимает секунду, а не поиск
+        var chosen: CameraEndpoint?
+        if case let .wifi(endpoint)? = choosing { chosen = endpoint }
+        let last = pairingTarget ?? chosen ?? (isPairing ? nil : roster.firstEndpoint)
         var lastFailed = false
         if let last {
             switch await tryWiFi(last, discovered: false) {
@@ -1133,9 +1332,12 @@ final class CameraController {
             case .failed: lastFailed = true
             }
         }
-        guard wifiWanted else { return }
+        // выбранная в списке камера или сопряжение с одной — только она
+        guard wifiWanted, pairingTarget == nil, chosen == nil else { return }
         if isPairing, wifiStatus == nil { wifiStatus = "Ищу камеру в сети…" }
-        let found = await WiFiDiscovery.search().map(\.host)
+        let responses = await WiFiDiscovery.search()
+        noteSightings(responses)
+        let found = responses.map(\.endpoint)
         guard wifiWanted else { return }
         if found.isEmpty {
             wifiPolicy.nothingFound()
@@ -1143,9 +1345,9 @@ final class CameraController {
             return
         }
         // сопряжение могло только что оказаться недействительным (камера отказала) — смотрим заново
-        let paired = Prefs.wifiCameraName != nil
-        // не сопряжены — не стучимся (камера в режиме Pairing показала бы чужой запрос), только подсказываем
-        guard wifiPolicy.maySendInit(paired: paired, pairing: isPairing) else {
+        let paired = found.filter { roster.isPaired($0, usn: wifiUSN[$0]) }
+        // ни с одной не сопряжены — не стучимся (камера в режиме Pairing показала бы чужой запрос), только подсказываем
+        guard wifiPolicy.maySendInit(paired: !paired.isEmpty, pairing: isPairing) else {
             if wifiStatus == nil {
                 wifiStatus = "В сети есть камера (\(found[0])) — нажмите «Сопрячь с камерой…», чтобы подключаться по Wi-Fi"
             }
@@ -1156,16 +1358,18 @@ final class CameraController {
             wifiPolicy.attemptFailed(discovered: true)
             showStaleHintIfNeeded(last)
         }
-        for host in found where host != last {
+        // при сопряжении — сначала новые камеры, потом знакомые; без него — только сопряжённые
+        let order = isPairing ? found.filter { !paired.contains($0) } + paired : paired
+        for endpoint in order where endpoint != last {
             guard wifiWanted else { return }
-            switch await tryWiFi(host, discovered: true) {
+            switch await tryWiFi(endpoint, discovered: true) {
             case .connected, .dropped: return
             case .rejected, .failed: continue
             }
         }
     }
 
-    private func showStaleHintIfNeeded(_ host: String) {
+    private func showStaleHintIfNeeded(_ host: CameraEndpoint) {
         guard wifiPolicy.showsStaleHint, !isPairing else { return }
         wifiStatus = "Камера найдена (\(host)), но пока не отвечает — видимо, держит прошлое подключение. "
             + "Обычно это проходит за 1–2 минуты; если нет — выключите и снова включите на камере PC Remote"
@@ -1176,8 +1380,8 @@ final class CameraController {
 
     /// Одна попытка подключиться к камере по адресу. discovered — адрес найден поиском сейчас, а не взят из памяти;
     /// quick — восстановление сеанса: камера только что была на связи, долго ждать ответа незачем.
-    private func tryWiFi(_ host: String, discovered: Bool, quick: Bool = false) async -> WiFiAttempt {
-        let transport = PTPIPTransport(host: host, identity: identity, reachable: Self.testLinkCheck)
+    private func tryWiFi(_ host: CameraEndpoint, discovered: Bool, quick: Bool = false) async -> WiFiAttempt {
+        let transport = PTPIPTransport(host: host.host, port: host.port, identity: identity, reachable: Self.testLinkCheck)
         let pairing = isPairing
         connectingTransport = transport
         defer { if connectingTransport === transport { connectingTransport = nil } }
@@ -1188,8 +1392,9 @@ final class CameraController {
             // при сопряжении камера ждёт подтверждения на экране — ответа ждём дольше
             let name = try await transport.connect(connectTimeout: quick ? .seconds(2) : .seconds(5),
                                                    initTimeout: pairing ? .seconds(60) : quick ? .seconds(3) : .seconds(5))
-            // камера приняла программу — значит, сопряжены, даже если связь уже не нужна
-            Prefs.wifiHost = host
+            // камера приняла программу — значит, сопряжены, даже если связь уже не нужна; прежние версии читают
+            // свою память о камере — пишем и её
+            Prefs.wifiHost = host.host
             Prefs.wifiCameraName = name
             note(String(format: "подключился к \(host) (\(name)) за %.0f мс", Date().timeIntervalSince(started) * 1000))
             // пока ждали, связь стала не нужна: подключили кабель, выключили Wi-Fi, отменили сопряжение
@@ -1199,7 +1404,10 @@ final class CameraController {
             }
             // камера на кабеле не в PC Remote — та попытка не нужна, закрываем её до сеанса по Wi-Fi
             if phase == .notPCRemote { teardown() }
-            wifiDirect = PTPIP.isCameraAccessPoint(host)
+            wifiDirect = PTPIP.isCameraAccessPoint(host.host)
+            currentLink = .wifi(host)
+            currentCameraID = nil
+            choosing = nil
             wifiPolicy.connected()
             connectionMessage = nil
             wifiTransport = transport
@@ -1233,7 +1441,9 @@ final class CameraController {
                 wifiStatus = "Камера найдена (\(host)). Включите на камере PC Remote Function → Pairing"
             } else {
                 // камера нас больше не знает (её сбросили или сопрягали заново) — перестаём стучаться
-                Prefs.wifiCameraName = nil
+                roster.unpair(host)
+                storeRoster()
+                if Prefs.wifiHost == host.host { Prefs.wifiCameraName = nil }
                 wifiStatus = "В сети есть камера (\(host)), но программа с ней не сопряжена — нажмите «Сопрячь с камерой»"
             }
             return .rejected
@@ -1252,7 +1462,7 @@ final class CameraController {
 
     /// Сеанс по Wi-Fi оборвался. Картинка уже шла и камера, скорее всего, рядом — восстанавливаем тихо: кадр и
     /// настройки остаются на экране, попытки — сразу и по тому же адресу. Иначе — обычное ожидание с поиском.
-    private func wifiLost(_ loss: LinkLoss?, transport: PTPIPTransport, host: String) {
+    private func wifiLost(_ loss: LinkLoss?, transport: PTPIPTransport, host: CameraEndpoint) {
         // об одном обрыве сообщают и рукопожатие, и поток свойств; сеанс уже могли восстановить — старый транспорт не трогает новый
         guard transportKind == .wifi, wifiTransport === transport else { return }
         note("сеанс по Wi-Fi оборвался: \(loss.map(Self.lossTitle) ?? "сеанс закончился")")
@@ -1272,7 +1482,7 @@ final class CameraController {
         scheduleReconnect(host)
     }
 
-    private func scheduleReconnect(_ host: String) {
+    private func scheduleReconnect(_ host: CameraEndpoint) {
         let delay = WiFiPolicy.reconnectDelay(attempt: reconnectAttempt)
         reconnectAttempt += 1
         reconnectTask?.cancel()
@@ -1633,6 +1843,9 @@ final class CameraController {
         device = nil
         closeTransport = nil
         transportKind = nil
+        currentLink = nil
+        currentCameraID = nil
+        currentUSBSerial = nil
         wifiDirect = false
         wifiTransport = nil
         recordingModeTask?.cancel()

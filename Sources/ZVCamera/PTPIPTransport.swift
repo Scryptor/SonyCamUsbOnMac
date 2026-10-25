@@ -239,6 +239,8 @@ public actor PTPIPTransport: PTPTransport {
     public nonisolated let linkStatus: AsyncStream<LinkStatus>
     private nonisolated let statusContinuation: AsyncStream<LinkStatus>.Continuation
     public nonisolated let host: String
+    /// Порт PTP/IP: у настоящих камер 15740, другой — только у виртуальных.
+    public nonisolated let port: UInt16
     /// Сколько пришло в текущей фазе данных: доля загрузки снимка на кнопке спуска.
     public nonisolated var dataProgress: DataProgress? { progress }
     private nonisolated let progress = DataProgress()
@@ -263,8 +265,10 @@ public actor PTPIPTransport: PTPTransport {
     private let reachable: Reachability
 
     /// reachable — как проверить сеть до камеры во время провала; по умолчанию ICMP ping камеры.
-    public init(host: String, identity: PTPIPIdentity, timeout: Duration = .seconds(8), reachable: Reachability? = nil) {
+    public init(host: String, port: UInt16 = PTPIP.port, identity: PTPIPIdentity, timeout: Duration = .seconds(8),
+                reachable: Reachability? = nil) {
         self.host = host
+        self.port = port
         self.identity = identity
         self.timeout = timeout
         self.reachable = reachable ?? { await CameraPing.ping(host, timeout: 0.8) }
@@ -277,7 +281,7 @@ public actor PTPIPTransport: PTPTransport {
     @discardableResult
     public func connect(connectTimeout: Duration = .seconds(5), initTimeout: Duration = .seconds(5)) async throws -> String {
         guard !closed else { throw TransportError.disconnected }
-        let command = try await PTPIPChannel.open(host: host, port: PTPIP.port, timeout: connectTimeout, progress: progress)
+        let command = try await PTPIPChannel.open(host: host, port: port, timeout: connectTimeout, progress: progress)
         // канал — в свойство сразу: close() во время ожидания (отмена сопряжения, «Забыть») должен его оборвать
         guard adopt(command, as: .command) else { throw TransportError.disconnected }
         do {
@@ -287,7 +291,7 @@ public actor PTPIPTransport: PTPTransport {
                 if case let .rejected(reason) = try PTPIP.parseInitReply(reply) { throw PTPIPError.rejected(reason: reason) }
                 throw PTPIPError.unexpectedPacket(reply.type)
             }
-            let event = try await PTPIPChannel.open(host: host, port: PTPIP.port, timeout: connectTimeout)
+            let event = try await PTPIPChannel.open(host: host, port: port, timeout: connectTimeout)
             guard adopt(event, as: .event) else { throw TransportError.disconnected }
             try await event.write(PTPIP.initEventRequest(connectionNumber: connectionNumber))
             let ack = try await event.nextPacket(timeout: .seconds(5))

@@ -11,6 +11,11 @@ struct WaitingView: View {
         VStack(alignment: .leading, spacing: 22) {
             Text(kind == .searching ? "Подключите камеру" : "Камера подключена, но не в режиме PC Remote")
                 .font(.title.weight(.semibold))
+            // знакомые и видимые камеры — подключить одним щелчком; своя кнопка сопряжения — ниже, у Wi-Fi
+            if !controller.cameras.isEmpty {
+                CameraList(controller: controller, showsPairNew: false)
+                    .frame(maxWidth: 520, alignment: .leading)
+            }
             HStack(alignment: .top, spacing: 48) {
                 usb
                 // камера на кабеле не в PC Remote (например, на зарядке в режиме Wi-Fi) — по сети всё равно можно
@@ -67,10 +72,12 @@ struct WaitingView: View {
                 } else {
                     Button("Сопрячь с камерой…") { controller.startPairing() }
                 }
-                if !controller.isPairing, Prefs.wifiEnabled, let name = Prefs.wifiCameraName {
+                // программа — для разных камер Sony: какие именно ищем, видно в списке камер выше
+                let paired = controller.roster.known.filter(\.paired).count
+                if !controller.isPairing, Prefs.wifiEnabled, paired > 0 {
                     HStack(spacing: 6) {
                         ProgressView().controlSize(.small)
-                        Text("Ищу \(name) в сети…").foregroundStyle(.secondary)
+                        Text(paired > 1 ? "Ищу камеры в сети…" : "Ищу камеру в сети…").foregroundStyle(.secondary)
                     }
                 }
             }

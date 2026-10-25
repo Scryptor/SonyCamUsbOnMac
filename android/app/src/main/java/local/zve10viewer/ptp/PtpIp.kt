@@ -290,8 +290,11 @@ object Ssdp {
     const val PORT = 1900
     const val SEARCH_TARGET = "urn:schemas-sony-com:service:DigitalImaging:1"
 
-    /** host — адрес камеры в сети, usn — постоянный идентификатор камеры. */
-    data class Response(val host: String, val usn: String)
+    /**
+     * host — адрес камеры в сети, usn — постоянный идентификатор камеры, port — порт PTP/IP: у настоящих камер всегда 15740,
+     * другой присылают только виртуальные (scripts/fake_camera.py) заголовком X-PTPIP-Port.
+     */
+    data class Response(val host: String, val usn: String, val port: Int = PtpIp.PORT)
 
     fun searchRequest(): ByteArray = ("M-SEARCH * HTTP/1.1\r\nHOST: $MULTICAST_HOST:$PORT\r\nMAN: \"ssdp:discover\"\r\nMX: 2\r\n" +
         "ST: $SEARCH_TARGET\r\n\r\n").toByteArray()
@@ -305,6 +308,7 @@ object Ssdp {
         if (headers["ST"] != SEARCH_TARGET && headers["NT"] != SEARCH_TARGET) return null
         val host = headers["LOCATION"]?.let { runCatching { URI(it).host }.getOrNull() } ?: return null
         val usn = headers["USN"]?.substringBefore("::") ?: host
-        return Response(host, usn)
+        val port = headers["X-PTPIP-PORT"]?.toIntOrNull()?.takeIf { it in 1..65535 } ?: PtpIp.PORT
+        return Response(host, usn, port)
     }
 }

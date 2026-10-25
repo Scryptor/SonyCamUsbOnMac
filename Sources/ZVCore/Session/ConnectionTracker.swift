@@ -32,6 +32,15 @@ public struct ConnectionTracker<ID: Hashable> {
         return .disconnect(thenConnect: current)
     }
 
+    /// Выбрали камеру на шине в списке: она — текущая, прежняя (если была) отключается.
+    public mutating func choose(_ id: ID) -> Action {
+        guard attached.contains(id) else { return .none }
+        failures = 0
+        guard current != id else { return .connect(id) }
+        current = id
+        return .disconnect(thenConnect: id)
+    }
+
     public mutating func connected(_ id: ID) {
         if current == id { failures = 0 }
     }

@@ -66,9 +66,15 @@ public enum AutomationAction: Equatable, Sendable, Decodable {
     case openSavePreset
     case chooseNewPreset
     case closeSavePreset
+    /// Камеры: выбрать (подключиться), переименовать, забыть, сопрячь одну, поискать в сети сейчас.
+    case selectCamera(String)
+    case renameCamera(String, String)
+    case forgetCamera(String)
+    case pairCamera(String)
+    case searchCameras
 
     private enum Keys: String, CodingKey {
-        case action, key, setting, offset, value, group, name, index, confirm, mode, x, y, factor, included, from, to
+        case action, key, setting, offset, value, group, name, index, confirm, mode, x, y, factor, included, from, to, id
     }
 
     public init(from decoder: Decoder) throws {
@@ -131,6 +137,11 @@ public enum AutomationAction: Equatable, Sendable, Decodable {
         case "openSavePreset": self = .openSavePreset
         case "chooseNewPreset": self = .chooseNewPreset
         case "closeSavePreset": self = .closeSavePreset
+        case "selectCamera": self = .selectCamera(try c.decode(String.self, forKey: .id))
+        case "renameCamera": self = .renameCamera(try c.decode(String.self, forKey: .id), try c.decode(String.self, forKey: .name))
+        case "forgetCamera": self = .forgetCamera(try c.decode(String.self, forKey: .id))
+        case "pairCamera": self = .pairCamera(try c.decode(String.self, forKey: .id))
+        case "searchCameras": self = .searchCameras
         default:
             throw DecodingError.dataCorruptedError(forKey: .action, in: c, debugDescription: "неизвестная команда \(action)")
         }

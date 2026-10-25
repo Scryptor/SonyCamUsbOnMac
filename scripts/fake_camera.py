@@ -11,12 +11,19 @@
   появляется снимок (ObjectInMemory 0xD215 > 0x8000): JPEG, при FileFormat 0xD253 = 2 — ещё и ARW;
 - кнопка записи (0xD2C8): через 0,8 с MovieRecordingState 0xD21D меняется 0 ↔ 1.
 
+Несколько камер сразу (scripts/fake_cameras.py) различаются: --name, --serial (по нему программа отличает камеры),
+--mark (кадр отражён или повёрнут), --battery, --mode. --ssdp — отвечает на поиск в сети, как камера Sony, с портом
+в X-PTPIP-Port; --busy — не отвечает на приветствие; --pairing — незнакомому GUID отвечает через 3 с, как будто на
+камере нажали «ОК».
+
   scripts/fake_camera.py [--listen 127.0.0.1:15740] [--photo снимок.jpg] [--rate байт/с] [--ignore-record]
+                         [--name ZV-E10] [--serial …] [--mark flip|flop|rotate] [--battery 0–100] [--mode photo|video]
+                         [--ssdp] [--busy] [--pairing]
   ZV_PTPIP_HOST=127.0.0.1 …/ZVViewer --automation        # Mac
   am start … --es ptpipHost <IP Mac>                       # планшет: --listen <IP Mac>:15740
   scripts/badnet.py --camera 127.0.0.1:25740 …             # или через прокси: --listen 127.0.0.1:25740
 """
-import argparse, asyncio, os, struct, subprocess, sys, tempfile, time
+import argparse, asyncio, os, socket, struct, subprocess, sys, tempfile, time, uuid
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIX = os.path.join(ROOT, "Tests/ZVCoreTests/Fixtures")
@@ -27,6 +34,11 @@ LIVE_VIEW, CAPTURED = 0xFFFFC002, 0xFFFFC001
 PROPERTY_CHANGED = 0xC203
 S1, S2, MOVIE_REC = 0xD2C1, 0xD2C2, 0xD2C8
 FOCUS_FOUND, OBJECT_IN_MEMORY, RECORDING, FILE_FORMAT = 0xD213, 0xD215, 0xD21D, 0xD253
+EXPOSURE_PROGRAM, BATTERY = 0x500E, 0xD218
+MODES = {"photo": 0x1, "video": 0x78053}                   # буква M в фото и в видео
+SSDP_GROUP, SSDP_PORT = "239.255.255.250", 1900
+SSDP_ST = "urn:schemas-sony-com:service:DigitalImaging:1"
+MARKS = {"flip": ["-f", "horizontal"], "flop": ["-f", "vertical"], "rotate": ["-r", "180"]}
 # размеры значений по типу PTP: INT8…UINT128
 SIZES = {1: 1, 2: 1, 3: 2, 4: 2, 5: 4, 6: 4, 7: 8, 8: 8, 9: 16, 10: 16}
 FORMATS = {1: "<b", 2: "<B", 3: "<h", 4: "<H", 5: "<i", 6: "<I", 7: "<q", 8: "<Q"}
@@ -36,14 +48,18 @@ def fixture(name):
     return open(os.path.join(FIX, name), "rb").read()
 
 
-def frames():
-    """Ответы GetObject 0xFFFFC002 для высокого и низкого качества: заголовок Sony, JPEG, добивка до размера."""
+def frames(mark=None):
+    """Ответы GetObject 0xFFFFC002 для высокого и низкого качества: заголовок Sony, JPEG, добивка до размера.
+    mark — кадр отражён или повёрнут: у каждой из нескольких камер своя картинка."""
     raw = fixture("lv_frame_raw.bin")
     offset, size = struct.unpack_from("<II", raw)
     jpeg_high = raw[offset:offset + size]
     with tempfile.TemporaryDirectory() as tmp:
         src, dst = os.path.join(tmp, "high.jpg"), os.path.join(tmp, "low.jpg")
         open(src, "wb").write(jpeg_high)
+        if mark:
+            subprocess.run(["sips", *MARKS[mark], src, "--out", src], capture_output=True, check=True)
+            jpeg_high = open(src, "rb").read()
         subprocess.run(["sips", "-z", "360", "640", src, "--out", dst], capture_output=True, check=True)
         jpeg_low = open(dst, "rb").read()
 
@@ -64,6 +80,56 @@ def big_photo(jpeg):
         subprocess.run(["sips", "-z", "4000", "6000", "-s", "formatOptions", "100", src, "--out", dst],
                        capture_output=True, check=True)
         return open(dst, "rb").read()
+
+
+def ptp_string(text):
+    return bytes([len(text) + 1]) + text.encode("utf-16-le") + b"\0\0" if text else b"\0"
+
+
+def with_serial(info, serial):
+    """DeviceInfo с другим серийным номером — он последняя строка набора (PTP DeviceInfo)."""
+    pos = 2 + 4 + 2
+    pos += 1 + 2 * info[pos]                                # описание расширения производителя
+    pos += 2                                                # FunctionalMode
+    for _ in range(5):                                      # операции, события, свойства, форматы
+        pos += 4 + 2 * struct.unpack_from("<I", info, pos)[0]
+    for _ in range(3):                                      # производитель, модель, версия
+        pos += 1 + 2 * info[pos]
+    end = pos + 1 + 2 * info[pos]
+    return info[:pos] + ptp_string(serial) + info[end:]
+
+
+class SSDPResponder(asyncio.DatagramProtocol):
+    """Отвечает на M-SEARCH службы DigitalImaging, как камера Sony в PC Remote; порт PTP/IP — в X-PTPIP-Port."""
+
+    def __init__(self, cam, host, port):
+        self.cam, self.host, self.port = cam, host, port
+
+    def connection_made(self, transport):
+        self.transport = transport
+
+    def datagram_received(self, data, addr):
+        text = data.decode("utf-8", "replace")
+        if not text.startswith("M-SEARCH"):
+            return
+        headers = {k.strip().upper(): v.strip() for k, _, v in (l.partition(":") for l in text.split("\r\n")[1:]) if v}
+        if headers.get("ST") not in (SSDP_ST, "ssdp:all"):
+            return
+        reply = ("HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=1800\r\nEXT:\r\n"
+                 f"LOCATION: http://{self.host}:{self.port}/fake_camera.xml\r\nSERVER: fake_camera.py UPnP/1.0\r\n"
+                 f"ST: {SSDP_ST}\r\nUSN: uuid:{self.cam.uuid}::{SSDP_ST}\r\nX-PTPIP-Port: {self.port}\r\n\r\n")
+        self.transport.sendto(reply.encode(), addr)
+
+
+def ssdp_socket():
+    """Многоадресная группа SSDP; несколько камер на одном Mac делят порт 1900 (SO_REUSEPORT)."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    sock.bind(("", SSDP_PORT))
+    group = struct.pack("4s4s", socket.inet_aton(SSDP_GROUP), socket.inet_aton("0.0.0.0"))
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, group)
+    return sock
 
 
 class Properties:
@@ -134,18 +200,31 @@ class Properties:
 
 class Camera:
     def __init__(self, args):
-        jpeg, self.frames = frames()
+        jpeg, self.frames = frames(args.mark)
         self.photo = open(args.photo, "rb").read() if args.photo else big_photo(jpeg)
         self.rate = args.rate
         self.ignore_record = args.ignore_record
+        self.name = args.name
+        self.busy = args.busy
+        self.pairing = args.pairing
+        self.known_guids = set()                            # кого «сопрягли» (--pairing)
         self.quality = 2
         self.last_frame = 0.0
         self.conn = 0
         self.device_info = fixture("deviceinfo.bin")
+        if args.serial:
+            self.device_info = with_serial(self.device_info, args.serial)
+        # свой постоянный uuid (в поиске) и GUID (в приветствии) — от серийного номера
+        self.uuid = uuid.uuid5(uuid.NAMESPACE_OID, "fake-zv-e10:" + (args.serial or "")).hex
+        self.guid = uuid.UUID(self.uuid).bytes
         self.ext_info = fixture("sony_extdeviceinfo.bin")
         self.props = Properties(fixture("props_settled.bin"))
         self.props.set(OBJECT_IN_MEMORY, 0x8000)
         self.props.set(RECORDING, 0)
+        if args.battery is not None:
+            self.props.set(BATTERY, args.battery)
+        if args.mode:
+            self.props.set(EXPOSURE_PROGRAM, MODES[args.mode])
         self.events = []                                    # писатели соединений событий
         self.objects = []                                   # снимки в памяти камеры: (имя, данные)
         self.number = 1000
@@ -226,9 +305,17 @@ async def serve(cam, r, w):
         while True:
             ptype, body = await read_pkt(r)
             if ptype == 1:                                   # Init Command Request
+                if cam.busy:                                 # держит прошлое подключение: молчит
+                    print("приветствие — молчу (--busy)", flush=True)
+                    continue
+                guid = body[:16]
+                if cam.pairing and guid not in cam.known_guids:
+                    print("незнакомый GUID — «нажимаю ОК» через 3 с (--pairing)", flush=True)
+                    await asyncio.sleep(3)
+                    cam.known_guids.add(guid)
                 cam.conn += 1
-                name = NAME.encode("utf-16-le") + b"\0\0"
-                w.write(pkt(2, struct.pack("<I", cam.conn) + b"\x11" * 16 + name + struct.pack("<I", 0x10000)))
+                name = cam.name.encode("utf-16-le") + b"\0\0"
+                w.write(pkt(2, struct.pack("<I", cam.conn) + cam.guid + name + struct.pack("<I", 0x10000)))
             elif ptype == 3:                                 # Init Event Request
                 w.write(pkt(4))
                 cam.events.append(w)
@@ -296,12 +383,25 @@ async def main():
     ap.add_argument("--photo", help="JPEG, который камера отдаёт как снимок (по умолчанию — растянутый кадр live view)")
     ap.add_argument("--rate", type=int, default=0, help="скорость отдачи снимка, байт/с (0 — без ограничения)")
     ap.add_argument("--ignore-record", action="store_true", help="не реагировать на кнопку записи")
+    ap.add_argument("--name", default=NAME, help="имя камеры в ответе на приветствие")
+    ap.add_argument("--serial", help="серийный номер в DeviceInfo (по нему программа отличает камеры)")
+    ap.add_argument("--mark", choices=sorted(MARKS), help="кадр отражён (flip/flop) или повёрнут (rotate)")
+    ap.add_argument("--battery", type=int, help="заряд батареи, %%")
+    ap.add_argument("--mode", choices=sorted(MODES), help="режим на старте: фото или видео (буква M)")
+    ap.add_argument("--ssdp", action="store_true", help="отвечать на поиск в сети (SSDP), как камера Sony")
+    ap.add_argument("--busy", action="store_true", help="не отвечать на приветствие — камера занята")
+    ap.add_argument("--pairing", action="store_true", help="незнакомому GUID отвечать через 3 с — сопряжение")
     a = ap.parse_args()
     cam = Camera(a)
     host, port = a.listen.rsplit(":", 1)
     server = await asyncio.start_server(lambda r, w: serve(cam, r, w), host, int(port))
-    print(f"поддельная {NAME}: {a.listen}, кадр {len(cam.frames[2]) // 1024} / {len(cam.frames[1]) // 1024} КБ, "
-          f"снимок {len(cam.photo) // 1024} КБ", flush=True)
+    if a.ssdp:
+        await asyncio.get_running_loop().create_datagram_endpoint(lambda: SSDPResponder(cam, host, int(port)),
+                                                                  sock=ssdp_socket())
+    extras = [f"№ …{a.serial[-4:]}" if a.serial else "", a.mark or "", f"батарея {a.battery}%" if a.battery is not None else "",
+              a.mode or "", "SSDP" if a.ssdp else "", "занята" if a.busy else "", "сопряжение" if a.pairing else ""]
+    print(f"поддельная {cam.name}: {a.listen}, кадр {len(cam.frames[2]) // 1024} / {len(cam.frames[1]) // 1024} КБ, "
+          f"снимок {len(cam.photo) // 1024} КБ" + "".join(f", {e}" for e in extras if e), flush=True)
     async with server:
         await server.serve_forever()
 
