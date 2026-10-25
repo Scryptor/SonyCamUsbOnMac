@@ -1,0 +1,234 @@
+import AppKit
+import CoreImage
+import CoreImage.CIFilterBuiltins
+import SwiftUI
+import ZVCore
+
+/// Видео с цифровым увеличением: щипок на трекпаде — вокруг курсора, перетаскивание мышью — сдвиг (прокрутка двумя
+/// пальцами — через ZoomScroll). Камера об увеличении не знает: стоп-кадр и снимок — всегда весь кадр.
+struct ZoomableVideo: View {
+    let screen: ScreenState
+    let frame: CGImage
+    let size: CGSize
+    let dimmed: Bool
+    @State private var pinchBase: ViewZoom?
+    @State private var panBase: ViewZoom?
+    @State private var sharp = ZoomPatch()
+
+    private var frameSize: CGSize { CGSize(width: frame.width, height: frame.height) }
+
+    var body: some View {
+        let rect = screen.zoom.imageRect(view: size, frame: frameSize)
+        ZStack {
+            Image(decorative: frame, scale: 1)
+                .resizable()
+                .interpolation(screen.zoom.isZoomed ? .high : .medium)
+                .frame(width: rect.width, height: rect.height)
+                .position(x: rect.midX, y: rect.midY)
+            // поверх — та же часть кадра, пересчитанная бикубически: во время жеста едет вместе с картинкой
+            if screen.zoom.isZoomed, let patch = sharp.patch {
+                let area = CGRect(x: rect.minX + patch.region.minX * rect.width, y: rect.minY + patch.region.minY * rect.height,
+                                  width: patch.region.width * rect.width, height: patch.region.height * rect.height)
+                Image(decorative: patch.image, scale: 1)
+                    .resizable()
+                    .frame(width: area.width, height: area.height)
+                    .position(x: area.midX, y: area.midY)
+            }
+        }
+        .opacity(dimmed ? 0.55 : 1)
+        .frame(width: size.width, height: size.height)
+        .onChange(of: ObjectIdentifier(frame)) { _, _ in refreshPatch() }
+        .onChange(of: size) { _, _ in refreshPatch() }
+        .onChange(of: screen.zoom) { _, _ in
+            // во время жеста заплатка едет с картинкой, пересчёт — с новым кадром или по окончании жеста
+            if pinchBase == nil, panBase == nil { refreshPatch() }
+        }
+        .frame(width: size.width, height: size.height)
+            .clipped()
+            .contentShape(Rectangle())
+            .gesture(
+                MagnifyGesture()
+                    .onChanged { value in
+                        let base = pinchBase ?? screen.zoom
+                        pinchBase = base
+                        screen.zoom = base.zoomed(by: value.magnification, around: value.startLocation, view: size,
+                                                  frame: frameSize, elastic: true)
+                    }
+                    .onEnded { _ in
+                        pinchBase = nil
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                            screen.zoom = screen.zoom.settled(view: size, frame: frameSize)
+                        }
+                    }
+            )
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 3)
+                    .onChanged { value in
+                        guard screen.zoom.isZoomed else { return }
+                        let base = panBase ?? screen.zoom
+                        panBase = base
+                        screen.zoom = base.panned(by: value.translation, view: size, frame: frameSize)
+                    }
+                    .onEnded { _ in
+                        panBase = nil
+                        refreshPatch()
+                    }
+            )
+    }
+
+    private func refreshPatch() {
+        sharp.update(frame: frame, zoom: screen.zoom, view: size)
+    }
+}
+
+/// Видимая часть увеличенного кадра, пересчитанная Core Image бикубически (Catmull-Rom: B = 0, C = 0,5) в размер
+/// экрана в точках: заметно чётче обычного растяжения в 10–20 раз. Считается в фоне; пока считается, новые запросы
+/// схлопываются в один. ZV_ZOOM_PATCH=0 — без неё, для сравнения.
+@MainActor
+@Observable
+final class ZoomPatch {
+    struct Patch {
+        let image: CGImage
+        /// Какая часть кадра (доли).
+        let region: CGRect
+    }
+
+    private(set) var patch: Patch?
+    @ObservationIgnored private var busy = false
+    @ObservationIgnored private var pending: (frame: CGImage, region: CGRect, size: CGSize)?
+    private nonisolated static let context = CIContext(options: [.cacheIntermediates: false])
+    private static let enabled = ProcessInfo.processInfo.environment["ZV_ZOOM_PATCH"] != "0"
+
+    func update(frame: CGImage, zoom: ViewZoom, view: CGSize) {
+        guard zoom.isZoomed, Self.enabled else {
+            patch = nil
+            pending = nil
+            return
+        }
+        let frameSize = CGSize(width: frame.width, height: frame.height)
+        let rect = zoom.imageRect(view: view, frame: frameSize)
+        // с запасом: при сдвиге во время жеста края не открываются сразу
+        let visible = zoom.visibleRegion(view: view, frame: frameSize)
+        let region = visible.insetBy(dx: -visible.width * 0.1, dy: -visible.height * 0.1)
+            .intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+        guard !region.isEmpty else { return }
+        pending = (frame, region, CGSize(width: region.width * rect.width, height: region.height * rect.height))
+        guard !busy else { return }
+        busy = true
+        Task {
+            while let job = pending {
+                pending = nil
+                if let rendered = await Self.render(job.frame, region: job.region, size: job.size) { patch = rendered }
+            }
+            busy = false
+        }
+    }
+
+    nonisolated private static func render(_ frame: CGImage, region: CGRect, size: CGSize) async -> Patch? {
+        await Task.detached(priority: .userInitiated) {
+            let w = CGFloat(frame.width), h = CGFloat(frame.height)
+            // по целым точкам кадра; у Core Image начало координат — внизу слева
+            let crop = CGRect(x: region.minX * w, y: (1 - region.maxY) * h, width: region.width * w, height: region.height * h)
+                .integral.intersection(CGRect(x: 0, y: 0, width: w, height: h))
+            guard crop.width >= 2, crop.height >= 2, size.width >= 1, size.height >= 1 else { return nil }
+            let scaleY = size.height / crop.height
+            let scaleX = size.width / crop.width
+            let filter = CIFilter.bicubicScaleTransform()
+            // края кадра продолжены: бикубическая выборка у края не тянет прозрачное
+            filter.inputImage = CIImage(cgImage: frame).clampedToExtent()
+                .transformed(by: CGAffineTransform(translationX: -crop.minX, y: -crop.minY))
+            filter.scale = Float(scaleY)
+            filter.aspectRatio = Float(scaleX / scaleY)
+            filter.parameterB = 0
+            filter.parameterC = 0.5
+            guard let output = filter.outputImage else { return nil }
+            let extent = CGRect(x: 0, y: 0, width: (crop.width * scaleX).rounded(), height: (crop.height * scaleY).rounded())
+            guard let image = context.createCGImage(output, from: extent) else { return nil }
+            let actual = CGRect(x: crop.minX / w, y: 1 - crop.maxY / h, width: crop.width / w, height: crop.height / h)
+            return Patch(image: image, region: actual)
+        }.value
+    }
+}
+
+/// Прокрутка двумя пальцами двигает увеличенную картинку. Меню Fn, панель настроек и галерея прокручивают своё.
+@MainActor
+final class ZoomScroll {
+    var viewSize = CGSize.zero
+    private var token: Any?
+
+    func start(screen: ScreenState, controller: CameraController) {
+        stop()
+        token = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+            guard let self, screen.zoom.isZoomed, screen.galleryShot == nil, !screen.fnOpen, !screen.allSettingsOpen,
+                  event.hasPreciseScrollingDeltas, let frame = controller.frame else { return event }
+            screen.zoom = screen.zoom.panned(by: CGSize(width: event.scrollingDeltaX, height: event.scrollingDeltaY),
+                                             view: self.viewSize, frame: CGSize(width: frame.width, height: frame.height))
+            return nil
+        }
+    }
+
+    func stop() {
+        if let token { NSEvent.removeMonitor(token) }
+        token = nil
+    }
+}
+
+/// Пока картинка увеличена — в правом нижнем углу: мини-карта (весь кадр, видимая часть в рамке, остальное
+/// притемнено), во сколько раз увеличено и ✕. Щелчок и перетаскивание по мини-карте сдвигают видимую часть.
+/// Видна и при скрытых элементах: увеличенная картинка — не весь кадр.
+struct ZoomBadge: View {
+    let screen: ScreenState
+    let frame: CGImage
+    let view: CGSize
+
+    var body: some View {
+        let frameSize = CGSize(width: frame.width, height: frame.height)
+        let width: CGFloat = 84
+        let height = width * frameSize.height / max(frameSize.width, 1)
+        let region = screen.zoom.visibleRegion(view: view, frame: frameSize)
+        let visible = CGRect(x: region.minX * width, y: region.minY * height,
+                             width: region.width * width, height: region.height * height)
+        VStack(spacing: 6) {
+            ZStack(alignment: .topLeading) {
+                Image(decorative: frame, scale: 1).resizable().frame(width: width, height: height)
+                Path { path in
+                    path.addRect(CGRect(x: 0, y: 0, width: width, height: height))
+                    path.addRect(visible)
+                }
+                .fill(.black.opacity(0.55), style: FillStyle(eoFill: true))
+                Rectangle()
+                    .strokeBorder(.white, lineWidth: 1.5)
+                    .frame(width: visible.width, height: visible.height)
+                    .offset(x: visible.minX, y: visible.minY)
+            }
+            .frame(width: width, height: height)
+            .clipShape(RoundedRectangle(cornerRadius: 4))
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        screen.zoom = screen.zoom.centered(at: CGPoint(x: value.location.x / width, y: value.location.y / height),
+                                                           view: view, frame: frameSize)
+                    }
+            )
+            HStack(spacing: 4) {
+                Text(screen.zoom.label).font(.headline.monospacedDigit())
+                Spacer(minLength: 0)
+                Button {
+                    withAnimation(.spring(response: 0.25, dampingFraction: 0.9)) { screen.zoom = .identity }
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .frame(width: 24, height: 24)
+                        .background(.white.opacity(0.18), in: Circle())
+                }
+                .buttonStyle(.plain)
+                .help("Отменить увеличение (⌘0)")
+                .accessibilityLabel("Отменить увеличение")
+            }
+        }
+        .padding(6)
+        .frame(width: 96)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
+    }
+}

@@ -73,6 +73,8 @@ final class CameraController {
     }
 
     @ObservationIgnored private var reviewTask: Task<Void, Never>?
+    /// Во сколько раз увеличена картинка на экране — от этого зависит, когда снижать качество превью.
+    @ObservationIgnored var viewZoomFactor = 1.0
     /// Опрос доли загрузки снимка, 10 раз в секунду.
     @ObservationIgnored private var progressTask: Task<Void, Never>?
     @ObservationIgnored private var temperatureTask: Task<Void, Never>?
@@ -1158,7 +1160,8 @@ final class CameraController {
               let current = previewQuality else { return }
         let wanted: LiveViewQuality?
         if Prefs.wifiAdaptiveQuality {
-            wanted = qualityPolicy.decide(now: Date(), outage: linkOutageSince != nil)
+            // картинка увеличена на экране — чёткость важнее плавности: высокое держим дольше
+            wanted = qualityPolicy.decide(now: Date(), outage: linkOutageSince != nil, sharp: viewZoomFactor >= 1.5)
         } else if current == .low, forcedHighAt.map({ Date().timeIntervalSince($0) > 5 }) ?? true {
             forcedHighAt = Date()
             wanted = .high

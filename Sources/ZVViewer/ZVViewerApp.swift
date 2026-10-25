@@ -26,6 +26,17 @@ struct ZVViewerApp: App {
             CommandGroup(after: .toolbar) {
                 Button(screen.debugOpen ? "Скрыть отладку" : "Отладка") { screen.toggleDebug() }
                     .keyboardShortcut("d", modifiers: [.option, .command])
+                Divider()
+                // цифровое увеличение картинки — только на экране, камера о нём не знает
+                Button("Увеличить") { withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { screen.zoomStep(up: true) } }
+                    .keyboardShortcut("=", modifiers: .command)
+                    .disabled(controller.frame == nil || screen.galleryShot != nil)
+                Button("Уменьшить") { withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { screen.zoomStep(up: false) } }
+                    .keyboardShortcut("-", modifiers: .command)
+                    .disabled(!screen.zoom.isZoomed || screen.galleryShot != nil)
+                Button("Без увеличения") { withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { screen.zoom = .identity } }
+                    .keyboardShortcut("0", modifiers: .command)
+                    .disabled(!screen.zoom.isZoomed)
             }
         }
         Settings {

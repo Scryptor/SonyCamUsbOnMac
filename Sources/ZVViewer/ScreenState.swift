@@ -65,6 +65,12 @@ final class ScreenState {
         if let data = try? JSONEncoder().encode(placement) { defaults.set(data, forKey: "histogramPlacement") }
     }
 
+    /// ⌘= / ⌘−: следующая ступень увеличения вокруг того же центра.
+    func zoomStep(up: Bool) {
+        let factor = ViewZoom.step(from: zoom.factor, up: up)
+        zoom = factor <= 1 ? .identity : ViewZoom(factor: factor, center: zoom.center)
+    }
+
     func openGallery(_ shot: UUID) {
         closeOverlays()
         galleryShot = shot

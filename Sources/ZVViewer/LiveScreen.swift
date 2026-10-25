@@ -8,6 +8,7 @@ struct LiveScreen: View {
     let screen: ScreenState
     @FocusState private var focused: Bool
     @State private var showHiddenHint = false
+    @State private var zoomScroll = ZoomScroll()
 
     private var showControls: Bool { !screen.controlsHidden || screen.fnOpen || screen.allSettingsOpen || screen.pillInfo != nil }
     /// Система координат экрана: в ней тащат гистограмму и мини-карту.
@@ -18,6 +19,7 @@ struct LiveScreen: View {
             layers(size: geometry.size)
         }
         .animation(.easeInOut(duration: 0.2), value: showControls)
+        .animation(.easeInOut(duration: 0.2), value: screen.zoom.isZoomed)
         .contentShape(Rectangle())
         .onTapGesture {
             screen.closeOverlays()
@@ -28,8 +30,14 @@ struct LiveScreen: View {
         .onChange(of: controller.shootingMode) { _, mode in
             if mode != .slowQuick, screen.pillInfo == .slowMotion { screen.pillInfo = nil }
         }
-        // связь пропала — подсказки к ней больше нет
-        .onDisappear { screen.pillInfo = nil }
+        // связь пропала — подсказки к ней больше нет, увеличение — сначала
+        .onDisappear {
+            screen.pillInfo = nil
+            screen.zoom = .identity
+            zoomScroll.stop()
+        }
+        .onAppear { zoomScroll.start(screen: screen, controller: controller) }
+        .onChange(of: screen.zoom.factor) { _, factor in controller.viewZoomFactor = factor }
         .task {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(500))
@@ -122,6 +130,12 @@ struct LiveScreen: View {
                 }
                 .padding(16)
             }
+            if screen.zoom.isZoomed, let frame = controller.frame, controller.review == nil, screen.galleryShot == nil {
+                ZoomBadge(screen: screen, frame: frame, view: size)
+                    .padding(16)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                    .transition(.opacity)
+            }
             if screen.allSettingsOpen {
                 AllSettingsPanel(controller: controller, screen: screen)
                     .frame(width: size.width * 0.6, height: size.height * 0.78)
@@ -162,12 +176,13 @@ struct LiveScreen: View {
 
     @ViewBuilder private func video(size: CGSize) -> some View {
         if let frame = controller.frame {
-            Image(decorative: frame, scale: 1)
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-                .opacity(controller.linkIndicator.dimsPicture ? 0.55 : 1)
+            ZoomableVideo(screen: screen, frame: frame, size: size, dimmed: controller.linkIndicator.dimsPicture)
+                .onAppear { zoomScroll.viewSize = size }
+                .onChange(of: size) { _, size in zoomScroll.viewSize = size }
+            // рамка записи — по краю видимой картинки, при увеличении — по краю экрана
             TallyBorder(recording: controller.isRecording,
-                        rect: fitRect(size).intersection(CGRect(origin: .zero, size: size)))
+                        rect: screen.zoom.imageRect(view: size, frame: CGSize(width: frame.width, height: frame.height))
+                            .intersection(CGRect(origin: .zero, size: size)))
             LinkOverlay(controller: controller)
         } else {
             ProgressView().controlSize(.large)
