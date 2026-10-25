@@ -40,6 +40,8 @@ object SonyProp {
     const val ISO = 0xD21E
     /** Куда сохранять снимок: 0x01 — только компьютер, 0x10 — только карта, 0x11 — оба. */
     const val STILL_IMAGE_STORE_DESTINATION = 0xD222
+    /** Дата и время камеры (строка). */
+    const val DATE_TIME_SET = 0xD223
     const val FOCUS_AREA = 0xD22C
     const val PICTURE_PROFILE = 0xD23F
     const val CREATIVE_STYLE = 0xD240

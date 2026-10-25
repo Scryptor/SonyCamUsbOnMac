@@ -7,12 +7,12 @@ import android.os.SystemClock
 import android.system.ErrnoException
 import android.system.Os
 import android.system.OsConstants
-import android.util.Log
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.receiveAsFlow
+import local.zve10viewer.debug.LinkJournal
 import local.zve10viewer.ptp.PtpEvent
 import local.zve10viewer.ptp.PtpIp
 import local.zve10viewer.ptp.PtpIpInitResult
@@ -79,6 +79,9 @@ data class PtpIpLink(
     val rttSamples: Int = 0,
     /** Почему транспорт закрылся; null — открыт. */
     val loss: LinkLoss? = null,
+    /** Сколько провалов связи было на этом соединении и самый долгий из кончившихся, мс — для панели отладки. */
+    val outages: Int = 0,
+    val longestOutageMs: Long = 0,
 )
 
 /**
@@ -121,6 +124,10 @@ class PtpIpTransport private constructor(
     private val socketsClosed = AtomicBoolean(false)
     private val socketsClosedLatch = CountDownLatch(1)
     @Volatile private var loss: LinkLoss? = null
+    /** С какого момента идёт провал (начало тишины), счёт провалов и самый долгий — для панели отладки. */
+    @Volatile private var outageFrom: Long? = null
+    @Volatile private var outages = 0
+    @Volatile private var longestOutageMs = 0L
     private val supervisor = LinkSupervisor(TIMING, now())
     // когда пришли последние байты — пишут читающие потоки, смотрит слежение: горячий путь, без замка
     @Volatile private var lastRx = now()
@@ -231,6 +238,7 @@ class PtpIpTransport private constructor(
         val graceful = sessionOpen && !synchronized(supervisor) { supervisor.isOutage }
         // ещё до закрытия: новый connect, начатый прямо сейчас, тоже должен его дождаться
         if (graceful) closing.set(this)
+        if (!closed.get()) endOutageForStats()
         if (!markClosed(LinkLoss.closed)) return
         if (!graceful) {
             closeSockets(rst = false)
@@ -266,15 +274,22 @@ class PtpIpTransport private constructor(
             feedReceived()
             supervisor.networkLost(now())
         }
-        Log.i(TAG, "сеть Wi-Fi пропала — провал связи")
+        LinkJournal.event("сеть Wi-Fi пропала — провал связи сразу")
         publish()
     }
 
     /** Транспорт закрывается сам: решение слежения или ошибка. rst — сбросом: камера освобождает сеанс сразу. */
     private fun shutDown(reason: LinkLoss, rst: Boolean, why: String? = null) {
+        if (closed.get()) return
+        endOutageForStats()
         if (!markClosed(reason)) return
-        Log.i(TAG, "соединение закрыто: ${reason.title}" + (why?.let { " ($it)" } ?: "") + if (rst) ", RST" else ", FIN")
+        LinkJournal.event("соединение закрыто: ${reason.title}" + (why?.let { " ($it)" } ?: "") + if (rst) ", RST" else ", FIN")
         closeSockets(rst)
+    }
+
+    /** Закрываем посреди провала — он кончился вместе с соединением: в самый долгий (для панели отладки). */
+    private fun endOutageForStats() {
+        outageFrom?.let { longestOutageMs = maxOf(longestOutageMs, now() - it) }
     }
 
     /** Новых транзакций больше нет. false — транспорт уже закрыт (причина остаётся первой). */
@@ -342,7 +357,6 @@ class PtpIpTransport private constructor(
 
     /** Раз в 250 мс: новые байты, проба, ping, решение об обрыве. */
     private fun watch() {
-        var outageFrom: Long? = null
         while (!closed.get()) {
             try {
                 Thread.sleep(TIMING.tickMs)
@@ -354,12 +368,16 @@ class PtpIpTransport private constructor(
                 feedReceived()
                 supervisor.tick(now()) to supervisor.outageSince
             }
-            if (since != outageFrom) {
+            val from = outageFrom
+            if (since != from) {
                 val now = now()
+                if (from != null) {
+                    longestOutageMs = maxOf(longestOutageMs, now - from)
+                    if (since == null) LinkJournal.event("связь вернулась: провал %.1f с".format((now - from) / 1000.0))
+                }
                 if (since != null) {
-                    Log.i(TAG, "провал связи: ни байта %.1f с — сеанс держу, пингую камеру".format((now - since) / 1000.0))
-                } else if (outageFrom != null) {
-                    Log.i(TAG, "связь вернулась: провал %.1f с".format((now - outageFrom) / 1000.0))
+                    outages++
+                    LinkJournal.event("провал связи: ни байта %.1f с — сеанс держу, пингую камеру".format((now - since) / 1000.0))
                 }
                 outageFrom = since
             }
@@ -415,14 +433,13 @@ class PtpIpTransport private constructor(
     private fun publish() {
         synchronized(_link) {
             val next = synchronized(supervisor) {
-                PtpIpLink(supervisor.isOutage, supervisor.rttMs, supervisor.rttSamples, loss)
+                PtpIpLink(supervisor.isOutage, supervisor.rttMs, supervisor.rttSamples, loss, outages, longestOutageMs)
             }
             if (_link.value != next) _link.value = next
         }
     }
 
     companion object {
-        private const val TAG = "ZVLink"
         private val TIMING = LinkTiming()
         /** Чтение в транзакции — кусками по столько: между ними видно, не пропала ли связь и не вышло ли время. */
         private const val POLL_MS = 250

@@ -71,6 +71,7 @@ import kotlinx.coroutines.delay
 import local.zve10viewer.CameraController
 import local.zve10viewer.CameraController.FrameNotice
 import local.zve10viewer.Prefs
+import local.zve10viewer.debug.DebugTab
 import local.zve10viewer.session.LiveViewQuality
 import local.zve10viewer.settings.CaptureMode
 import local.zve10viewer.settings.SettingCatalog
@@ -108,6 +109,10 @@ class ScreenState {
 
     /** Подсказка под строкой состояния: о подключении или о кадрах. */
     var pillInfo by mutableStateOf<PillInfo?>(null)
+
+    /** Панель отладки: долгое нажатие на плашку состояния или ⚙ → «Отладка»; закрывается только ×. */
+    var debugOpen by mutableStateOf(false)
+    var debugTab by mutableStateOf(DebugTab.link)
 
     val controlsHidden: Boolean get() = manualHidden || autoHidden
     val overlayOpen: Boolean get() = fnOpen || allSettingsOpen || settingsOpen || pillInfo != null
@@ -157,16 +162,21 @@ fun App(controller: CameraController) {
     MaterialTheme(colorScheme = darkColorScheme(primary = Accent, onPrimary = Color.White, secondary = Accent)) {
         Box(Modifier.fillMaxSize().background(Color.Black)) {
             when (controller.phase) {
-                CameraController.Phase.searching, CameraController.Phase.permission -> WaitingScreen(controller, notPcRemote = false)
-                CameraController.Phase.notPcRemote -> WaitingScreen(controller, notPcRemote = true)
+                CameraController.Phase.searching, CameraController.Phase.permission -> WaitingScreen(controller, screen, notPcRemote = false)
+                CameraController.Phase.notPcRemote -> WaitingScreen(controller, screen, notPcRemote = true)
                 else -> LiveScreen(controller, screen)
+            }
+            // и на экране ожидания: там видно, куда программа стучится и что ей отвечают
+            if (screen.debugOpen) {
+                DebugPanel(controller, screen, Modifier.align(Alignment.CenterEnd).padding(end = 18.dp)
+                    .fillMaxWidth(0.45f).fillMaxHeight(0.8f))
             }
         }
     }
 }
 
 @Composable
-private fun WaitingScreen(controller: CameraController, notPcRemote: Boolean) {
+private fun WaitingScreen(controller: CameraController, screen: ScreenState, notPcRemote: Boolean) {
     // настройки (Wi-Fi, «Забыть») нужны и без камеры: иначе выключенный Wi-Fi не включить без кабеля
     var settingsOpen by remember { mutableStateOf(false) }
     Box(Modifier.fillMaxSize()) {
@@ -227,19 +237,24 @@ private fun WaitingScreen(controller: CameraController, notPcRemote: Boolean) {
     Text("⚙", color = Color.White, fontSize = 22.sp, textAlign = androidx.compose.ui.text.style.TextAlign.Center,
         modifier = Modifier.align(Alignment.TopStart).padding(18.dp).size(44.dp)
             .background(PanelLight, RoundedCornerShape(9.dp)).clickable { settingsOpen = true }.padding(top = 6.dp))
-    if (settingsOpen) SettingsOverlay(controller) { settingsOpen = false }
+    if (settingsOpen) {
+        SettingsOverlay(controller, onClose = { settingsOpen = false }, onDebug = {
+            settingsOpen = false
+            screen.debugOpen = true
+        })
+    }
     }
 }
 
 /** Настройки поверх экрана: касание мимо панели закрывает, касания по самой панели (и её полям) — нет. */
 @Composable
-private fun SettingsOverlay(controller: CameraController, onClose: () -> Unit) {
+private fun SettingsOverlay(controller: CameraController, onClose: () -> Unit, onDebug: () -> Unit) {
     Box(
         Modifier.fillMaxSize().background(Color(0x99000000)).pointerInput(Unit) { detectTapGestures { onClose() } },
         contentAlignment = Alignment.Center,
     ) {
         Box(Modifier.width(560.dp).fillMaxHeight(0.9f).pointerInput(Unit) { detectTapGestures { } }) {
-            SettingsPanel(controller, Modifier.fillMaxSize())
+            SettingsPanel(controller, Modifier.fillMaxSize(), onDebug)
         }
     }
 }
@@ -312,7 +327,12 @@ private fun LiveScreen(controller: CameraController, screen: ScreenState) {
         if (screen.allSettingsOpen) {
             AllSettingsPanel(controller, screen, Modifier.align(Alignment.Center).fillMaxWidth(0.62f).fillMaxHeight(0.78f))
         }
-        if (screen.settingsOpen) SettingsOverlay(controller) { screen.settingsOpen = false }
+        if (screen.settingsOpen) {
+            SettingsOverlay(controller, onClose = { screen.settingsOpen = false }, onDebug = {
+                screen.settingsOpen = false
+                screen.debugOpen = true
+            })
+        }
         controller.review?.let { ReviewOverlay(controller, it) }
         if (hint) {
             Text("Элементы скрыты · нажмите, чтобы показать", color = Color.White, fontSize = 16.sp,
@@ -415,7 +435,13 @@ private fun Controls(controller: CameraController, screen: ScreenState) {
 @Composable
 private fun StatusPill(controller: CameraController, screen: ScreenState) {
     Row(
-        Modifier.background(Panel, RoundedCornerShape(14.dp)).padding(horizontal = 16.dp, vertical = 10.dp),
+        Modifier.background(Panel, RoundedCornerShape(14.dp))
+            // долгое нажатие — панель отладки; короткие по надписям — подсказки, как раньше
+            .onLongPress {
+                screen.pillInfo = null
+                screen.debugOpen = true
+            }
+            .padding(horizontal = 16.dp, vertical = 10.dp),
         horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically,
     ) {
         controller.recordingStartedAt?.let { RecBadge(it) }
@@ -729,7 +755,7 @@ private fun HistogramRow(figures: List<Triple<String, String, Boolean>>) {
 
 /** Настройки программы (кнопка ⚙). */
 @Composable
-private fun SettingsPanel(controller: CameraController, modifier: Modifier) {
+private fun SettingsPanel(controller: CameraController, modifier: Modifier, onDebug: () -> Unit) {
     val prefs = controller.prefs
     var destination by remember { mutableStateOf(prefs.destination) }
     var reviewEnabled by remember { mutableStateOf(prefs.reviewEnabled) }
@@ -792,6 +818,13 @@ private fun SettingsPanel(controller: CameraController, modifier: Modifier) {
         } else {
             Text("Камера ещё не подключалась по Wi-Fi", color = Secondary, fontSize = 14.sp)
         }
+        Spacer(Modifier.height(8.dp))
+        Row(Modifier.fillMaxWidth().clickable(onClick = onDebug).padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("Отладка", color = Color.White, fontSize = 16.sp, modifier = Modifier.weight(1f))
+            Text("›", color = Accent, fontSize = 22.sp)
+        }
+        Text("Связь, превью, камера, свойства и журнал событий — поверх экрана. То же — долгое нажатие на плашку состояния.",
+            color = Secondary, fontSize = 13.sp)
     }
 }
 

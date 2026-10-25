@@ -165,6 +165,15 @@ class LiveViewQualityPolicy(private val timing: QualityTiming = QualityTiming(),
     fun rttMs(now: Long): Double =
         rtts.filter { now - it.first <= timing.rttWindowMs }.minOfOrNull { it.second } ?: timing.defaultRttMs
 
+    /**
+     * Через сколько мс самое раннее можно вернуть высокое: кончится выдержка и наберётся окно на низком. null — кадры
+     * и так идут высоким (или их ещё нет).
+     */
+    fun upAttemptInMs(now: Long): Long? {
+        if (level != LiveViewQuality.low) return null
+        return maxOf(holdUntil, levelSince + timing.upWindowMs, now) - now
+    }
+
     private fun shouldGoDown(now: Long): Boolean {
         if (now - levelSince < timing.downWindowMs) return false
         val stalls = samples.count { now - it.at <= timing.stallWindowMs && it.fetchMs > timing.stallMs }
