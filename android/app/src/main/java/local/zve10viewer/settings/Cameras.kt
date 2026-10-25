@@ -40,7 +40,7 @@ sealed class CameraLink {
  * Камера, к которой программа уже подключалась. id — отпечаток серийного номера (сам номер не хранится); aliases — другие
  * отпечатки той же камеры (по Wi-Fi — USN из ответа на поиск, по кабелю — серийный номер USB, если он не совпал); name —
  * как назвали; host и port — где была по Wi-Fi в последний раз (port — только если не 15740); paired — сопряжена;
- * lastUsed — когда подключались, секунды Unix.
+ * lastUsed — когда подключались, секунды Unix; inStrip — в ленте камер: программа держит её на связи рядом с главной.
  */
 data class KnownCamera(
     val id: String,
@@ -51,6 +51,7 @@ data class KnownCamera(
     val port: Int? = null,
     val paired: Boolean = false,
     val lastUsed: Long? = null,
+    val inStrip: Boolean = false,
 ) {
     val address: WiFiAddress? get() = host?.let { WiFiAddress(it, port ?: PtpIp.PORT) }
 
@@ -63,11 +64,12 @@ data class CameraSighting(val link: CameraLink, val model: String?, val fingerpr
 /** С какой камерой сейчас сеанс (или к какой подключаемся): ready — сеанс готов, иначе «подключаю…». */
 data class CurrentCamera(val link: CameraLink, val id: String?, val ready: Boolean, val model: String?)
 
-enum class CameraState { current, available, needsPairing, offline }
+enum class CameraState { current, side, available, needsPairing, offline }
 
 /**
  * Строка списка камер. id — id знакомой камеры, у незнакомой — CameraLink.entryId; link — как видна сейчас, null — не
- * видна; pairing — идёт сопряжение именно с ней («Сопрячь» в строке), и она ещё не текущая.
+ * видна; pairing — идёт сопряжение именно с ней («Сопрячь» в строке), и она ещё не текущая; у камеры в ленте ready —
+ * её сеанс на связи (иначе «нет связи»).
  */
 data class CameraEntry(
     val id: String,
@@ -98,19 +100,35 @@ data class CameraEntry(
     private val plainStateLabel: String
         get() = when (state) {
             CameraState.current -> if (ready) "на связи" else "подключаю…"
+            CameraState.side -> if (ready) "в ленте" else "в ленте · нет связи"
             CameraState.available -> "свободна"
             CameraState.needsPairing -> "нужно сопряжение"
             CameraState.offline -> if (known?.host != null) "не видна в сети" else "не подключена"
         }
 
-    /** Кнопка в строке; null — кнопки нет. Невидимую знакомую по Wi-Fi пробуют один раз по последнему адресу. */
+    /**
+     * Кнопка в строке; null — кнопки нет. Невидимую знакомую по Wi-Fi пробуют один раз по последнему адресу; камера ленты
+     * на связи становится главной сразу, без связи — подключается главной, как свободная.
+     */
     val action: String?
         get() = if (pairing) null else when (state) {
             CameraState.current -> null
+            CameraState.side -> if (ready) "Сделать главной" else if (address != null) "Подключить" else null
             CameraState.available -> "Подключить"
             CameraState.needsPairing -> "Сопрячь"
             CameraState.offline -> if (known?.host != null) "Подключить" else null
         }
+
+    /** «В ленту» (долгое нажатие): знакомая сопряжённая камера по Wi-Fi, ещё не в ленте и не главная. */
+    val canAddToStrip: Boolean
+        get() = known != null && known.paired && !known.inStrip && link !is CameraLink.Usb && address != null &&
+            (state == CameraState.available || state == CameraState.offline)
+
+    /** «Убрать из ленты». */
+    val canRemoveFromStrip: Boolean get() = state == CameraState.side
+
+    /** «Забыть»: знакомая, не главная и не в ленте (оттуда сначала убирают). */
+    val canForget: Boolean get() = known != null && state != CameraState.current && state != CameraState.side
 }
 
 /**
@@ -170,6 +188,13 @@ data class CameraBook(val cameras: List<KnownCamera> = emptyList(), val preferre
     /** «Забыть сопряжение» (новый GUID): ни одна камера программу больше не знает, имена остаются. */
     fun unpairedAll(): CameraBook = copy(cameras = cameras.map { it.copy(paired = false) })
 
+    /** «В ленту» / «Убрать из ленты»; камера, с которой переключились на другую, тоже уходит в ленту. */
+    fun withStrip(id: String, inStrip: Boolean): CameraBook {
+        val camera = find(id) ?: return this
+        if (camera.inStrip == inStrip) return this
+        return copy(cameras = cameras.map { if (it.id == id) it.copy(inStrip = inStrip) else it })
+    }
+
     /**
      * Камера по этому адресу ответила «не знаю программу» (Init Fail 1): больше не стучимся. Своей записи нет — значит,
      * стучались из-за прежней памяти: её сопряжение и снимается, как снимали прежние версии.
@@ -226,7 +251,7 @@ data class CameraBook(val cameras: List<KnownCamera> = emptyList(), val preferre
      * Список: текущая; видимые — сначала на кабеле, потом по Wi-Fi, каждые по lastUsed (незнакомые в конце); невидимые
      * знакомые — по lastUsed. Камера по Wi-Fi видна WIFI_VISIBLE_MS после последнего ответа. Одна камера — одна строка.
      */
-    fun entries(sightings: List<CameraSighting>, current: CurrentCamera?, now: Long): List<CameraEntry> {
+    fun entries(sightings: List<CameraSighting>, current: CurrentCamera?, now: Long, sideReady: Set<String> = emptySet()): List<CameraEntry> {
         val visible = sightings.filter { it.link is CameraLink.Usb || now - it.seenAt < WIFI_VISIBLE_MS }
         val result = ArrayList<CameraEntry>()
         val shown = HashSet<String>()
@@ -238,6 +263,14 @@ data class CameraBook(val cameras: List<KnownCamera> = emptyList(), val preferre
             result += CameraEntry(known?.id ?: c.link.entryId, name, CameraState.current, c.link, known, c.ready)
             known?.let { shown += it.id }
             shown += c.link.entryId
+        }
+        // камеры ленты — за главной, по порядку книги: на связи — «в ленте», нет — «в ленте · нет связи»
+        cameras.filter { it.inStrip && it.id !in shown }.forEach { camera ->
+            val sighting = visible.firstOrNull { match(it) == camera }
+            val link = sighting?.link ?: camera.address?.takeIf { camera.id in sideReady }?.let { CameraLink.WiFi(it) }
+            result += CameraEntry(camera.id, camera.name, CameraState.side, link, camera, camera.id in sideReady)
+            shown += camera.id
+            sighting?.let { shown += it.link.entryId }
         }
         val seen = visible.map { it to match(it) }
             .sortedWith(compareBy<Pair<CameraSighting, KnownCamera?>> { if (it.first.link is CameraLink.Usb) 0 else 1 }
@@ -300,6 +333,8 @@ data class CameraBook(val cameras: List<KnownCamera> = emptyList(), val preferre
                 camera.port?.takeIf { it != PtpIp.PORT }?.let { item.put("port", it) }
                 item.put("paired", camera.paired)
                 camera.lastUsed?.let { item.put("lastUsed", it) }
+                // не в ленте — поля нет: запись та же, что у прежних версий
+                if (camera.inStrip) item.put("strip", true)
                 put(item)
             }
         }.toString()
@@ -317,12 +352,47 @@ data class CameraBook(val cameras: List<KnownCamera> = emptyList(), val preferre
                 } ?: emptyList()
                 val port = if (item.has("port") && !item.isNull("port")) item.optInt("port").takeIf { it in 1..65535 && it != PtpIp.PORT } else null
                 val lastUsed = if (item.has("lastUsed") && !item.isNull("lastUsed")) item.optLong("lastUsed") else null
-                KnownCamera(id, name ?: model, model, aliases, text(item, "host"), port, item.optBoolean("paired", false), lastUsed)
+                KnownCamera(id, name ?: model, model, aliases, text(item, "host"), port, item.optBoolean("paired", false), lastUsed,
+                    item.optBoolean("strip", false))
             }
         }.getOrDefault(emptyList())
 
         /** Строка из JSON; нет, null или пусто — null (org.json на Android и на JVM по-разному отдают null). */
         private fun text(item: JSONObject, key: String): String? =
             if (!item.has(key) || item.isNull(key)) null else (item.opt(key) as? String)?.takeIf { it.isNotEmpty() }
+    }
+}
+
+/**
+ * Каких камер ленты нет на связи и к каким пора стучаться: в ленте, сопряжены, есть адрес, не главная, их сеанс не открыт и
+ * не открывается, адрес не занят главной (или попыткой к ней); к одной — не чаще раза в RETRY_MS; всего на связи — не
+ * больше MAX_CAMERAS (главная и до трёх в ленте). Без Android — чтобы проверять тестами.
+ */
+object CameraStrip {
+    /** Главная и до трёх в ленте. */
+    const val MAX_CAMERAS = 4
+    /** Нет связи с камерой ленты — стучимся раз во столько. */
+    const val RETRY_MS = 10_000L
+
+    /**
+     * busy — камеры ленты, чей сеанс открыт или открывается; busyAddresses — адреса, занятые главной (сеанс, попытка,
+     * восстановление); lastTry — когда к камере стучались в последний раз. Видна в сети — по её нынешнему адресу,
+     * иначе по последнему.
+     */
+    fun due(book: CameraBook, mainId: String?, busy: Set<String>, busyAddresses: Set<WiFiAddress>, lastTry: Map<String, Long>,
+            sightings: List<CameraSighting>, now: Long): List<Pair<KnownCamera, WiFiAddress>> {
+        val room = MAX_CAMERAS - (if (mainId != null || busyAddresses.isNotEmpty()) 1 else 0) - busy.size
+        if (room <= 0) return emptyList()
+        return book.cameras.asSequence()
+            .filter { it.inStrip && it.paired && it.id != mainId && it.id !in busy }
+            .filter { camera -> lastTry[camera.id]?.let { now - it >= RETRY_MS } ?: true }
+            .mapNotNull { camera ->
+                val seen = sightings.firstOrNull { it.link is CameraLink.WiFi && now - it.seenAt < CameraBook.WIFI_VISIBLE_MS &&
+                    book.match(it) == camera }
+                val address = (seen?.link as? CameraLink.WiFi)?.address ?: camera.address ?: return@mapNotNull null
+                if (address in busyAddresses) null else camera to address
+            }
+            .take(room)
+            .toList()
     }
 }

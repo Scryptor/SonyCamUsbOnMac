@@ -30,6 +30,10 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+    // android.util.Log и прочие заглушки Android в тестах на JVM — без исключений: сеанс пишет в журнал из своих корутин
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
     buildFeatures {
         compose = true
         // BuildConfig.DEBUG: параметры отладки через прокси стенда (ptpipHost, linkCheckUrl) — только в debug-сборке

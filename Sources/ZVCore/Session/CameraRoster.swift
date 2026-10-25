@@ -53,9 +53,11 @@ public struct KnownCamera: Codable, Equatable, Sendable, Identifiable {
     public var port: UInt16?
     public var paired: Bool
     public var lastUsed: Date?
+    /// В ленте камер: программа держит её на связи рядом с главной.
+    public var inStrip: Bool
 
     public init(id: String, aliases: [String] = [], name: String, model: String, host: String? = nil, port: UInt16? = nil,
-                paired: Bool = false, lastUsed: Date? = nil) {
+                paired: Bool = false, lastUsed: Date? = nil, inStrip: Bool = false) {
         self.id = id
         self.aliases = aliases
         self.name = name
@@ -64,6 +66,7 @@ public struct KnownCamera: Codable, Equatable, Sendable, Identifiable {
         self.port = port
         self.paired = paired
         self.lastUsed = lastUsed
+        self.inStrip = inStrip
     }
 
     public var endpoint: CameraEndpoint? { host.map { CameraEndpoint(host: $0, port: port ?? PTPIP.port) } }
@@ -73,7 +76,7 @@ public struct KnownCamera: Codable, Equatable, Sendable, Identifiable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, aliases, name, model, host, port, paired, lastUsed
+        case id, aliases, name, model, host, port, paired, lastUsed, strip
     }
 
     public init(from decoder: Decoder) throws {
@@ -86,6 +89,7 @@ public struct KnownCamera: Codable, Equatable, Sendable, Identifiable {
         port = try c.decodeIfPresent(UInt16.self, forKey: .port)
         paired = try c.decodeIfPresent(Bool.self, forKey: .paired) ?? false
         lastUsed = try c.decodeIfPresent(Int.self, forKey: .lastUsed).map { Date(timeIntervalSince1970: TimeInterval($0)) }
+        inStrip = try c.decodeIfPresent(Bool.self, forKey: .strip) ?? false
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -98,6 +102,7 @@ public struct KnownCamera: Codable, Equatable, Sendable, Identifiable {
         if let port, port != PTPIP.port { try c.encode(port, forKey: .port) }
         try c.encode(paired, forKey: .paired)
         if let lastUsed { try c.encode(Int(lastUsed.timeIntervalSince1970), forKey: .lastUsed) }
+        if inStrip { try c.encode(true, forKey: .strip) }
     }
 }
 
@@ -126,11 +131,11 @@ public struct CameraSighting: Equatable, Sendable {
 /// Строка списка камер.
 public struct CameraEntry: Equatable, Sendable, Identifiable {
     public enum State: String, Sendable {
-        case current, available, needsPairing, offline
+        case current, side, available, needsPairing, offline
     }
 
     public enum Action: Sendable {
-        case connect, pair
+        case connect, pair, makeMain
     }
 
     /// id знакомой камеры, иначе «usb:…» или «wifi:адрес».
@@ -148,6 +153,9 @@ public struct CameraEntry: Equatable, Sendable, Identifiable {
     public var connecting = false
     /// С ней сейчас идёт сопряжение («Сопрячь» в списке).
     public var pairing = false
+    /// В ленте: камера отмечена, а её сеанс жив (иначе — «нет связи»).
+    public var inStrip = false
+    public var stripConnected = false
 
     /// «по кабелю», «Wi-Fi · 192.168.1.40».
     public var detail: String {
@@ -162,6 +170,7 @@ public struct CameraEntry: Equatable, Sendable, Identifiable {
         if pairing { return "сопрягаю…" }
         switch state {
         case .current: return connecting ? "подключаю…" : "на связи"
+        case .side: return stripConnected ? "в ленте" : "в ленте · нет связи"
         case .available: return "свободна"
         case .needsPairing: return "нужно сопряжение"
         case .offline: return lastEndpoint == nil ? "не подключена" : "не видна в сети"
@@ -172,6 +181,7 @@ public struct CameraEntry: Equatable, Sendable, Identifiable {
         if pairing { return nil }
         switch state {
         case .current: return nil
+        case .side: return stripConnected ? .makeMain : .connect
         case .available: return .connect
         case .needsPairing: return .pair
         case .offline: return lastEndpoint == nil ? nil : .connect
@@ -233,7 +243,7 @@ public struct CameraRoster: Equatable, Sendable {
     /// Список: текущая; видимые — на кабеле, потом по Wi-Fi, каждые по тому, когда подключались (незнакомые в
     /// конце); невидимые знакомые — по тому же. По Wi-Fi камера видна `wifiVisibility` после последнего ответа.
     public func entries(sightings: [CameraSighting], current: (link: CameraSighting.Link, knownID: String?, ready: Bool)?,
-                        now: Date) -> [CameraEntry] {
+                        strip: [(id: String, connected: Bool)] = [], now: Date) -> [CameraEntry] {
         var used = Set<String>()
         var result: [CameraEntry] = []
         if let current {
@@ -245,7 +255,15 @@ public struct CameraRoster: Equatable, Sendable {
                                       name: record?.name ?? Self.unknownName(current.link, sighting?.model),
                                       model: record?.model ?? sighting?.model ?? "Камера", link: current.link,
                                       lastEndpoint: record?.endpoint, state: .current, paired: record?.paired ?? false,
-                                      connecting: !current.ready))
+                                      connecting: !current.ready, inStrip: record?.inStrip ?? false))
+        }
+        // камеры ленты — следом за главной, в порядке ленты
+        for side in strip where !used.contains(side.id) {
+            guard let record = known.first(where: { $0.id == side.id }) else { continue }
+            used.insert(record.id)
+            result.append(CameraEntry(id: record.id, knownID: record.id, name: record.name, model: record.model,
+                                      link: record.endpoint.map { .wifi($0) }, lastEndpoint: record.endpoint, state: .side,
+                                      paired: record.paired, inStrip: true, stripConnected: side.connected))
         }
         let visible = sightings.filter { sighting in
             guard sighting.link != current?.link else { return false }
@@ -266,7 +284,7 @@ public struct CameraRoster: Equatable, Sendable {
                                      name: record?.name ?? Self.unknownName(sighting.link, sighting.model),
                                      model: record?.model ?? sighting.model ?? "Камера", link: sighting.link,
                                      lastEndpoint: record?.endpoint, state: usb || paired ? .available : .needsPairing,
-                                     paired: paired), usb, record?.lastUsed))
+                                     paired: paired, inStrip: record?.inStrip ?? false), usb, record?.lastUsed))
         }
         // стабильно: кабель раньше Wi-Fi, знакомые — от последней, незнакомые — как нашлись
         let order = seen.enumerated().sorted { a, b in
@@ -279,7 +297,7 @@ public struct CameraRoster: Equatable, Sendable {
         }
         result += offline.map { _, record in
             CameraEntry(id: record.id, knownID: record.id, name: record.name, model: record.model, link: nil,
-                        lastEndpoint: record.endpoint, state: .offline, paired: record.paired)
+                        lastEndpoint: record.endpoint, state: .offline, paired: record.paired, inStrip: record.inStrip)
         }
         return result
     }
@@ -375,6 +393,12 @@ public struct CameraRoster: Equatable, Sendable {
         known[index].name = trimmed
     }
 
+    /// В ленту или из неё.
+    public mutating func setInStrip(_ id: String, _ inStrip: Bool) {
+        guard let index = known.firstIndex(where: { $0.id == id }) else { return }
+        known[index].inStrip = inStrip
+    }
+
     public mutating func forget(_ id: String) {
         known.removeAll { $0.id == id }
         if preferred == id { preferred = nil }
@@ -410,4 +434,38 @@ public struct CameraRoster: Equatable, Sendable {
     }
 
     public func camera(_ id: String?) -> KnownCamera? { id.flatMap { id in known.first { $0.id == id } } }
+}
+
+/// Лента камер: кто в ней и к кому подключаться. Без сети и таймеров, чтобы проверять тестами.
+public enum CameraStripPlan {
+    /// Всего на связи — главная и камеры ленты.
+    public static let limit = 4
+    /// Как часто стучаться к камере ленты, которой нет на связи.
+    public static let retry: TimeInterval = 10
+
+    /// Камеры ленты: отмеченные, сопряжённые, с адресом по Wi-Fi, кроме главной; от последней по времени. Сколько
+    /// помещается: 4 вместе с главной; остальные ждут.
+    public static func members(_ roster: CameraRoster, main: String?) -> [KnownCamera] {
+        let room = limit - (main == nil ? 0 : 1)
+        let candidates = roster.known.enumerated().filter { _, camera in
+            camera.inStrip && camera.paired && camera.endpoint != nil && camera.id != main
+        }
+        let ordered = candidates.sorted { a, b in
+            switch (a.element.lastUsed, b.element.lastUsed) {
+            case let (x?, y?) where x != y: return x > y
+            case (_?, nil): return true
+            case (nil, _?): return false
+            default: return a.offset < b.offset
+            }
+        }
+        return Array(ordered.prefix(max(0, room)).map(\.element))
+    }
+
+    /// К каким камерам ленты подключаться сейчас: не на связи и последняя попытка — не меньше `retry` назад.
+    public static func toConnect(_ roster: CameraRoster, main: String?, connected: Set<String>, lastAttempt: [String: Date],
+                                 now: Date) -> [KnownCamera] {
+        members(roster, main: main).filter { camera in
+            !connected.contains(camera.id) && (lastAttempt[camera.id].map { now.timeIntervalSince($0) >= retry } ?? true)
+        }
+    }
 }

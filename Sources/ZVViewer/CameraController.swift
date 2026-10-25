@@ -214,6 +214,12 @@ final class CameraController {
     private(set) var choosing: CameraSighting.Link?
     /// Сопряжение только с этой камерой («Сопрячь» в списке); nil — с любой новой.
     private(set) var pairingTarget: CameraEndpoint?
+    /// Камеры в ленте рядом с главной — по Wi-Fi, каждая со своим открытым сеансом.
+    private(set) var sideCameras: [SideCamera] = []
+    /// Когда последний раз стучались к камере ленты, которой нет на связи.
+    @ObservationIgnored private var stripAttempts: [String: Date] = [:]
+    /// К каким камерам ленты без плитки сейчас стучимся.
+    @ObservationIgnored private var stripConnecting: Set<String> = []
     @ObservationIgnored private var wifiUSN: [CameraEndpoint: String] = [:]
     @ObservationIgnored private var usbKeys: [String: ObjectIdentifier] = [:]
     @ObservationIgnored private var currentUSBSerial: String?
@@ -256,6 +262,13 @@ final class CameraController {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(1))
                 await self?.wifiTick()
+            }
+        }
+        // камеры ленты держим на связи
+        Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(2))
+                self?.stripTick()
             }
         }
     }
@@ -1095,7 +1108,8 @@ final class CameraController {
     /// Список камер: текущая, видимые, знакомые.
     var cameras: [CameraEntry] {
         roster.entries(sightings: usbSightings + Array(wifiSightings.values),
-                       current: currentLink.map { ($0, currentCameraID, phase == .ready) }, now: Date())
+                       current: currentLink.map { ($0, currentCameraID, phase == .ready) },
+                       strip: sideCameras.map { ($0.id, $0.connected) }, now: Date())
             .map { entry in
                 var entry = entry
                 entry.pairing = isPairing && pairingTarget != nil && entry.endpoint == pairingTarget && entry.state != .current
@@ -1110,7 +1124,13 @@ final class CameraController {
     /// осталась бы писать без программы.
     func selectCamera(_ id: String) {
         guard let entry = cameras.first(where: { $0.id == id }), entry.state != .current else { return }
-        guard !isRecording else { return showStatus("Идёт запись — остановите её, чтобы переключить камеру") }
+        // главная по кабелю закрылась бы посреди записи; по Wi-Fi уйдёт в ленту и продолжит писать
+        guard !isRecording || mainCanGoToStrip else { return showStatus("Идёт запись — остановите её, чтобы переключить камеру") }
+        if entry.state == .side {
+            if let side = sideCameras.first(where: { $0.id == id && $0.connected }) { return promote(side) }
+            // без связи — подключить главной по последнему адресу; попытки ленты к ней больше не нужны
+            closeSide(id)
+        }
         if entry.state == .needsPairing { return pairCamera(id) }
         if case let .usb(key)? = entry.link {
             guard let device = usbKeys[key] else { return }
@@ -1128,7 +1148,7 @@ final class CameraController {
     /// «Сопрячь» в списке: сопряжение только с этой камерой.
     func pairCamera(_ id: String) {
         guard let entry = cameras.first(where: { $0.id == id }), let endpoint = entry.endpoint else { return }
-        guard !isRecording else { return showStatus("Идёт запись — остановите её, чтобы переключить камеру") }
+        guard !isRecording || mainCanGoToStrip else { return showStatus("Идёт запись — остановите её, чтобы переключить камеру") }
         connectChosen(endpoint, name: entry.name, pairing: true)
     }
 
@@ -1137,7 +1157,7 @@ final class CameraController {
         choosing = .wifi(endpoint)
         pairingTarget = pairing ? endpoint : nil
         isPairing = pairing
-        teardown()
+        moveMainAside()
         connectionMessage = nil
         wifiPolicy = WiFiPolicy()
         if pairing {
@@ -1171,9 +1191,164 @@ final class CameraController {
     /// Забыть камеру: она пропадает из списка (если не на связи — тогда она остаётся текущей).
     func forgetCamera(_ id: String) {
         guard id != currentCameraID else { return }
+        closeSide(id)
         roster.forget(id)
         storeRoster()
     }
+
+    // MARK: - Лента камер
+
+    /// В ленту: программа будет держать камеру на связи рядом с главной.
+    func addToStrip(_ id: String) {
+        roster.setInStrip(id, true)
+        storeRoster()
+        stripAttempts[id] = nil
+        stripTick()
+    }
+
+    /// Из ленты: сеанс с ней закрывается, сама программа к ней больше не подключается.
+    func removeFromStrip(_ id: String) {
+        roster.setInStrip(id, false)
+        storeRoster()
+        closeSide(id)
+    }
+
+    private func closeSide(_ id: String) {
+        sideCameras.filter { $0.id == id }.forEach { $0.close() }
+        sideCameras.removeAll { $0.id == id }
+    }
+
+    /// Можно ли переключиться на другую камеру сейчас: во время записи — только если главная уйдёт в ленту, а не
+    /// закроется.
+    var canSwitchCamera: Bool { !isRecording || mainCanGoToStrip }
+
+    /// Главную можно увести в ленту, не закрывая её сеанс: по Wi-Fi, готова, знакома.
+    private var mainCanGoToStrip: Bool {
+        transportKind == .wifi && phase == .ready && currentCameraID != nil && wifiTransport != nil
+    }
+
+    /// Перед подключением к другой камере: главная по Wi-Fi — в ленту, по кабелю — отключить.
+    private func moveMainAside() {
+        if !releaseMainToStrip(), transportKind != nil { teardown() }
+    }
+
+    /// Главная по Wi-Fi уходит в ленту: её сеанс не закрывается, а переходит плитке.
+    @discardableResult
+    private func releaseMainToStrip() -> Bool {
+        guard mainCanGoToStrip, let session, let transport = wifiTransport, case let .wifi(endpoint)? = currentLink,
+              let id = currentCameraID else { return false }
+        let handed = SideCamera.Handed(session: session, transport: transport, endpoint: endpoint, deviceInfo: deviceInfo,
+                                       properties: properties, recordingStartedAt: recordingStartedAt)
+        teardown(closing: false)
+        roster.setInStrip(id, true)
+        storeRoster()
+        let side = sideCamera(id, endpoint)
+        side.adopt(handed)
+        note("«\(roster.camera(id)?.name ?? "камера")» — в ленту")
+        return true
+    }
+
+    /// Камера из ленты — главная, сразу: её открытый сеанс переходит на большой экран. Прежняя главная по Wi-Fi —
+    /// в ленту, по кабелю — отключается.
+    private func promote(_ side: SideCamera) {
+        guard let handed = side.handOver() else { return }
+        sideCameras.removeAll { $0 === side }
+        choosing = nil
+        pairingTarget = nil
+        isPairing = false
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        moveMainAside()
+        adoptMain(handed)
+    }
+
+    /// Главный экран берёт открытый сеанс из ленты: без рукопожатия и ожидания — камера уже готова.
+    private func adoptMain(_ handed: SideCamera.Handed) {
+        let session = handed.session
+        let transport = handed.transport
+        let endpoint = handed.endpoint
+        phase = .settling
+        transportKind = .wifi
+        wifiStatus = nil
+        connectionMessage = nil
+        qualityPolicy = LiveViewQualityPolicy(now: Date())
+        qualityWriting = false
+        recentFrames = []
+        if sessionStartedAt == nil { sessionStartedAt = Date() }
+        if sessionActivity == nil {
+            sessionActivity = ProcessInfo.processInfo.beginActivity(
+                options: [.userInitiated, .latencyCritical, .idleDisplaySleepDisabled], reason: "Live view с камеры")
+        }
+        self.session = session
+        closeTransport = { await transport.close() }
+        wifiTransport = transport
+        wifiDirect = PTPIP.isCameraAccessPoint(endpoint.host)
+        currentLink = .wifi(endpoint)
+        coalescer = WriteCoalescer { [weak self] code, value in
+            let result = try? await session.set(code, to: value)
+            await self?.writeFinished(code, value, result)
+        }
+        deviceInfo = handed.deviceInfo
+        // таймер записи — с того же места: камера продолжала писать в ленте
+        recordingStartedAt = handed.recordingStartedAt
+        apply(handed.properties)
+        noteCameraIdentity()
+        startStreams(session, onEnded: { [weak self] in
+            Task { [weak self] in
+                let loss = await transport.loss
+                self?.wifiLost(loss, transport: transport, host: endpoint)
+            }
+        })
+        tasks.append(Task { [weak self] in
+            for await status in transport.linkStatus { self?.linkChanged(status) }
+        })
+        phase = .ready
+        wifiPolicy.connected()
+        wifiPolicy.sessionReady()
+        // в ленте превью было низкого качества — на главной сразу высокое, дальше решает политика
+        writeQuality(.high, session)
+        note("главная — «\(currentCameraName)», из ленты")
+    }
+
+    private func sideCamera(_ id: String, _ endpoint: CameraEndpoint) -> SideCamera {
+        if let side = sideCameras.first(where: { $0.id == id }) { return side }
+        let side = SideCamera(id: id, endpoint: endpoint)
+        sideCameras.append(side)
+        return side
+    }
+
+    /// Раз в 2 с: камеры ленты, которых нет на связи, — стучимся (к каждой не чаще раза в 10 с); убранные из ленты
+    /// и не поместившиеся — закрываем.
+    private func stripTick() {
+        let members = CameraStripPlan.members(roster, main: currentCameraID)
+        let ids = Set(members.map(\.id))
+        for side in sideCameras where !ids.contains(side.id) { side.close() }
+        sideCameras.removeAll { !ids.contains($0.id) }
+        // пока ищем новую камеру или подключаем выбранную — не мешаем; Wi-Fi выключен в настройках — не стучимся
+        guard !isPairing, choosing == nil, Prefs.wifiEnabled else { return }
+        let busy = Set(sideCameras.filter { $0.connected || $0.connecting }.map(\.id)).union(stripConnecting)
+        for camera in CameraStripPlan.toConnect(roster, main: currentCameraID, connected: busy, lastAttempt: stripAttempts,
+                                                now: Date()) {
+            guard let endpoint = camera.endpoint, currentLink != .wifi(endpoint) else { continue }
+            stripAttempts[camera.id] = Date()
+            // плитка — у камеры, что уже была на связи в этом запуске; новая появится, когда ответит
+            let known = sideCameras.first { $0.id == camera.id }
+            let side = known ?? SideCamera(id: camera.id, endpoint: endpoint)
+            if known == nil { stripConnecting.insert(camera.id) }
+            Task { [weak self] in
+                guard let self else { return }
+                let connected = await side.connect(identity: self.identity)
+                self.stripConnecting.remove(camera.id)
+                guard connected else { return }
+                // пока стучались, камеру убрали из ленты или она стала главной — сеанс не нужен
+                guard CameraStripPlan.members(self.roster, main: self.currentCameraID).contains(where: { $0.id == camera.id })
+                else { return side.close() }
+                if !self.sideCameras.contains(where: { $0 === side }) { self.sideCameras.append(side) }
+                self.note("в ленте — «\(camera.name)»")
+            }
+        }
+    }
+
 
     /// Список камер показан: ищем камеры в сети сразу и раз в 10 с, пока он открыт.
     func cameraListAppeared() {
@@ -1250,8 +1425,8 @@ final class CameraController {
     /// Начать сопряжение: программа ищет камеру и стучится, пока на камере включено Pairing.
     func startPairing() {
         pairingTarget = nil
-        // одна камера на связи за раз: новую ищем без сеанса
-        if transportKind != nil { teardown() }
+        // новую ищем без главной: главная по Wi-Fi уходит в ленту
+        moveMainAside()
         isPairing = true
         wifiStatus = "Ищу камеру в сети…"
     }
@@ -1272,6 +1447,8 @@ final class CameraController {
         Prefs.wifiCameraName = nil
         roster.unpairAll()
         storeRoster()
+        sideCameras.forEach { $0.close() }
+        sideCameras.removeAll()
         identity = PTPIPIdentity.reset()
         wifiPolicy = WiFiPolicy()
         wifiStatus = nil
@@ -1325,6 +1502,8 @@ final class CameraController {
         if case let .wifi(endpoint)? = choosing { chosen = endpoint }
         let last = pairingTarget ?? chosen ?? (isPairing ? nil : roster.firstEndpoint)
         var lastFailed = false
+        // камера уже на связи в ленте — второе подключение ей не нужно: она главная сразу
+        if let last, let side = sideCameras.first(where: { $0.connected && $0.endpoint == last }) { return promote(side) }
         if let last {
             switch await tryWiFi(last, discovered: false) {
             case .connected, .dropped: return
@@ -1334,10 +1513,13 @@ final class CameraController {
         }
         // выбранная в списке камера или сопряжение с одной — только она
         guard wifiWanted, pairingTarget == nil, chosen == nil else { return }
+        // последняя не ответила, а в ленте есть камеры на связи — главной становится первая
+        if !isPairing, let side = sideCameras.first(where: \.connected) { return promote(side) }
         if isPairing, wifiStatus == nil { wifiStatus = "Ищу камеру в сети…" }
         let responses = await WiFiDiscovery.search()
         noteSightings(responses)
-        let found = responses.map(\.endpoint)
+        let inStrip = Set(sideCameras.map(\.endpoint))
+        let found = responses.map(\.endpoint).filter { !inStrip.contains($0) }
         guard wifiWanted else { return }
         if found.isEmpty {
             wifiPolicy.nothingFound()
@@ -1525,7 +1707,14 @@ final class CameraController {
     /// поиск в сети с растущей паузой, а если камера ждёт на кабеле — она.
     private func giveUpReconnect() {
         if reconnectingSince != nil { note("восстановить сеанс не вышло — жду камеру как обычно") }
+        let lost = currentCameraID.flatMap(roster.camera)
         teardown()
+        // в ленте есть камеры на связи — главной становится первая; пропавшая, если она в ленте, — плиткой «нет связи»
+        if let side = sideCameras.first(where: \.connected) {
+            promote(side)
+            if let lost, lost.inStrip, let endpoint = lost.endpoint { _ = sideCamera(lost.id, endpoint) }
+            return
+        }
         let seconds = wifiPolicy.sessionLost(now: Date())
         connectionMessage = "Связь по Wi-Fi пропала. Повтор через \(seconds) с…"
         connectAttachedIfAny()
@@ -1811,7 +2000,8 @@ final class CameraController {
     }
 
     /// Останавливает всё, что связано с текущей камерой, и закрывает сессию.
-    private func teardown() {
+    /// closing: false — сеанс уходит в ленту: всё, что связано с главным экраном, сбрасывается, а соединение — нет.
+    private func teardown(closing: Bool = true) {
         tasks.forEach { $0.cancel() }
         tasks.removeAll()
         reconnectTask?.cancel()
@@ -1820,11 +2010,13 @@ final class CameraController {
         let close = closeTransport
         // качество превью снижали из-за слабого сигнала — камеру оставляем на высоком
         let restore = transportKind == .wifi && previewQuality == .low ? session : nil
-        Task {
-            if let restore {
-                try? await restore.setQuietly(SonyProp.liveViewImageQuality, to: LiveViewQuality.high.rawValue, type: PTPType.uint8)
+        if closing {
+            Task {
+                if let restore {
+                    try? await restore.setQuietly(SonyProp.liveViewImageQuality, to: LiveViewQuality.high.rawValue, type: PTPType.uint8)
+                }
+                await close?()
             }
-            await close?()
         }
         if let activity = sessionActivity {
             ProcessInfo.processInfo.endActivity(activity)

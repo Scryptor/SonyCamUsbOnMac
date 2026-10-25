@@ -238,6 +238,11 @@ struct LiveScreen: View {
                     Spacer()
                     StatusPill(controller: controller, screen: screen)
                 }
+                // камер на связи две и больше — лента слева под верхней панелью
+                if !controller.sideCameras.isEmpty {
+                    CameraStrip(controller: controller)
+                        .padding(.top, 8)
+                }
                 Spacer()
                 if !screen.fnOpen, !controller.shots.isEmpty {
                     ShotsStrip(controller: controller, screen: screen)

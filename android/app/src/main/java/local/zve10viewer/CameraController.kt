@@ -36,6 +36,8 @@ import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
@@ -76,6 +78,8 @@ import local.zve10viewer.settings.CameraEntry
 import local.zve10viewer.settings.CameraLink
 import local.zve10viewer.settings.CameraSighting
 import local.zve10viewer.settings.CameraState
+import local.zve10viewer.settings.CameraStrip
+import local.zve10viewer.settings.KnownCamera
 import local.zve10viewer.settings.CurrentCamera
 import local.zve10viewer.settings.CaptureMode
 import local.zve10viewer.settings.FileNaming
@@ -320,6 +324,16 @@ class CameraController(private val context: Context, private val scope: Coroutin
     private var pairingTarget: WiFiAddress? = null
     /** Поиск в сети, пока открыт список камер. */
     private var searchJob: Job? = null
+    /** Камеры ленты, кроме главной: у каждой свой сеанс (или «нет связи» с последним кадром), по порядку ленты. */
+    var sideCameras by mutableStateOf<List<SideCamera>>(emptyList())
+        private set
+    /** Корутины открытого сеанса главной (события камеры): живут и после передачи сеанса в ленту. */
+    private var sessionScope: CoroutineScope? = null
+    /** К каким камерам ленты сейчас стучимся и когда стучались в последний раз. */
+    private val sideConnecting = HashMap<String, Job>()
+    private val sideTried = HashMap<String, Long>()
+    /** Адрес, к которому сейчас стучится главная: камеру по нему в ленту не тянем. */
+    private var mainAttempt: WiFiAddress? = null
     /** Провал связи по Wi-Fi: ждём ответа, а ничего не приходит. Сеанс держим, кадр остаётся на экране. */
     var linkOutage by mutableStateOf(false)
         private set
@@ -1164,7 +1178,8 @@ class CameraController(private val context: Context, private val scope: Coroutin
                 val live = it == currentLink
                 CurrentCamera(it, if (live) currentCameraId else null, live && phase == Phase.ready, if (live) deviceInfo?.model else null)
             }
-            val entries = cameraBook.entries(usbSightings + wifiSightings.values, current, System.currentTimeMillis())
+            val entries = cameraBook.entries(usbSightings + wifiSightings.values, current, System.currentTimeMillis(),
+                sideCameras.filter { it.connected }.map { it.id }.toSet())
             return if (target == null) entries
             else entries.map { if (it.state != CameraState.current && it.address == target) it.copy(pairing = true) else it }
         }
@@ -1184,12 +1199,16 @@ class CameraController(private val context: Context, private val scope: Coroutin
         }
 
     /**
-     * Камеру выбрали в списке: текущая — ничего; несопряжённая — сопряжение с ней; иначе связь с текущей закрывается и
-     * программа подключается к выбранной (невидимую знакомую — один раз по последнему адресу). Пока идёт запись — нет.
+     * Камеру выбрали в списке: текущая — ничего; в ленте и на связи — главная сразу; несопряжённая — сопряжение с ней;
+     * иначе программа подключается к выбранной (невидимую знакомую — один раз по последнему адресу), а текущая по Wi-Fi
+     * уходит в ленту, по кабелю — отключается (во время записи — нельзя).
      */
     fun selectCamera(id: String) {
+        sideCameras.firstOrNull { it.id == id && it.connected }?.let { return promote(it) }
         val entry = cameraEntries.firstOrNull { it.id == id } ?: return
         if (entry.state == CameraState.current) return
+        // к ней как раз стучится лента — та попытка не нужна: подключаемся главной
+        sideConnecting.remove(id)?.cancel()
         if (entry.state == CameraState.needsPairing) return pairCamera(id)
         val link = entry.link ?: entry.known?.address?.let { CameraLink.WiFi(it) } ?: return
         if (!freeForSwitch()) return
@@ -1227,17 +1246,182 @@ class CameraController(private val context: Context, private val scope: Coroutin
         }
     }
 
-    /** Перед переключением камеры: пока идёт запись — нельзя; связь есть — закрываем. */
+    /**
+     * Перед переключением камеры. Главная по Wi-Fi на связи — её сеанс уходит в ленту, и во время записи тоже: камера
+     * остаётся на связи. Иначе во время записи — нельзя (сеанс по кабелю закрылся бы); связь есть — закрываем.
+     */
     private fun freeForSwitch(): Boolean {
-        if (recordingStartedAt != null) {
-            showStatus("Идёт запись — остановите её, чтобы переключить камеру")
-            return false
+        val released = releaseMainSession()
+        if (released != null) {
+            toStrip(released)
+        } else {
+            if (recordingStartedAt != null) {
+                showStatus("Идёт запись — остановите её, чтобы переключить камеру")
+                return false
+            }
+            closeConnectingSocket()
+            if (transportKind != null || reconnect != null || device != null) teardown()
         }
         closeConnectingSocket()
-        if (transportKind != null || reconnect != null || device != null) teardown()
         failures = 0
         retryAt = 0
         return true
+    }
+
+    /** Сеанс главной по Wi-Fi, готовый, — отдать (в ленту), не закрывая; главной больше нет. Иначе null. */
+    private fun releaseMainSession(): OpenCamera? {
+        val wifi = transport as? PtpIpTransport ?: return null
+        val session = session ?: return null
+        val owned = sessionScope ?: return null
+        val id = currentCameraId ?: return null
+        val address = (currentLink as? CameraLink.WiFi)?.address ?: return null
+        if (transportKind != TransportKind.wifi || phase != Phase.ready || reconnect != null) return null
+        val open = OpenCamera(id, address, wifi, session, owned, recordingStartedAt)
+        teardown(keepOpen = true)
+        return open
+    }
+
+    // MARK: - Лента камер
+
+    /** Плитки ленты: главная и камеры ленты; ленты нет, пока камера ленты не появилась ни разу. */
+    val stripVisible: Boolean get() = transportKind != null && sideCameras.isNotEmpty()
+
+    /** Сеанс главной по Wi-Fi — в ленту: камера на связи, низкое превью, в книге — «в ленте». */
+    private fun toStrip(open: OpenCamera) {
+        val name = cameraBook.find(open.id)?.name ?: "Камера"
+        val side = sideCameras.firstOrNull { it.id == open.id } ?: newSide(open.id, name)
+        side.name = name
+        side.attach(open)
+        updateBook(cameraBook.withStrip(open.id, true))
+        journal("«$name» — в ленту (${open.address})")
+    }
+
+    private fun newSide(id: String, name: String): SideCamera {
+        val side = SideCamera(id, name, scope, liveViewWanted)
+        side.onLost = { lost ->
+            journal("«${lost.name}» в ленте — нет связи")
+            sideTried[lost.id] = System.currentTimeMillis()
+        }
+        sideCameras = sideCameras + side
+        return side
+    }
+
+    private fun removeSide(side: SideCamera, close: Boolean) {
+        if (close) side.close() else side.detach()
+        sideCameras = sideCameras.filter { it !== side }
+    }
+
+    /** Камера ленты — главная сразу: её открытый сеанс переходит на большой экран, прежняя главная — в ленту. */
+    private fun promote(side: SideCamera) {
+        if (!side.connected || !freeForSwitch()) return
+        // freeForSwitch могла убрать её (сеанс прежней главной лёг на её же место) — берём сеанс сейчас
+        val open = side.detach() ?: return
+        sideCameras = sideCameras.filter { it !== side }
+        isPairing = false
+        pairingTarget = null
+        wifiStatus = null
+        if (choice is CameraLink.WiFi) choice = null
+        adoptSession(open)
+    }
+
+    /** «В ленту»: программа подключит камеру сама и будет держать на связи рядом с главной. */
+    fun addToStrip(id: String) {
+        updateBook(cameraBook.withStrip(id, true))
+        sideTried.remove(id)
+        tickStrip()
+    }
+
+    /** «Убрать из ленты»: сеанс с ней закрывается, сама программа к ней больше не стучится. */
+    fun removeFromStrip(id: String) {
+        updateBook(cameraBook.withStrip(id, false))
+        sideConnecting.remove(id)?.cancel()
+        sideCameras.firstOrNull { it.id == id }?.let { removeSide(it, close = true) }
+        journal("«${cameraBook.find(id)?.name ?: id}» — убрана из ленты")
+    }
+
+    /** Плитка ленты: касание — сделать главной. */
+    fun makeMain(id: String) {
+        sideCameras.firstOrNull { it.id == id }?.let { side ->
+            if (side.connected) promote(side) else selectCamera(id)
+        }
+    }
+
+    /** Все камеры ленты — закрыть (выход, минута в фоне, «Забыть сопряжение»). */
+    private fun closeSides() {
+        sideConnecting.values.forEach { it.cancel() }
+        sideConnecting.clear()
+        sideCameras.forEach { it.close() }
+        sideCameras = emptyList()
+    }
+
+    /**
+     * Раз в полсекунды, пока главная на связи и программа на экране: к камерам ленты без связи стучимся тихо, к каждой —
+     * раз в 10 с; всего на связи не больше четырёх.
+     */
+    private fun tickStrip() {
+        // Wi-Fi выключен в настройках — к камерам ленты не стучимся
+        if (!foreground || phase != Phase.ready || transportKind == null || !prefs.wifiEnabled) return
+        val busy = sideCameras.filter { it.connected }.map { it.id }.toSet() + sideConnecting.keys
+        val busyAddresses = setOfNotNull((currentLink as? CameraLink.WiFi)?.address, mainAttempt, reconnect?.address,
+            (choice as? CameraLink.WiFi)?.address, pairingTarget)
+        val now = System.currentTimeMillis()
+        val due = CameraStrip.due(cameraBook, currentCameraId, busy, busyAddresses, sideTried, wifiSightings.values.toList(), now)
+        for ((camera, address) in due) {
+            sideTried[camera.id] = now
+            sideConnecting[camera.id] = scope.launch { connectSide(camera, address) }
+        }
+    }
+
+    /**
+     * Одна тихая попытка к камере ленты: соединение, рукопожатие, готовность — и в ленту, с низким превью. Отказ
+     * сопряжение не снимает и строк состояния не пишет.
+     */
+    private suspend fun connectSide(camera: KnownCamera, address: WiFiAddress) {
+        val me = identity ?: PtpIpIdentity.load(context).also { identity = it }
+        val network = wifiNetwork
+        val linkCheck = debugLinkCheckUrl
+        val created = AtomicReference<PtpIpTransport?>()
+        var open: OpenCamera? = null
+        try {
+            val (transport, _) = withContext(Dispatchers.IO) {
+                PtpIpTransport.connect(address.host, me, network, connectTimeoutMs = 3000, initTimeoutMs = 5000, linkCheckUrl = linkCheck,
+                    port = address.port).also { created.set(it.first) }
+            }
+            created.set(null)
+            val owned = sessionScopeOf()
+            val session = CameraSession(transport)
+            open = OpenCamera(camera.id, address, transport, session, owned)
+            session.start(owned)
+            session.waitUntilReady()
+            // пока подключались: камеру убрали из ленты, она стала главной, программа ушла с экрана
+            val known = cameraBook.find(camera.id)
+            if (known?.inStrip != true || camera.id == currentCameraId || !foreground) {
+                open.close()
+                return
+            }
+            // по этому адресу оказалась другая камера — не наша
+            val print = session.deviceInfo?.serial?.trim()?.takeIf { it.isNotEmpty() }?.let(CameraBook::serialFingerprint)
+            if (print != null && !known.knows(print)) {
+                journal("лента: по адресу $address не «${known.name}» — закрываю")
+                open.close()
+                return
+            }
+            val side = sideCameras.firstOrNull { it.id == camera.id } ?: newSide(camera.id, known.name)
+            side.name = known.name
+            side.attach(open)
+            open = null
+            journal("«${known.name}» — в ленте ($address)")
+        } catch (e: CancellationException) {
+            created.getAndSet(null)?.close()
+            open?.close(abort = true)
+            throw e
+        } catch (e: Exception) {
+            created.getAndSet(null)?.close()
+            open?.close(abort = true)
+            Log.d("ZVStrip", "${camera.name} ($address): нет связи — ${e.message ?: e.javaClass.simpleName}")
+        } finally {
+            sideConnecting.remove(camera.id)
+        }
     }
 
     private fun choose(link: CameraLink, name: String) {
@@ -1288,6 +1472,9 @@ class CameraController(private val context: Context, private val scope: Coroutin
         val (book, id) = cameraBook.connected(info?.serial, info?.model ?: "Камера", link, prints, System.currentTimeMillis())
         updateBook(book)
         currentCameraId = id
+        // она же была в ленте (без связи или вторым сеансом) — теперь главная
+        sideCameras.firstOrNull { it.id == id }?.let { removeSide(it, close = true) }
+        sideConnecting.remove(id)?.cancel()
     }
 
     private fun updateBook(book: CameraBook) {
@@ -1320,6 +1507,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
                 if (foreground && device == null && transportKind == null && System.currentTimeMillis() >= retryAt &&
                     choice !is CameraLink.WiFi && !isPairing) findCamera()
                 tickCameras()
+                tickStrip()
                 tickFrameStats()
                 tickShownStats()
                 tickTabletBattery()
@@ -1350,6 +1538,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
         runCatching { context.unregisterReceiver(receiver) }
         runCatching { connectivity.unregisterNetworkCallback(networkCallback) }
         closeConnectingSocket()
+        closeSides()
         teardown()
     }
 
@@ -1374,8 +1563,9 @@ class CameraController(private val context: Context, private val scope: Coroutin
         backgroundJob?.cancel()
         backgroundJob = scope.launch {
             delay(BACKGROUND_CLOSE_MS)
-            if (session != null || reconnect != null) {
+            if (session != null || reconnect != null || sideCameras.isNotEmpty()) {
                 journal("минута в фоне — закрываю сеанс, на экране подключусь снова")
+                closeSides()
                 teardown()
                 message = null
             }
@@ -1532,6 +1722,52 @@ class CameraController(private val context: Context, private val scope: Coroutin
             onEnded = { if (device != null) retryLater("Связь с камерой оборвалась") })
     }
 
+    /** Записи настроек в камеру сеанса: одна на свойство за раз, ждём только последнее значение. */
+    private fun writer(session: CameraSession) = WriteCoalescer(scope) { code, value ->
+        val result = runCatching { session.set(code, value) }
+        Log.d(TAG, "запись 0x${code.toString(16)} = ${value.toString(16)}: ${result.getOrNull() ?: result.exceptionOrNull()}")
+        // ждём только последнее запрошенное значение; промежуточные пропускаем
+        if (targets[code] == value) clearTarget(code)
+    }
+
+    /** Свои корутины у каждого открытого сеанса: закрыли сеанс — их нет, отдали в ленту — живут дальше. */
+    private fun sessionScopeOf() = CoroutineScope(scope.coroutineContext + SupervisorJob(scope.coroutineContext[Job]))
+
+    /**
+     * Камера из ленты — главная: её открытый сеанс, без переподключения; таймер записи — её же; качество превью — снова
+     * по каналу (с низкого — сначала высокое).
+     */
+    private fun adoptSession(open: OpenCamera) {
+        phase = Phase.connecting
+        transportKind = TransportKind.wifi
+        isPairing = false
+        wifiStatus = null
+        message = null
+        val transport = open.transport
+        val session = open.session
+        this.transport = transport
+        this.session = session
+        sessionScope = open.scope
+        sessionFrames = 0
+        qualityPolicy = LiveViewQualityPolicy(now = System.currentTimeMillis())
+        startSessionStats()
+        holdWifiLock(true)
+        wifiDirect = PtpIp.isCameraAccessPoint(open.address.host)
+        currentLink = CameraLink.WiFi(open.address)
+        currentCameraId = open.id
+        deviceInfo = session.deviceInfo
+        recordingStartedAt = open.recordingSince
+        coalescer = writer(session)
+        noteCameraConnected(session.deviceInfo)
+        startStreams(session) { if (this.transport === transport) wifiSessionStopped(null) }
+        phase = Phase.ready
+        failures = 0
+        wifiPolicy.connected()
+        wifiPolicy.sessionReady()
+        startQuality(session)
+        journal("«$cameraName» из ленты — главная, без переподключения (${open.address})")
+    }
+
     /** Сеанс одинаков для USB и Wi-Fi: различаются транспорт и что делать при обрыве. */
     private fun runSession(transport: PtpTransport, kind: TransportKind, onFailure: (Exception) -> Unit, onEnded: () -> Unit) {
         phase = Phase.connecting
@@ -1547,19 +1783,17 @@ class CameraController(private val context: Context, private val scope: Coroutin
         // новый сеанс, а не тихое восстановление прежнего — счёт для панели отладки с начала
         if (reconnect == null) startSessionStats()
         if (kind == TransportKind.wifi) holdWifiLock(true)
-        coalescer = WriteCoalescer(scope) { code, value ->
-            val result = runCatching { session.set(code, value) }
-            Log.d(TAG, "запись 0x${code.toString(16)} = ${value.toString(16)}: ${result.getOrNull() ?: result.exceptionOrNull()}")
-            // ждём только последнее запрошенное значение; промежуточные пропускаем
-            if (targets[code] == value) clearTarget(code)
-        }
+        coalescer = writer(session)
+        // события камеры — в своём scope сеанса: сеанс можно отдать в ленту, не закрыв
+        val owned = sessionScopeOf()
+        sessionScope = owned
         // об одном обрыве могут сообщить и рукопожатие, и поток свойств, а сообщение — запоздать: слушаем только свой
         // транспорт, иначе поздний вызов убил бы уже восстановленный сеанс
         val failed: (Exception) -> Unit = { e -> if (this.transport === transport) onFailure(e) }
         val ended: () -> Unit = { if (this.transport === transport) onEnded() }
         jobs += scope.launch {
             try {
-                session.start(this)
+                session.start(owned)
                 deviceInfo = session.deviceInfo
                 noteCameraConnected(session.deviceInfo)
                 phase = Phase.settling
@@ -1633,6 +1867,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
         if (choice is CameraLink.WiFi) choice = null
         pairingTarget = null
         closeConnectingSocket()
+        closeSides()
         if (transportKind == TransportKind.wifi) teardown()
     }
 
@@ -1675,6 +1910,9 @@ class CameraController(private val context: Context, private val scope: Coroutin
         if (!foreground) return
         val chosen = (choice as? CameraLink.WiFi)?.address
         if (!wifiWanted || wifiBusy) return
+        if (chosen == null && !isPairing) {
+            sideCameras.firstOrNull { it.connected }?.let { return promote(it) }
+        }
         // выбранную в списке камеру, как и сопряжение, пауза после обрыва не держит
         if (chosen == null && !wifiPolicy.mayAttempt(prefs.wifiEnabled, isPairing, System.currentTimeMillis())) return
         wifiBusy = true
@@ -1780,6 +2018,20 @@ class CameraController(private val context: Context, private val scope: Coroutin
      * remember — запомнить адрес для прежних версий (адрес прокси отладки не запоминаем).
      */
     private suspend fun tryWiFi(address: WiFiAddress, discovered: Boolean, remember: Boolean = true): WiFiAttempt {
+        // эта камера уже на связи в ленте — второе соединение не нужно: она главная сразу
+        sideCameras.firstOrNull { it.connected && it.address == address }?.let { side ->
+            promote(side)
+            return WiFiAttempt.connected
+        }
+        mainAttempt = address
+        try {
+            return tryWiFiOnce(address, discovered, remember)
+        } finally {
+            mainAttempt = null
+        }
+    }
+
+    private suspend fun tryWiFiOnce(address: WiFiAddress, discovered: Boolean, remember: Boolean): WiFiAttempt {
         val pairing = isPairing
         if (pairing) wifiStatus = "Камера найдена ($address). Включите на камере PC Remote Function → Pairing и подтвердите сопряжение"
         val me = identity ?: PtpIpIdentity.load(context).also { identity = it }
@@ -1860,9 +2112,25 @@ class CameraController(private val context: Context, private val scope: Coroutin
         if (prefs.wifiHost == address.host) prefs.wifiCameraName = null
     }
 
-    /** Сеанс по Wi-Fi оборвался: повтор с растущей паузой; камеру на кабеле, если она есть, подхватит опрос USB. */
+    /**
+     * Сеанс по Wi-Fi оборвался: повтор с растущей паузой; камеру на кабеле, если она есть, подхватит опрос USB. В ленте
+     * есть камера на связи — она главная сразу; пропавшая, если была в ленте, остаётся там «без связи».
+     */
     private fun wifiLost() {
+        val lostId = currentCameraId
+        val lastFrame = frame
         teardown()
+        val successor = sideCameras.firstOrNull { it.connected }
+        if (lostId != null && cameraBook.find(lostId)?.inStrip == true && successor != null) {
+            val name = cameraBook.find(lostId)?.name ?: "Камера"
+            (sideCameras.firstOrNull { it.id == lostId } ?: newSide(lostId, name)).showLast(lastFrame)
+            sideTried[lostId] = System.currentTimeMillis()
+        }
+        if (successor != null) {
+            journal("главная пропала — главной становится «${successor.name}» из ленты")
+            promote(successor)
+            return
+        }
         val seconds = wifiPolicy.sessionLost(System.currentTimeMillis())
         message = "Связь по Wi-Fi пропала. Повтор через $seconds с…"
     }
@@ -2344,11 +2612,16 @@ class CameraController(private val context: Context, private val scope: Coroutin
      * Останавливает сеанс: задачи, сеанс, соединение (abort — сбросом RST, иначе обычным закрытием с CloseSession).
      * Картинку, свойства, таймер записи и ленту на экране не трогает — их сбрасывает teardown.
      */
-    private fun stopSession(abort: Boolean) {
+    private fun stopSession(abort: Boolean, keepOpen: Boolean = false) {
         jobs.forEach { it.cancel() }
         jobs.clear()
         qualityJob?.cancel()
-        session?.close()
+        // сеанс уходит в ленту — открытым: его события слушает свой scope
+        if (!keepOpen) {
+            session?.close()
+            sessionScope?.cancel()
+        }
+        sessionScope = null
         when (val current = transport) {
             is PtpIpTransport -> {
                 // провалы этого соединения — в счёт сеанса: следующее соединение считает свои с нуля
@@ -2356,9 +2629,11 @@ class CameraController(private val context: Context, private val scope: Coroutin
                 outagesBefore += link.outages
                 longestOutageMs = maxOf(longestOutageMs, link.longestOutageMs)
                 // обычное закрытие идёт в своём потоке; новое соединение транспорт откроет только после него
-                if (abort) current.abort(LinkLoss.closed) else current.close()
+                if (!keepOpen) {
+                    if (abort) current.abort(LinkLoss.closed) else current.close()
+                }
             }
-            else -> current?.close()
+            else -> if (!keepOpen) current?.close()
         }
         recordingModeJob?.cancel()
         recordingDriver.cancel()
@@ -2370,13 +2645,13 @@ class CameraController(private val context: Context, private val scope: Coroutin
         linkOutage = false
     }
 
-    /** Останавливает всё, что связано с текущей камерой, и закрывает соединение. */
-    private fun teardown() {
+    /** Останавливает всё, что связано с текущей камерой, и закрывает соединение; keepOpen — сеанс уходит в ленту открытым. */
+    private fun teardown(keepOpen: Boolean = false) {
         reconnectJob?.cancel()
         reconnectJob = null
         reconnect = null
         isReconnecting = false
-        stopSession(abort = false)
+        stopSession(abort = false, keepOpen = keepOpen)
         sessionStartedAt = null
         holdWifiLock(false)
         transportKind = null
@@ -2593,7 +2868,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
         /** Столько в фоне — и сеанс закрываем обычным образом; на экране подключимся снова. */
         private const val BACKGROUND_CLOSE_MS = 60_000L
         /** Прощальная запись при закрытии: вернуть камере высокое качество превью, если снижали мы. */
-        private val RESTORE_HIGH_QUALITY = PtpIpTransport.Farewell(SonyOp.SET_EXT_PROP_VALUE,
+        internal val RESTORE_HIGH_QUALITY = PtpIpTransport.Farewell(SonyOp.SET_EXT_PROP_VALUE,
             listOf(SonyProp.LIVE_VIEW_IMAGE_QUALITY.toLong()), PtpValue.encode(LiveViewQuality.high.cameraValue, PtpType.UINT8))
     }
 }

@@ -181,3 +181,60 @@ private func usb(_ key: String, serial: String? = nil) -> CameraSighting {
     #expect(tracker.choose(9) == .none)                       // такой на шине нет
     #expect(tracker.disappeared(2) == .disconnect(thenConnect: 1))
 }
+
+@Test func stripFlagIsStoredOnlyWhenSet() throws {
+    var roster = CameraRoster()
+    let a = roster.connected(serial: "A", model: "ZV-E10", link: .wifi(CameraEndpoint(host: "10.0.0.5")), now: now)
+    let b = roster.connected(serial: "B", model: "ZV-E10", link: .wifi(CameraEndpoint(host: "10.0.0.6")), now: now)
+    roster.setInStrip(b, true)
+    let text = String(decoding: try #require(roster.encoded()), as: UTF8.self)
+    #expect(text.components(separatedBy: #""strip":true"#).count == 2)   // только у B
+    let loaded = CameraRoster.load(cameras: Data(text.utf8), preferred: nil, legacyName: nil, legacyHost: nil)
+    #expect(loaded.camera(b)?.inStrip == true)
+    #expect(loaded.camera(a)?.inStrip == false)
+}
+
+@Test func stripCamerasFollowTheMainInTheList() {
+    var roster = CameraRoster()
+    let a = roster.connected(serial: "A", model: "ZV-E10", link: .wifi(CameraEndpoint(host: "127.0.0.1")), now: now)
+    let b = roster.connected(serial: "B", model: "ZV-E10", link: .wifi(CameraEndpoint(host: "127.0.0.1", port: 15741)), now: now)
+    let c = roster.connected(serial: "C", model: "ZV-E10", link: .wifi(CameraEndpoint(host: "127.0.0.1", port: 15742)), now: now)
+    roster.setInStrip(b, true)
+    roster.setInStrip(c, true)
+    let entries = roster.entries(sightings: [wifi("127.0.0.1", 15741)],
+                                 current: (.wifi(CameraEndpoint(host: "127.0.0.1")), a, true),
+                                 strip: [(c, true), (b, false)], now: now)
+    #expect(entries.map(\.id) == [a, c, b])
+    #expect(entries.map(\.state) == [.current, .side, .side])
+    #expect(entries.map(\.stateLabel) == ["на связи", "в ленте", "в ленте · нет связи"])
+    // без связи — подключить главной по последнему адресу
+    #expect(entries.map { $0.action.map(String.init(describing:)) } == [nil, "makeMain", "connect"])
+    #expect(entries[1].inStrip && entries[1].stripConnected)
+}
+
+@Test func stripPlanKeepsFourCamerasAndRetriesEveryTenSeconds() {
+    var roster = CameraRoster()
+    var ids: [String] = []
+    for (i, letter) in ["A", "B", "C", "D", "E"].enumerated() {
+        let id = roster.connected(serial: letter, model: "ZV-E10",
+                                  link: .wifi(CameraEndpoint(host: "127.0.0.1", port: UInt16(15740 + i))),
+                                  now: now.addingTimeInterval(TimeInterval(i)))
+        roster.setInStrip(id, true)
+        ids.append(id)
+    }
+    let usb = roster.connected(serial: "U", model: "ZV-E10", link: .usb("dev"), now: now.addingTimeInterval(9))
+    roster.setInStrip(usb, true)                  // по кабелю в ленту не попадает
+    roster.unpair(CameraEndpoint(host: "127.0.0.1", port: 15744))   // E не сопряжена
+    // главная A — в ленте ещё три, от последней: D, C, B
+    #expect(CameraStripPlan.members(roster, main: ids[0]).map(\.id) == [ids[3], ids[2], ids[1]])
+    #expect(CameraStripPlan.members(roster, main: nil).count == 4)
+    // C на связи, D пробовали 3 с назад — сейчас только B
+    let plan = CameraStripPlan.toConnect(roster, main: ids[0], connected: [ids[2]], lastAttempt: [ids[3]: now.addingTimeInterval(-3)],
+                                         now: now)
+    #expect(plan.map(\.id) == [ids[1]])
+    // через 10 с — и D
+    #expect(CameraStripPlan.toConnect(roster, main: ids[0], connected: [ids[2]], lastAttempt: [ids[3]: now.addingTimeInterval(-10)],
+                                      now: now).map(\.id) == [ids[3], ids[1]])
+    roster.setInStrip(ids[3], false)
+    #expect(CameraStripPlan.members(roster, main: ids[0]).map(\.id) == [ids[2], ids[1]])
+}

@@ -654,6 +654,8 @@ private fun Controls(controller: CameraController, screen: ScreenState, feedback
                 Text(it, color = Color.White, fontSize = 15.sp, modifier = Modifier.padding(top = 8.dp)
                     .background(Panel, RoundedCornerShape(10.dp)).padding(horizontal = 12.dp, vertical = 7.dp))
             }
+            // лента камер — под верхней панелью, когда на связи не одна камера; прячется вместе с элементами
+            if (controller.stripVisible) CameraStrip(controller, Modifier.padding(top = 10.dp))
         }
         RightColumn(controller, feedback, Modifier.align(Alignment.CenterEnd).padding(end = 4.dp))
         if (!screen.fnOpen && controller.shots.isNotEmpty()) {

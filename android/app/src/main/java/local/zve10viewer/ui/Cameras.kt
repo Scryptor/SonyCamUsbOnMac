@@ -1,13 +1,16 @@
 package local.zve10viewer.ui
 
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -33,8 +36,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -48,6 +56,7 @@ import kotlinx.coroutines.delay
 import local.zve10viewer.CameraController
 import local.zve10viewer.settings.CameraEntry
 import local.zve10viewer.settings.CameraState
+import local.zve10viewer.settings.SettingID
 
 /** «Забыть» — красным, как у системы. */
 private val Danger = Color(0xFFFF453A)
@@ -89,7 +98,7 @@ fun CameraList(controller: CameraController, modifier: Modifier = Modifier, pair
     }
 }
 
-/** Строка камеры. Точка — текущая: зелёная на связи, оранжевая — подключаю. */
+/** Строка камеры. Точка — текущая: зелёная на связи, оранжевая — подключаю; синяя — в ленте на связи. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun CameraRow(controller: CameraController, entry: CameraEntry, onRename: () -> Unit) {
@@ -105,6 +114,7 @@ private fun CameraRow(controller: CameraController, entry: CameraEntry, onRename
         ) {
             Box(Modifier.size(8.dp).background(
                 when {
+                    entry.state == CameraState.side && entry.ready -> Accent
                     !current -> Color.Transparent
                     entry.ready -> Color(0xFF34C759)
                     else -> Amber
@@ -122,12 +132,24 @@ private fun CameraRow(controller: CameraController, entry: CameraEntry, onRename
             }
         }
         DropdownMenu(menu, onDismissRequest = { menu = false }) {
+            if (entry.canAddToStrip) {
+                DropdownMenuItem(text = { Text("В ленту") }, onClick = {
+                    menu = false
+                    controller.addToStrip(entry.id)
+                })
+            }
+            if (entry.canRemoveFromStrip) {
+                DropdownMenuItem(text = { Text("Убрать из ленты") }, onClick = {
+                    menu = false
+                    controller.removeFromStrip(entry.id)
+                })
+            }
             DropdownMenuItem(text = { Text("Переименовать…") }, onClick = {
                 menu = false
                 onRename()
             })
-            // текущая на связи — забыть её нельзя
-            if (!current) {
+            // главную (она на связи) и камеру ленты (сначала — убрать) забыть нельзя
+            if (entry.canForget) {
                 DropdownMenuItem(text = { Text("Забыть", color = Danger) }, onClick = {
                     menu = false
                     controller.forgetCamera(entry.id)
@@ -158,4 +180,67 @@ private fun RenameCameraDialog(name: String, onSave: (String) -> Unit, onDismiss
         confirmButton = { TextButton(onClick = { onSave(field.text) }, enabled = field.text.isNotBlank()) { Text("Сохранить") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Отмена") } },
     )
+}
+
+/**
+ * Лента камер — колонка слева под верхней панелью: главная (выделена) и камеры ленты. Плитка — превью, имя, «● REC» во
+ * время записи, заряд, если 20 % и меньше, «нет связи» поверх последнего кадра. Касание камеры ленты — она главная;
+ * долгое нажатие — «Сделать главной», «Убрать из ленты».
+ */
+@Composable
+fun CameraStrip(controller: CameraController, modifier: Modifier = Modifier) {
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        val battery = controller.property(SettingID.battery)?.current?.intValue?.toInt()?.takeIf { it in 0..100 }
+        StripTile(controller.frame, controller.cameraName, main = true, recording = controller.recordingStartedAt != null,
+            battery = battery, connected = controller.phase == CameraController.Phase.ready)
+        controller.sideCameras.forEach { side ->
+            StripTile(side.frame, controller.cameraBook.find(side.id)?.name ?: side.name, main = false, recording = side.recording,
+                battery = side.battery, connected = side.connected,
+                onMain = { controller.makeMain(side.id) }, onRemove = { controller.removeFromStrip(side.id) })
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun StripTile(frame: ImageBitmap?, name: String, main: Boolean, recording: Boolean, battery: Int?, connected: Boolean,
+                      onMain: () -> Unit = {}, onRemove: () -> Unit = {}) {
+    var menu by remember { mutableStateOf(false) }
+    Box {
+        Box(
+            Modifier.size(width = 200.dp, height = 112.dp).clip(RoundedCornerShape(10.dp)).background(Color.Black)
+                .border(if (main) 3.dp else 1.dp, if (main) Accent else PanelLight, RoundedCornerShape(10.dp))
+                // у главной — ни касания, ни меню: она уже на большом экране
+                .combinedClickable(enabled = !main, onClick = onMain, onLongClick = { menu = true })
+                .semantics { contentDescription = if (main) "$name — главная" else "$name — в ленте" },
+        ) {
+            frame?.let {
+                Image(it, contentDescription = null, contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize().alpha(if (connected) 1f else 0.35f))
+            }
+            if (!connected) {
+                Text("нет связи", color = Color.White, fontSize = 14.sp, modifier = Modifier.align(Alignment.Center)
+                    .background(Panel, RoundedCornerShape(8.dp)).padding(horizontal = 8.dp, vertical = 4.dp))
+            }
+            Row(Modifier.align(Alignment.BottomStart).fillMaxWidth().background(Panel).padding(horizontal = 8.dp, vertical = 3.dp),
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(name, color = Color.White, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    fontWeight = if (main) FontWeight.SemiBold else FontWeight.Normal, modifier = Modifier.weight(1f))
+                if (recording) Text("● REC", color = Color(0xFFFF453A), fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                battery?.takeIf { it <= 20 }?.let { Text("$it%", color = Amber, fontSize = 12.sp) }
+            }
+        }
+        DropdownMenu(menu, onDismissRequest = { menu = false }) {
+            if (connected) {
+                DropdownMenuItem(text = { Text("Сделать главной") }, onClick = {
+                    menu = false
+                    onMain()
+                })
+            }
+            DropdownMenuItem(text = { Text("Убрать из ленты") }, onClick = {
+                menu = false
+                onRemove()
+            })
+        }
+    }
 }

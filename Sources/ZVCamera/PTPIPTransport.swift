@@ -236,8 +236,9 @@ public actor PTPIPTransport: PTPTransport {
     public nonisolated let events: AsyncStream<PTPEvent>
     private nonisolated let eventContinuation: AsyncStream<PTPEvent>.Continuation
     /// Что со связью: провал и время ответа камеры — для экрана.
-    public nonisolated let linkStatus: AsyncStream<LinkStatus>
-    private nonisolated let statusContinuation: AsyncStream<LinkStatus>.Continuation
+    /// Своя подписка на каждое обращение: открытый транспорт можно передать от главного экрана ленте камер и обратно.
+    public nonisolated var linkStatus: AsyncStream<LinkStatus> { statusBroadcast.subscribe() }
+    private nonisolated let statusBroadcast = Broadcast<LinkStatus>(buffering: .bufferingNewest(1))
     public nonisolated let host: String
     /// Порт PTP/IP: у настоящих камер 15740, другой — только у виртуальных.
     public nonisolated let port: UInt16
@@ -273,7 +274,6 @@ public actor PTPIPTransport: PTPTransport {
         self.timeout = timeout
         self.reachable = reachable ?? { await CameraPing.ping(host, timeout: 0.8) }
         (events, eventContinuation) = AsyncStream.makeStream()
-        (linkStatus, statusContinuation) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(1))
     }
 
     /// Приветствие, событийный канал, OpenSession. Возвращает имя камеры.
@@ -490,7 +490,7 @@ public actor PTPIPTransport: PTPTransport {
         guard status != lastStatus else { return }
         lastStatus = status
         // для экрана — по обычным часам: «прервалась · 0:07» считается от них
-        statusContinuation.yield(LinkStatus(outageSince: status.outageSince.map(MonotonicTime.wallClock), rtt: status.rtt))
+        statusBroadcast.yield(LinkStatus(outageSince: status.outageSince.map(MonotonicTime.wallClock), rtt: status.rtt))
     }
 
     /// Транспорт закрывается сам. Связь вернулась или соединение сломано — RST: камера освобождает сеанс сразу,
@@ -514,7 +514,7 @@ public actor PTPIPTransport: PTPTransport {
             event?.cancel()
         }
         eventContinuation.finish()
-        statusContinuation.finish()
+        statusBroadcast.finish()
     }
 
     private func acquire() async {

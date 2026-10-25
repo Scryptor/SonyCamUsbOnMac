@@ -314,6 +314,7 @@ async def serve(cam, r, w):
                     await asyncio.sleep(3)
                     cam.known_guids.add(guid)
                 cam.conn += 1
+                print(f"программа подключилась (соединение {cam.conn})", flush=True)
                 name = cam.name.encode("utf-16-le") + b"\0\0"
                 w.write(pkt(2, struct.pack("<I", cam.conn) + cam.guid + name + struct.pack("<I", 0x10000)))
             elif ptype == 3:                                 # Init Event Request

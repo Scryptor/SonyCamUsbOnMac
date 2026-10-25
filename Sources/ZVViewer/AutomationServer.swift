@@ -176,7 +176,7 @@ final class AutomationServer {
             if let problem = setPreference(key, value) { return problem }
         case .pairWiFi:
             // как «Сопрячь новую камеру…»: при камере на связи сеанс с ней закрывается
-            guard !controller.isRecording else { return "recording" }
+            guard controller.canSwitchCamera else { return "recording" }
             controller.startPairing()
         case .cancelPairing:
             controller.cancelPairing()
@@ -292,7 +292,7 @@ final class AutomationServer {
         case let .selectCamera(id):
             guard let entry = controller.cameras.first(where: { $0.id == id }) else { return "no camera \(id)" }
             guard entry.state != .current else { return "camera \(id) is current" }
-            guard !controller.isRecording else { return "recording" }
+            guard controller.canSwitchCamera else { return "recording" }
             controller.selectCamera(id)
         case let .renameCamera(id, name):
             guard controller.roster.camera(id) != nil else { return "no known camera \(id)" }
@@ -306,6 +306,14 @@ final class AutomationServer {
             controller.pairCamera(id)
         case .searchCameras:
             Task { await controller.searchCameras() }
+        case let .addToStrip(id):
+            guard let camera = controller.roster.camera(id), camera.paired, camera.endpoint != nil else {
+                return "no paired Wi-Fi camera \(id)"
+            }
+            controller.addToStrip(id)
+        case let .removeFromStrip(id):
+            guard controller.roster.camera(id) != nil else { return "no known camera \(id)" }
+            controller.removeFromStrip(id)
         }
         return nil
     }
@@ -496,6 +504,7 @@ final class AutomationServer {
                 return item
             },
             "currentCamera": controller.currentCameraID ?? NSNull(),
+            "strip": stripState(),
             "cameraName": controller.currentCameraName,
             "pairing": controller.isPairing,
             "presetMode": controller.presetMode.rawValue,
@@ -521,6 +530,20 @@ final class AutomationServer {
         ]
         if let frame = controller.frame { result["frameSize"] = [frame.width, frame.height] }
         return result
+    }
+
+    /// Лента камер: главная и камеры в ленте по порядку; пусто — на связи одна камера.
+    private func stripState() -> [[String: Any]] {
+        guard !controller.sideCameras.isEmpty else { return [] }
+        let main: [String: Any] = ["id": controller.currentCameraID ?? NSNull(), "name": controller.currentCameraName,
+                                   "main": true, "connected": controller.phase == .ready, "recording": controller.isRecording,
+                                   "battery": controller.property(.battery)?.current.intValue ?? NSNull(),
+                                   "fps": controller.shownFPS]
+        return [main] + controller.sideCameras.map { side in
+            ["id": side.id, "name": controller.roster.camera(side.id)?.name ?? "Камера", "main": false,
+             "connected": side.connected, "recording": side.recording, "battery": side.battery ?? NSNull(),
+             "fps": side.fps, "port": Int(side.endpoint.port)] as [String: Any]
+        }
     }
 
     /// Снимок собственного окна (без разрешения на запись экрана) вместе с открытыми подсказками:

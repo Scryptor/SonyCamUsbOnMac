@@ -20,7 +20,7 @@ struct CameraList: View {
             }
             if showsPairNew {
                 Button("Сопрячь новую камеру…") { controller.startPairing() }
-                    .disabled(controller.isPairing || controller.isRecording)
+                    .disabled(controller.isPairing || !controller.canSwitchCamera)
                     .help("Камера — в режиме Pairing: MENU → Network → PC Remote Function → Pairing")
             }
         }
@@ -51,11 +51,13 @@ struct CameraList: View {
             switch entry.action {
             case .connect?:
                 Button("Подключить") { controller.selectCamera(entry.id) }
-                    .disabled(controller.isRecording)
-                    .help(controller.isRecording ? "Идёт запись — остановите её, чтобы переключить камеру" : "")
+                    .disabled(!controller.canSwitchCamera)
+                    .help(controller.canSwitchCamera ? "" : "Идёт запись — остановите её, чтобы переключить камеру")
             case .pair?:
                 Button("Сопрячь") { controller.pairCamera(entry.id) }
-                    .disabled(controller.isRecording)
+                    .disabled(!controller.canSwitchCamera)
+            case .makeMain?:
+                Button("Сделать главной") { controller.selectCamera(entry.id) }
             case nil:
                 EmptyView()
             }
@@ -63,8 +65,14 @@ struct CameraList: View {
         .contentShape(Rectangle())
         .contextMenu {
             if entry.knownID != nil {
+                if entry.state == .side {
+                    Button("Убрать из ленты") { controller.removeFromStrip(entry.id) }
+                } else if entry.state != .current, entry.paired, entry.endpoint != nil, !entry.inStrip {
+                    Button("В ленту") { controller.addToStrip(entry.id) }
+                        .help("Держать на связи рядом с главной — плиткой слева")
+                }
                 Button("Переименовать…") { startRename(entry) }
-                if entry.state != .current {
+                if entry.state != .current, entry.state != .side {
                     Button("Забыть", role: .destructive) { controller.forgetCamera(entry.id) }
                 }
             }
@@ -87,6 +95,7 @@ struct CameraList: View {
     private func dot(_ entry: CameraEntry) -> Color {
         switch entry.state {
         case .current: return entry.connecting ? .orange : .green
+        case .side: return entry.stripConnected ? .green.opacity(0.6) : .gray
         case .available: return .accentColor
         case .needsPairing: return .orange
         case .offline: return .gray

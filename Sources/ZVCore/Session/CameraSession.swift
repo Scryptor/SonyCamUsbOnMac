@@ -12,9 +12,8 @@ public actor CameraSession {
     public private(set) var deviceInfo: DeviceInfo?
     public private(set) var properties: [UInt16: SonyProperty] = [:]
     public private(set) var isReady = false
-    /// Каждое перечитывание свойств; поток завершается при разрыве связи.
-    public nonisolated let snapshots: AsyncStream<[UInt16: SonyProperty]>
-    private let snapshotContinuation: AsyncStream<[UInt16: SonyProperty]>.Continuation
+    /// Каждое перечитывание свойств — сколько угодно слушателям; поток завершается при разрыве связи.
+    private nonisolated let snapshotBroadcast = Broadcast<[UInt16: SonyProperty]>()
     private var eventTask: Task<Void, Never>?
     private var refreshRunning = false
     private var refreshWanted = false
@@ -22,8 +21,14 @@ public actor CameraSession {
     public init(transport: PTPTransport, timing: SessionTiming = .standard) {
         self.transport = transport
         self.timing = timing
-        (snapshots, snapshotContinuation) = AsyncStream.makeStream()
     }
+
+    /// Своя подписка на свойства: последнее перечитывание — сразу, дальше — каждое новое. Отписка (отмена задачи, что
+    /// её слушает) сеанс не закрывает: его можно передать другому — главному экрану или ленте камер.
+    public nonisolated func snapshotStream() -> AsyncStream<[UInt16: SonyProperty]> { snapshotBroadcast.subscribe() }
+
+    /// То же, что `snapshotStream()`: каждое обращение — своя подписка.
+    public nonisolated var snapshots: AsyncStream<[UInt16: SonyProperty]> { snapshotStream() }
 
     /// Рукопожатие Sony, передача приоритета компьютеру и первое чтение свойств.
     public func start() async throws {
@@ -58,7 +63,7 @@ public actor CameraSession {
     public func refresh() async throws {
         let reply = try await call(SonyOp.getAllExtPropInfo)
         properties = try SonyPropertyParser.parse(reply.data)
-        snapshotContinuation.yield(properties)
+        snapshotBroadcast.yield(properties)
     }
 
     // MARK: - Изменение настроек, запись, live view
@@ -180,7 +185,7 @@ public actor CameraSession {
     func close() {
         isReady = false
         eventTask?.cancel()
-        snapshotContinuation.finish()
+        snapshotBroadcast.finish()
     }
 
     /// Отправка без проверки кода ответа; разрыв связи закрывает сеанс.
