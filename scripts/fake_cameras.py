@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """fake_cameras.py — несколько разных виртуальных ZV-E10 одной командой (scripts/fake_camera.py на соседних портах).
 
-У каждой свой серийный номер (программа отличает их по нему), своя картинка (у B кадр отражён, у C повёрнут, у D
-перевёрнут), свой заряд и режим. Все отвечают на поиск в сети (SSDP) с портом в X-PTPIP-Port. Ctrl+C гасит все.
+У каждой свой серийный номер (программа отличает их по нему), своя картинка (одно и то же горное озеро: у B кадр
+отражён, у C — крупно у солнца, у D — левый берег), свой заряд и режим. Все отвечают на поиск в сети (SSDP) с портом в X-PTPIP-Port. Ctrl+C гасит все.
 
   scripts/fake_cameras.py [--host 127.0.0.1] [--count 3] [--pairing B] [--busy C] [--reject C:iso] [--slow-record C]
                           [--no-ssdp]
@@ -14,8 +14,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CAMERAS = [
     {"letter": "A", "mark": None, "battery": 80, "mode": "video"},
     {"letter": "B", "mark": "flip", "battery": 45, "mode": "photo"},
-    {"letter": "C", "mark": "rotate", "battery": 12, "mode": "video"},
-    {"letter": "D", "mark": "flop", "battery": 100, "mode": "photo"},
+    {"letter": "C", "mark": "zoom", "battery": 12, "mode": "video"},
+    {"letter": "D", "mark": "pan", "battery": 100, "mode": "photo"},
 ]
 
 

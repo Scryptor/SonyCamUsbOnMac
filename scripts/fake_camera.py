@@ -2,23 +2,26 @@
 """fake_camera.py — поддельная ZV-E10 по PTP/IP из настоящих ответов камеры (Tests/ZVCoreTests/Fixtures).
 
 Нужна, чтобы гонять обе программы без живой камеры: приветствие, рукопожатие Sony, свойства, пробы, кадры live view
-~25 к/с, события 0xC203. Качество превью 0xD26A меняет кадр, как настоящая камера по Wi-Fi: высокое — 1024×576,
-дополнено до ~72 КБ; низкое — 640×360, дополнено до ~34 КБ.
+~25 к/с, события 0xC203. В видоискателе — горное озеро на закате (scripts/assets, рисует
+scripts/make-viewfinder-picture.py), свой JPEG — --picture. Качество превью 0xD26A меняет кадр, как настоящая камера по
+Wi-Fi: высокое — 1024×576, дополнено до ~72 КБ; низкое — 640×360, дополнено до ~34 КБ.
 
 Снимает и пишет, ничего не записывая на настоящую карту:
 - запись в свойства (0x9205) меняет их текущее значение — режим фото/видео, «куда сохранять» и т. п.;
 - спуск (S1 0xD2C1, S2 0xD2C2 через 0x9207): фокус находится за 0,15 с, через 0,4 с после S2 в памяти камеры
   появляется снимок (ObjectInMemory 0xD215 > 0x8000): JPEG, при FileFormat 0xD253 = 2 — ещё и ARW;
-- кнопка записи (0xD2C8): через 0,8 с MovieRecordingState 0xD21D меняется 0 ↔ 1.
+- кнопка записи (0xD2C8): через 0,8 с (--record-delay) MovieRecordingState 0xD21D меняется 0 ↔ 1;
+- цветовая температура 0xD20F открыта только в режиме баланса белого «Цвет. темп.», как у настоящей камеры.
 
 Несколько камер сразу (scripts/fake_cameras.py) различаются: --name, --serial (по нему программа отличает камеры),
---mark (кадр отражён или повёрнут), --battery, --mode. --ssdp — отвечает на поиск в сети, как камера Sony, с портом
+--mark (другой план сцены — zoom, pan — или кадр отражён и повёрнут), --battery, --mode. --ssdp — отвечает на поиск в сети, как камера Sony, с портом
 в X-PTPIP-Port; --busy — не отвечает на приветствие; --pairing — незнакомому GUID отвечает через 3 с, как будто на
-камере нажали «ОК».
+камере нажали «ОК»; --reject iso,… — запись в эти свойства камера принимает, а значение не меняет.
 
   scripts/fake_camera.py [--listen 127.0.0.1:15740] [--photo снимок.jpg] [--rate байт/с] [--ignore-record]
-                         [--name ZV-E10] [--serial …] [--mark flip|flop|rotate] [--battery 0–100] [--mode photo|video]
-                         [--ssdp] [--busy] [--pairing]
+                         [--name ZV-E10] [--serial …] [--mark zoom|pan|flip|flop|rotate] [--picture кадр.jpg]
+                         [--battery 0–100] [--mode photo|video] [--ssdp] [--busy] [--pairing] [--reject iso,…]
+                         [--record-delay с]
   ZV_PTPIP_HOST=127.0.0.1 …/ZVViewer --automation        # Mac
   am start … --es ptpipHost <IP Mac>                       # планшет: --listen <IP Mac>:15740
   scripts/badnet.py --camera 127.0.0.1:25740 …             # или через прокси: --listen 127.0.0.1:25740
@@ -27,6 +30,9 @@ import argparse, asyncio, os, socket, struct, subprocess, sys, tempfile, time, u
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIX = os.path.join(ROOT, "Tests/ZVCoreTests/Fixtures")
+# картинка в видоискателе — горное озеро (scripts/make-viewfinder-picture.py); нет её — кадр настоящей камеры из дампа
+ASSETS = os.path.join(ROOT, "scripts/assets")
+VIEWS = {"zoom": "viewfinder-zoom.jpg", "pan": "viewfinder-pan.jpg"}      # другие планы той же сцены
 NAME = "ZV-E10"
 FRAME_PERIOD = 0.040
 OK, ACCESS_DENIED, INVALID_HANDLE = 0x2001, 0x200F, 0x2009
@@ -51,16 +57,18 @@ def fixture(name):
     return open(os.path.join(FIX, name), "rb").read()
 
 
-def frames(mark=None):
+def frames(mark=None, picture=None):
     """Ответы GetObject 0xFFFFC002 для высокого и низкого качества: заголовок Sony, JPEG, добивка до размера.
-    mark — кадр отражён или повёрнут: у каждой из нескольких камер своя картинка."""
+    mark — другой план сцены (zoom, pan) или кадр отражён и повёрнут: у каждой из нескольких камер своя картинка;
+    picture — свой JPEG 1024×576 вместо сцены."""
     raw = fixture("lv_frame_raw.bin")
     offset, size = struct.unpack_from("<II", raw)
-    jpeg_high = raw[offset:offset + size]
+    path = picture or os.path.join(ASSETS, VIEWS.get(mark, "viewfinder.jpg"))
+    jpeg_high = open(path, "rb").read() if os.path.exists(path) else raw[offset:offset + size]
     with tempfile.TemporaryDirectory() as tmp:
         src, dst = os.path.join(tmp, "high.jpg"), os.path.join(tmp, "low.jpg")
         open(src, "wb").write(jpeg_high)
-        if mark:
+        if mark in MARKS:
             subprocess.run(["sips", *MARKS[mark], src, "--out", src], capture_output=True, check=True)
             jpeg_high = open(src, "rb").read()
         subprocess.run(["sips", "-z", "360", "640", src, "--out", dst], capture_output=True, check=True)
@@ -76,10 +84,12 @@ def frames(mark=None):
 
 
 def big_photo(jpeg):
-    """Снимок «как с камеры»: кадр live view, растянутый до 6000×4000 в наилучшем качестве (несколько МБ)."""
+    """Снимок «как с камеры»: кадр live view 16:9, обрезанный по центру до 3:2 и увеличенный до 6000×4000 в наилучшем
+    качестве (несколько МБ)."""
     with tempfile.TemporaryDirectory() as tmp:
         src, dst = os.path.join(tmp, "lv.jpg"), os.path.join(tmp, "photo.jpg")
         open(src, "wb").write(jpeg)
+        subprocess.run(["sips", "-c", "576", "864", src, "--out", src], capture_output=True, check=True)
         subprocess.run(["sips", "-z", "4000", "6000", "-s", "formatOptions", "100", src, "--out", dst],
                        capture_output=True, check=True)
         return open(dst, "rb").read()
@@ -225,7 +235,7 @@ class Properties:
 
 class Camera:
     def __init__(self, args):
-        jpeg, self.frames = frames(args.mark)
+        jpeg, self.frames = frames(args.mark, args.picture)
         self.photo = open(args.photo, "rb").read() if args.photo else big_photo(jpeg)
         self.rate = args.rate
         self.ignore_record = args.ignore_record
@@ -424,7 +434,9 @@ async def main():
     ap.add_argument("--record-delay", type=float, default=0.8, help="через сколько секунд запись начинается и останавливается")
     ap.add_argument("--name", default=NAME, help="имя камеры в ответе на приветствие")
     ap.add_argument("--serial", help="серийный номер в DeviceInfo (по нему программа отличает камеры)")
-    ap.add_argument("--mark", choices=sorted(MARKS), help="кадр отражён (flip/flop) или повёрнут (rotate)")
+    ap.add_argument("--mark", choices=sorted(set(MARKS) | set(VIEWS)),
+                    help="другой план сцены (zoom, pan), кадр отражён (flip/flop) или повёрнут (rotate)")
+    ap.add_argument("--picture", help="свой JPEG 1024×576 в видоискателе вместо горного озера")
     ap.add_argument("--battery", type=int, help="заряд батареи, %%")
     ap.add_argument("--mode", choices=sorted(MODES), help="режим на старте: фото или видео (буква M)")
     ap.add_argument("--ssdp", action="store_true", help="отвечать на поиск в сети (SSDP), как камера Sony")
