@@ -61,6 +61,8 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.offset
+import android.os.Build
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Rect
@@ -153,6 +155,18 @@ class ScreenState {
     /** Галерея: какой снимок открыт (по id, а не по месту в ленте — новый снимок его не сбивает); null — закрыта. */
     var galleryShot by mutableStateOf<Long?>(null)
 
+    /**
+     * Цифровое увеличение видео — свойство экрана: переживает фото / видео / S&Q, запись, смену качества превью и
+     * поворот; сбрасывается, когда связь кончилась и показан экран ожидания.
+     */
+    var zoom by mutableStateOf(ViewZoom.identity)
+    /** Пружина или инерция после жеста, сброс ✕ — отменяется следующим касанием. */
+    var zoomMotion: kotlinx.coroutines.Job? = null
+    /** Где плашка увеличения: касания по ней не возвращают скрытые элементы, гистограмма поднимается над ней. */
+    var zoomBadgeRect by mutableStateOf<Rect?>(null)
+    /** Отладка: бикубический шейдер (выключить — сравнить с обычной растяжкой). */
+    var bicubic by mutableStateOf(true)
+
     val controlsHidden: Boolean get() = manualHidden || autoHidden
     val overlayOpen: Boolean get() = fnOpen || allSettingsOpen || settingsOpen || pillInfo != null
 
@@ -198,6 +212,31 @@ class ScreenState {
 @Composable
 fun App(controller: CameraController) {
     val screen = remember { ScreenState() }
+    // отладка (debug-сборка): увеличение и галерея по adb-broadcast
+    LaunchedEffect(Unit) {
+        controller.debugCommands.collect { command ->
+            when (command) {
+                is CameraController.DebugCommand.Zoom -> {
+                    command.bicubic?.let { screen.bicubic = it }
+                    screen.zoomMotion?.cancel()
+                    screen.zoom = if (command.factor <= 1.0) ViewZoom.identity
+                    else ViewZoom(command.factor.coerceAtMost(ViewZoom.MAX_FACTOR), command.x, command.y)
+                }
+                is CameraController.DebugCommand.Gallery ->
+                    screen.galleryShot = if (command.index < 0) null else controller.shots.getOrNull(command.index)?.id
+            }
+        }
+    }
+    // связь кончилась, показан экран ожидания — увеличение и галерея сбрасываются
+    val waiting = controller.phase == CameraController.Phase.searching || controller.phase == CameraController.Phase.permission ||
+        controller.phase == CameraController.Phase.notPcRemote
+    LaunchedEffect(waiting) {
+        if (waiting) {
+            screen.zoomMotion?.cancel()
+            screen.zoom = ViewZoom.identity
+            screen.galleryShot = null
+        }
+    }
     MaterialTheme(colorScheme = darkColorScheme(primary = Accent, onPrimary = Color.White, secondary = Accent)) {
         Box(Modifier.fillMaxSize().background(Color.Black)) {
             when (controller.phase) {
@@ -345,7 +384,8 @@ private fun LiveScreen(controller: CameraController, screen: ScreenState) {
                     while (true) {
                         val event = awaitPointerEvent(PointerEventPass.Initial)
                         if (event.type == PointerEventType.Press && event.changes.count { it.pressed } == 1) {
-                            onPanel = screen.histogramRect?.contains(event.changes.first().position) == true
+                            val at = event.changes.first().position
+                            onPanel = screen.histogramRect?.contains(at) == true || screen.zoomBadgeRect?.contains(at) == true
                             if (!onPanel) screen.revealTap = screen.controlsHidden
                         }
                         if (!onPanel) screen.noteActivity()
@@ -353,23 +393,38 @@ private fun LiveScreen(controller: CameraController, screen: ScreenState) {
                 }
             },
     ) {
-        Video(controller, feedback, Modifier.fillMaxSize().pointerInput(Unit) {
-            detectTapGestures {
-                when {
-                    screen.overlayOpen -> screen.closeOverlays()
-                    screen.revealTap || screen.manualHidden -> {
-                        screen.revealTap = false
-                        screen.manualHidden = false
-                    }
-                    else -> {
-                        screen.manualHidden = true
-                        hint = true
-                    }
+        Video(controller, screen, feedback, Modifier.fillMaxSize()) {
+            when {
+                screen.overlayOpen -> screen.closeOverlays()
+                screen.revealTap || screen.manualHidden -> {
+                    screen.revealTap = false
+                    screen.manualHidden = false
+                }
+                else -> {
+                    screen.manualHidden = true
+                    hint = true
                 }
             }
-        })
+        }
         // гистограмма — над видео, под кнопками и меню; не прячется вместе с элементами
         if (controller.histogramOn) FloatingHistogram(controller, screen, feedback)
+        // плашка увеличения — видна и при скрытых элементах: увеличенная картинка — не весь кадр
+        val zoomFrame = controller.frame
+        if (screen.zoom.isZoomed && zoomFrame != null) {
+            ZoomBadge(zoomFrame, screen.zoom, feedback.screenSize,
+                onCenter = { at ->
+                    screen.zoomMotion?.cancel()
+                    screen.zoom = screen.zoom.centered(at, feedback.screenSize, Size(zoomFrame.width.toFloat(), zoomFrame.height.toFloat()))
+                },
+                onReset = {
+                    screen.zoomMotion?.cancel()
+                    feedback.haptic(HapticEvent.zoomLimit)
+                    screen.zoomMotion = resetZoom(scope, { screen.zoom }) { screen.zoom = it }
+                },
+                modifier = Modifier.align(Alignment.BottomEnd).padding(18.dp)
+                    .onGloballyPositioned { screen.zoomBadgeRect = it.boundsInRoot() })
+            DisposableEffect(Unit) { onDispose { screen.zoomBadgeRect = null } }
+        }
         AnimatedVisibility(showControls, enter = fadeIn(), exit = fadeOut()) {
             Controls(controller, screen, feedback)
         }
@@ -413,21 +468,53 @@ private fun LiveScreen(controller: CameraController, screen: ScreenState) {
     }
 }
 
+/**
+ * Видео с цифровым увеличением: щипок двумя пальцами, сдвиг при увеличении (с инерцией), касание — onTap (прячет и
+ * возвращает элементы). Кадр — бикубически (AGSL, Android 13+), рамка записи — по краю видимой картинки.
+ */
 @Composable
-private fun Video(controller: CameraController, feedback: FeedbackState, modifier: Modifier) {
+private fun Video(controller: CameraController, screen: ScreenState, feedback: FeedbackState, modifier: Modifier, onTap: () -> Unit) {
     var viewSize by remember { mutableStateOf(Size.Zero) }
-    Box(modifier.onSizeChanged { viewSize = it.toSize() }, contentAlignment = Alignment.Center) {
-        val frame = controller.frame
-        if (frame != null) {
+    val scope = rememberCoroutineScope()
+    val renderer = remember { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) BicubicRenderer() else null }
+    val frame = controller.frame
+    val frameSize = frame?.let { Size(it.width.toFloat(), it.height.toFloat()) }
+    // жесты живут дольше одной перерисовки: размер кадра и обработчик касания — всегда последние
+    val latestFrame by rememberUpdatedState(frameSize)
+    val latestTap by rememberUpdatedState(onTap)
+    // увеличено ≥ 1,5× — полное превью держим до последнего; экран ушёл — подсказка снята
+    val sharp = screen.zoom.factor >= 1.5
+    LaunchedEffect(sharp) { controller.sharpPreview = sharp }
+    DisposableEffect(Unit) { onDispose { controller.sharpPreview = false } }
+    Box(
+        modifier.onSizeChanged { viewSize = it.toSize() }.pointerInput(Unit) {
+            zoomGestures(
+                zoom = { screen.zoom },
+                setZoom = { screen.zoom = it },
+                frame = { latestFrame },
+                onStart = { screen.zoomMotion?.cancel() },
+                onTap = { latestTap() },
+                onLimit = { feedback.haptic(HapticEvent.zoomLimit) },
+                onEnd = { velocity ->
+                    val f = latestFrame ?: return@zoomGestures
+                    screen.zoomMotion = settleZoom(scope, { screen.zoom }, { screen.zoom = it }, Size(size.width.toFloat(), size.height.toFloat()),
+                        f, velocity) { feedback.haptic(HapticEvent.zoomLimit) }
+                },
+            )
+        },
+        contentAlignment = Alignment.Center,
+    ) {
+        if (frame != null && frameSize != null) {
             val notice = controller.frameNotice
             // связь прервалась — последний кадр остаётся, но приглушён: видно, что он не живой
             val dimmed = notice == FrameNotice.interrupted || notice == FrameNotice.reconnecting
-            Image(frame, null, contentScale = ContentScale.Fit,
-                modifier = Modifier.fillMaxSize().alpha(if (dimmed) 0.55f else 1f))
-            // где картинка на экране: отсюда улетает стоп-кадр, по её краю — рамка записи
-            val picture = ViewZoom.identity.imageRect(viewSize, Size(frame.width.toFloat(), frame.height.toFloat()))
-            SideEffect { feedback.frameRect = picture }
-            TallyBorder(controller.isRecording, controller.tallyStyle, { picture })
+            val bicubic = renderer != null && screen.bicubic && (BICUBIC_AT_IDENTITY || screen.zoom.isZoomed)
+            Canvas(Modifier.fillMaxSize()) {
+                drawFrame(frame, screen.zoom.imageRect(size, frameSize), if (dimmed) 0.55f else 1f, if (bicubic) renderer else null)
+            }
+            // стоп-кадр — всегда целиком: улетает из вписанного кадра; рамка записи — по краю видимой картинки
+            SideEffect { feedback.frameRect = ViewZoom.identity.imageRect(viewSize, frameSize) }
+            TallyBorder(controller.isRecording, controller.tallyStyle, { screen.zoom.imageRect(viewSize, frameSize) })
             when (notice) {
                 // кадр не тускнеет: картинка, скорее всего, сейчас пойдёт дальше
                 FrameNotice.weakSignal -> Text("Слабый сигнал Wi-Fi", color = Color.White, fontSize = 16.sp,
@@ -804,7 +891,8 @@ private fun TopBar(controller: CameraController, screen: ScreenState) {
 
 /**
  * Гистограмма отдельным слоем над видео: видна и при скрытых элементах, и при открытом меню Fn (там она нужнее всего —
- * меняют экспозицию; если меню её закрыло бы, она поднимается над ним). Тащат за любое место — она чуть крупнее (1,03)
+ * меняют экспозицию; если меню или плашка увеличения её закрыли бы, она поднимается над ними). Тащат за любое место —
+ * она чуть крупнее (1,03)
  * и с тенью; отпустили ближе 24 dp к краю — прилипает к отступу 16 dp; за экран не уходит. Место — доли свободного
  * места: переживает поворот и перезапуск. По умолчанию — как раньше, слева внизу над лентой снимков. Размер панели —
  * как её разложили, а не на глаз: с неверным размером у краёв она уходила бы за экран.
@@ -831,12 +919,12 @@ private fun FloatingHistogram(controller: CameraController, screen: ScreenState,
                 val strip = if (controller.shots.isNotEmpty()) (screen.stripHeight ?: 76.dp.toPx()) + 10.dp.toPx() else 0f
                 Offset(18.dp.toPx(), view.height - 18.dp.toPx() - 76.dp.toPx() - strip - size.height)
             }
-            val menu = screen.fnMenuRect
-            if (menu != null && Rect(origin, size).overlaps(menu)) {
-                origin.copy(y = maxOf(16.dp.toPx(), menu.top - 10.dp.toPx() - size.height))
-            } else {
-                origin
+            // меню Fn и плашка увеличения её не закрывают: если легла бы под них — поднимается над ними
+            var placed = origin
+            for (obstacle in listOfNotNull(screen.fnMenuRect, screen.zoomBadgeRect)) {
+                if (Rect(placed, size).overlaps(obstacle)) placed = placed.copy(y = maxOf(16.dp.toPx(), obstacle.top - 10.dp.toPx() - size.height))
             }
+            placed
         }
     }
 

@@ -278,6 +278,27 @@ class CameraController(private val context: Context, private val scope: Coroutin
     var adaptiveQuality by mutableStateOf(prefs.adaptiveLiveViewQuality)
         private set
 
+    /**
+     * Картинка на экране увеличена (≥ 1,5×): адаптивное качество держит полное превью до последнего (снижает при
+     * прогнозе меньше 6 к/с, возвращает с 10). Ставит экран; экрана с видео нет — false.
+     */
+    var sharpPreview = false
+
+    /** Отладка (только debug-сборка): команды экрану по adb-broadcast — увеличение и галерея без мультитача. */
+    sealed class DebugCommand {
+        /** factor ≤ 1 — без увеличения; x, y — точка кадра (доли) в центре экрана; bicubic — шейдер вкл./выкл. */
+        data class Zoom(val factor: Double, val x: Double, val y: Double, val bicubic: Boolean?) : DebugCommand()
+        /** Галерея на снимке с этим местом в ленте (0 — самый новый); меньше нуля — закрыть. */
+        data class Gallery(val index: Int) : DebugCommand()
+    }
+
+    private val debugCommandFlow = MutableSharedFlow<DebugCommand>(extraBufferCapacity = 8)
+    val debugCommands: SharedFlow<DebugCommand> = debugCommandFlow.asSharedFlow()
+
+    fun debugCommand(command: DebugCommand) {
+        debugCommandFlow.tryEmit(command)
+    }
+
     /** Отладка (только debug-сборка): прокси стенда вместо камеры — только этот адрес, без памяти и поиска. */
     var debugHost: String? = null
         private set
@@ -1736,7 +1757,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
         val now = System.currentTimeMillis()
         val policy = qualityPolicy
         val target = if (adaptiveQuality) {
-            policy.decide(now, linkOutage)
+            policy.decide(now, linkOutage, sharp = sharpPreview)
         } else if (policy.level == LiveViewQuality.low && !policy.isSwitching(now)) {
             LiveViewQuality.high.also { policy.requested(now, it) }
         } else {
