@@ -148,6 +148,17 @@ struct LiveScreen: View {
                 }
                 .padding(16)
             }
+            // быстрый просмотр пресета: что сейчас на камере и что будет, когда кнопку отпустят
+            if let index = controller.previewingPreset, controller.presets.indices.contains(index) {
+                Text(controller.previewReturning ? "Возвращаю как было…"
+                     : "Просмотр «\(controller.presets[index].name)» — отпустите кнопку, вернётся как было")
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 7)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .padding(.top, 60)
+                    .transition(.opacity)
+            }
             if screen.zoom.isZoomed, let frame = controller.frame, controller.review == nil, screen.galleryShot == nil {
                 ZoomBadge(screen: screen, frame: frame, view: size)
                     .padding(16)

@@ -77,6 +77,8 @@ final class ScreenState {
     var presetNaming = false
     /// Новый пресет из окна: поле имени — сразу в фокус.
     var presetsFocusName = false
+    /// «Посмотреть» держат: окно пресетов прозрачно — не мешает смотреть на картинку.
+    var presetPeeking = false
 
     func openPresetsWindow(selecting index: Int?) {
         presetMenuOpen = false

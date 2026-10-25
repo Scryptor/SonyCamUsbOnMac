@@ -265,6 +265,14 @@ final class AutomationServer {
             guard controller.presets.indices.contains(index) else { return "no preset \(index)" }
             guard controller.phase == .ready else { return "not ready" }
             controller.recapturePreset(index)
+        case let .beginPresetPreview(index):
+            guard controller.presets.indices.contains(index) else { return "no preset \(index)" }
+            guard controller.phase == .ready, !controller.isApplyingPreset else { return "busy" }
+            screen.presetPeeking = true
+            controller.beginPresetPreview(index)
+        case .endPresetPreview:
+            screen.presetPeeking = false
+            controller.endPresetPreview()
         }
         return nil
     }
@@ -383,6 +391,7 @@ final class AutomationServer {
         ui["zoom"] = ["factor": screen.zoom.factor, "centerX": screen.zoom.center.x, "centerY": screen.zoom.center.y]
         ui["statusBar"] = ["pinned": screen.statusBarPinned, "visible": screen.controlsShown || screen.statusBarPinned]
         ui["presetMenu"] = screen.presetMenuOpen
+        ui["presetPeeking"] = screen.presetPeeking
         ui["presetsWindow"] = screen.presetsWindowOpen ? ["selected": screen.presetsSelected ?? NSNull()] as [String: Any] : NSNull()
         var result: [String: Any] = [
             "phase": controller.phase.rawValue,
@@ -444,6 +453,8 @@ final class AutomationServer {
                  "active": PresetCatalog.matches(preset, controller.properties)] as [String: Any]
             },
             "activePreset": controller.activePresetIndex ?? NSNull(),
+            "previewingPreset": controller.previewingPreset ?? NSNull(),
+            "previewReturning": controller.previewReturning,
             "ui": ui,
             "settings": settings,
         ]

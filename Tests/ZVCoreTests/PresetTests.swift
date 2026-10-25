@@ -154,3 +154,39 @@ import Testing
     #expect(presets.map(\.name) == ["Новый", "Второй"])
     #expect(presets[0].values == [.iso: 400])
 }
+
+@Test func lookRestoresTheCameraValuesOfWhatThePresetChanges() throws {
+    let props = try SonyPropertyParser.parse(Fixture.data("props_settled"))
+    let preset = Preset(name: "P", values: [.iso: 6400, .aperture: 560, .dro: 1], skip: [.dro])
+    #expect(PresetCatalog.restoreValues(preset, from: props) == [.iso: 200, .aperture: 280])
+}
+
+@Test func restorePutsDependentSettingsBackBeforeTheirBase() async throws {
+    // просмотр поставил «Цвет. темп.» 3200 K и ISO AUTO с +0.7; возвращаем AWB, 7400 K, ISO 200 и ±0
+    let cam = FakeCamera(props: [
+        .init(code: SonyProp.whiteBalance, type: PTPType.uint16, current: 0x8012, values: [2, 4, 0x8012]),
+        .init(code: SonyProp.colorTemp, type: PTPType.uint16, current: 3200, values: [3200, 7400]),
+        .init(code: SonyProp.iso, type: PTPType.uint32, current: 0xFF_FFFF, values: [0xFF_FFFF, 200]),
+        .init(code: SonyProp.exposureComp, type: PTPType.int16, current: 700, values: [0, 700]),
+    ])
+    let s = try await readySession(cam)
+    let result = await s.restore([.whiteBalance: 2, .colorTemperature: 7400, .iso: 200, .exposureComp: 0])
+    #expect(result.skipped.isEmpty)
+    let writes = cam.sent.filter { $0.op == 0x9205 && $0.params != [0xD25A] }.map { $0.params[0] }
+    // температура — пока камера ещё в «Цвет. темп.», экспокоррекция — пока ещё ISO AUTO
+    #expect(writes == [UInt32(SonyProp.colorTemp), UInt32(SonyProp.exposureComp), UInt32(SonyProp.whiteBalance),
+                       UInt32(SonyProp.iso)])
+}
+
+@Test func applyStopsWhenTheLookIsOver() async throws {
+    let cam = FakeCamera(props: [
+        .init(code: SonyProp.iso, type: PTPType.uint32, current: 200, values: [100, 200, 400]),
+        .init(code: SonyProp.fNumber, type: PTPType.uint16, current: 280, values: [280, 320]),
+    ])
+    let s = try await readySession(cam)
+    let preset = Preset(name: "P", values: [.iso: 400, .aperture: 320])
+    // кнопку отпустили до того, как пресет дописался: остальное он уже не пишет
+    let result = await s.apply(preset, while: { false })
+    #expect(result.applied.isEmpty)
+    #expect(result.skipped == [.iso, .aperture])
+}

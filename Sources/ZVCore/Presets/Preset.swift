@@ -79,6 +79,19 @@ public enum PresetCatalog {
         return "Пресет \(number)"
     }
 
+    /// Что вернуть после быстрого просмотра: текущие значения камеры всего, что пресет поменяет.
+    public static func restoreValues(_ preset: Preset, from properties: [UInt16: SonyProperty]) -> [SettingID: Int64] {
+        effective(preset).keys.reduce(into: [:]) { values, id in
+            if let value = properties[id.code]?.current.intValue { values[id] = value }
+        }
+    }
+
+    /// В каком порядке возвращать после просмотра: зависимые — раньше своей основы. Температуру камера даёт менять
+    /// только в «Цвет. темп.», экспокоррекцию — только при ISO AUTO: пока баланс белого и ISO — от пресета, они ещё
+    /// меняются. Иначе ручная температура и экспокоррекция камеры так и остались бы от пресета.
+    public static let restoreOrder: [SettingID] = [.colorTemperature, .exposureComp]
+        + order.filter { $0 != .colorTemperature && $0 != .exposureComp }
+
     /// Что пресет применит: без выключенных настроек и без цветовой температуры, если баланс белого он ставит
     /// не «Цвет. темп.», — в другом режиме камера температуру менять не даёт.
     public static func effective(_ preset: Preset) -> [SettingID: Int64] {
@@ -139,8 +152,9 @@ public enum PresetCatalog {
 }
 
 extension CameraSession {
-    /// Применяет пресет по одной настройке, в порядке каталога. Совпадающие значения не пишутся.
-    public func apply(_ preset: Preset) async -> PresetResult {
+    /// Применяет пресет по одной настройке, в порядке каталога. Совпадающие значения не пишутся. `keepGoing` — писать
+    /// ли дальше: отпустили «Посмотреть» — начатая запись доходит до подтверждения, следующие не начинаются.
+    public func apply(_ preset: Preset, while keepGoing: @Sendable () -> Bool = { true }) async -> PresetResult {
         var result = PresetResult()
         var connected = true
         let values = PresetCatalog.effective(preset)
@@ -150,27 +164,50 @@ extension CameraSession {
             // работает только с ISO AUTO: если базовая настройка не применилась, зависимые не трогаем
             let base = PresetCatalog.dependency[id]
             let baseFailed = base.map { values[$0] != nil && !result.applied.contains($0) } ?? false
-            guard connected, !baseFailed else {
+            guard connected, !baseFailed, keepGoing() else {
                 result.skipped.append(id)
                 continue
             }
-            if properties[id.code]?.current.intValue == value {
-                result.applied.append(id)
-                continue
-            }
-            do {
-                if try await set(id.code, to: value) == .confirmed {
-                    result.applied.append(id)
-                } else {
-                    result.skipped.append(id)
-                }
-            } catch TransportError.disconnected {
-                connected = false
-                result.skipped.append(id)
-            } catch {
-                result.skipped.append(id)
-            }
+            connected = await write(id, value, into: &result)
         }
         return result
+    }
+
+    /// Возвращает камере значения после быстрого просмотра — по одному, в `PresetCatalog.restoreOrder`. Совпадающие
+    /// не пишутся; не вышло с одной — пишем следующие.
+    public func restore(_ values: [SettingID: Int64]) async -> PresetResult {
+        var result = PresetResult()
+        var connected = true
+        for id in PresetCatalog.restoreOrder {
+            guard let value = values[id] else { continue }
+            guard connected else {
+                result.skipped.append(id)
+                continue
+            }
+            connected = await write(id, value, into: &result)
+        }
+        return result
+    }
+
+    /// Одна настройка пресета: совпадает — не пишем. Возвращает, осталась ли связь.
+    private func write(_ id: SettingID, _ value: Int64, into result: inout PresetResult) async -> Bool {
+        if properties[id.code]?.current.intValue == value {
+            result.applied.append(id)
+            return true
+        }
+        do {
+            if try await set(id.code, to: value) == .confirmed {
+                result.applied.append(id)
+            } else {
+                result.skipped.append(id)
+            }
+            return true
+        } catch TransportError.disconnected {
+            result.skipped.append(id)
+            return false
+        } catch {
+            result.skipped.append(id)
+            return true
+        }
     }
 }

@@ -35,6 +35,10 @@ final class CameraController {
     private(set) var isRecording = false
     private(set) var presets: [Preset] = []
     private(set) var isApplyingPreset = false
+    /// Быстрый просмотр: пока держат «Посмотреть», этот пресет стоит на камере; отпустили — камера возвращается как была.
+    private(set) var previewingPreset: Int?
+    /// Кнопку отпустили — камера возвращается как была.
+    private(set) var previewReturning = false
     /// Короткое сообщение: пресет применён, снимок сохранён и т.п.
     private(set) var statusMessage: String?
     /// Когда началась запись (для таймера «● REC»).
@@ -113,6 +117,9 @@ final class CameraController {
     @ObservationIgnored private var wifiTransport: PTPIPTransport?
     @ObservationIgnored private var statusTask: Task<Void, Never>?
     @ObservationIgnored private let presetsKey = "presets"
+    @ObservationIgnored private var previewApply: Task<Void, Never>?
+    @ObservationIgnored private var previewStop: PresetStop?
+    @ObservationIgnored private var previewRestore: [SettingID: Int64] = [:]
     @ObservationIgnored private var tracker = ConnectionTracker<ObjectIdentifier>()
     @ObservationIgnored private var devices: [ObjectIdentifier: ICCameraDevice] = [:]
 
@@ -727,6 +734,56 @@ final class CameraController {
         storePresets()
     }
 
+    /// Начать быстрый просмотр: запомнить, как камера настроена сейчас, и поставить пресет. Отпустили кнопку —
+    /// `endPresetPreview`.
+    func beginPresetPreview(_ index: Int) {
+        guard presets.indices.contains(index), phase == .ready, !isApplyingPreset, let session else { return }
+        let preset = presets[index]
+        guard !PresetCatalog.effective(preset).isEmpty else { return showStatus("«\(preset.name)» ничего не меняет") }
+        previewRestore = PresetCatalog.restoreValues(preset, from: properties)
+        previewingPreset = index
+        isApplyingPreset = true
+        statusTask?.cancel()
+        statusMessage = "Просмотр «\(preset.name)»"
+        let stop = PresetStop()
+        previewStop = stop
+        previewApply = Task { _ = await session.apply(preset, while: { !stop.isStopped }) }
+    }
+
+    /// Кнопку отпустили: недописанное не пишем, всё, что пресет поменял, возвращаем как было.
+    func endPresetPreview() {
+        guard previewingPreset != nil, !previewReturning else { return }
+        previewReturning = true
+        statusMessage = "Возвращаю как было…"
+        let applying = previewApply
+        previewStop?.stop()
+        let values = previewRestore
+        let session = session
+        Task { [weak self] in
+            await applying?.value
+            let result = await session?.restore(values)
+            guard let self, self.previewReturning else { return }
+            self.endPreviewWithoutCamera()
+            self.isApplyingPreset = false
+            if let skipped = result?.skipped, !skipped.isEmpty {
+                self.showStatus("Вернул как было, кроме: " + skipped.map(\.title).joined(separator: ", "))
+            } else {
+                self.showStatus("Вернул как было")
+            }
+        }
+    }
+
+    /// Просмотр кончился — или связь пропала, и вернуть уже не с чем.
+    private func endPreviewWithoutCamera() {
+        previewStop?.stop()
+        previewStop = nil
+        previewApply?.cancel()
+        previewApply = nil
+        previewRestore = [:]
+        previewingPreset = nil
+        previewReturning = false
+    }
+
     /// Значение настройки в пресете — камера при этом не меняется.
     func setPresetValue(_ index: Int, _ id: SettingID, _ value: Int64) {
         guard presets.indices.contains(index), PresetCatalog.order.contains(id) else { return }
@@ -1211,6 +1268,7 @@ final class CameraController {
         targets = [:]
         pending = []
         isApplyingPreset = false
+        endPreviewWithoutCamera()
         isCapturing = false
         linkOutageSince = nil
         phase = .connecting
@@ -1526,6 +1584,7 @@ final class CameraController {
         isRecording = false
         recordingStartedAt = nil
         isApplyingPreset = false
+        endPreviewWithoutCamera()
         isCapturing = false
         capturePhase = nil
         progressTask?.cancel()
@@ -1658,4 +1717,14 @@ private enum LinkSensor {
             return true
         }
     }
+}
+
+/// «Хватит» для пресета, который ещё пишется: начатую запись камера доделает, следующие не начнутся. Не отмена задачи:
+/// отмена оборвала бы ожидание подтверждения, и «как было» сравнивалось бы с устаревшим значением камеры.
+final class PresetStop: Sendable {
+    private let stopped = OSAllocatedUnfairLock(initialState: false)
+
+    func stop() { stopped.withLock { $0 = true } }
+
+    var isStopped: Bool { stopped.withLock { $0 } }
 }

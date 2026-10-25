@@ -98,4 +98,6 @@ import Testing
     #expect(try decode(#"{"action":"movePreset","from":2,"to":0}"#) == .movePreset(from: 2, to: 0))
     #expect(try decode(#"{"action":"duplicatePreset","index":1}"#) == .duplicatePreset(1))
     #expect(try decode(#"{"action":"recapturePreset","index":1}"#) == .recapturePreset(1))
+    #expect(try decode(#"{"action":"beginPresetPreview","index":0}"#) == .beginPresetPreview(0))
+    #expect(try decode(#"{"action":"endPresetPreview"}"#) == .endPresetPreview)
 }

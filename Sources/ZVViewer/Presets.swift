@@ -152,6 +152,8 @@ struct PresetsWindow: View {
             }
         }
         .frame(minWidth: 660, minHeight: 460)
+        // пока держат «Посмотреть» — окна не видно, но кнопку оно не отпускает
+        .background(WindowAlpha(alpha: screen.presetPeeking ? 0 : 1))
         .onAppear {
             screen.presetsWindowOpen = true
             if !(screen.presetsSelected.map(controller.presets.indices.contains) ?? false) {
@@ -261,6 +263,8 @@ private struct PresetEditor: View {
                 Button("Применить") { controller.applyPreset(index) }
                     .buttonStyle(.borderedProminent)
                     .disabled(!online || controller.isApplyingPreset)
+                PeekButton(controller: controller, screen: screen, index: index,
+                           enabled: online && !controller.isApplyingPreset)
                 Button("Взять с камеры") { controller.recapturePreset(index) }
                     .disabled(!online || controller.isApplyingPreset)
                     .help("Все значения пресета — как сейчас на камере")
@@ -337,6 +341,45 @@ private struct PresetSettingRow: View {
             }
         }
         .opacity(blocked ? 0.55 : 1)
+    }
+}
+
+/// «Посмотреть»: пока кнопку держат, окно пресетов прозрачно, а пресет стоит на камере; отпустили — камера как была.
+private struct PeekButton: View {
+    let controller: CameraController
+    let screen: ScreenState
+    let index: Int
+    let enabled: Bool
+
+    var body: some View {
+        Text("Посмотреть")
+            .padding(.horizontal, 10)
+            .padding(.vertical, 3)
+            .background(Color.primary.opacity(screen.presetPeeking ? 0.25 : 0.1), in: RoundedRectangle(cornerRadius: 6))
+            .opacity(enabled || screen.presetPeeking ? 1 : 0.4)
+            .help("Удерживайте: пока кнопка нажата, пресет стоит на камере, а окно не мешает смотреть. Отпустите — всё как было")
+            // нажатие длится, сколько держат: «долгое нажатие» здесь никогда не наступает
+            .onLongPressGesture(minimumDuration: 3600, maximumDistance: .infinity, perform: {}) { pressing in
+                if pressing {
+                    guard enabled else { return }
+                    screen.presetPeeking = true
+                    controller.beginPresetPreview(index)
+                } else if screen.presetPeeking {
+                    screen.presetPeeking = false
+                    controller.endPresetPreview()
+                }
+            }
+    }
+}
+
+/// Прозрачность окна, в котором стоит вид.
+private struct WindowAlpha: NSViewRepresentable {
+    let alpha: CGFloat
+
+    func makeNSView(context: Context) -> NSView { NSView() }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        view.window?.alphaValue = alpha
     }
 }
 
