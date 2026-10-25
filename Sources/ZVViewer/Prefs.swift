@@ -51,6 +51,7 @@ enum Prefs {
         static let wifiEnabled = "wifiEnabled"
         static let wifiHost = "wifiHost"
         static let wifiCameraName = "wifiCameraName"
+        static let wifiAdaptiveQuality = "wifiAdaptiveQuality"
     }
 
     private static var defaults: UserDefaults { .standard }
@@ -111,5 +112,11 @@ enum Prefs {
     static var wifiCameraName: String? {
         get { defaults.string(forKey: Key.wifiCameraName) }
         set { defaults.set(newValue, forKey: Key.wifiCameraName) }
+    }
+
+    /// Снижать качество превью (1024×576 → 640×360), когда Wi-Fi его не тянет. При хорошем сигнале — всегда полное.
+    static var wifiAdaptiveQuality: Bool {
+        get { defaults.object(forKey: Key.wifiAdaptiveQuality) as? Bool ?? true }
+        set { defaults.set(newValue, forKey: Key.wifiAdaptiveQuality) }
     }
 }

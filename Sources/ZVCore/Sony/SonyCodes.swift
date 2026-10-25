@@ -45,6 +45,8 @@ public enum SonyProp {
     public static let jpegQuality: UInt16 = 0xD252
     public static let fileFormat: UInt16 = 0xD253
     public static let priorityMode: UInt16 = 0xD25A
+    /// Качество превью: 1 — 640×360 (~34 КБ на кадр), 2 — 1024×576 (~72 КБ). По Wi-Fi меняет размер кадра.
+    public static let liveViewImageQuality: UInt16 = 0xD26A
     public static let shutterHalfPress: UInt16 = 0xD2C1
     public static let shutterFullPress: UInt16 = 0xD2C2
     public static let movieRecButton: UInt16 = 0xD2C8

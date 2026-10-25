@@ -3,7 +3,9 @@ import CoreWLAN
 import Foundation
 import ImageCaptureCore
 import ImageIO
+import Network
 import Observation
+import os
 import ZVCamera
 import ZVCore
 
@@ -96,6 +98,36 @@ final class CameraController {
     private(set) var connectionMessage: String?
     /// Камера на связи, но кадры давно не приходят.
     private(set) var isFrameStale = false
+    /// Что показать поверх видео о связи: слабый сигнал, провал, переподключение.
+    private(set) var linkIndicator: LinkIndicator = .none
+    enum LinkIndicator: Equatable {
+        case none
+        /// кадры запаздывают дольше секунды
+        case weak
+        /// кадров давно нет или связь пропала — с этого момента
+        case interrupted(since: Date)
+        /// сеанс оборвался, программа тихо подключается заново — с этого момента
+        case reconnecting(since: Date)
+    }
+    /// Каким качеством идёт превью по Wi-Fi (по ширине кадра); nil — по USB или кадров ещё нет.
+    private(set) var previewQuality: LiveViewQuality?
+    /// Идёт тихое восстановление оборвавшегося сеанса: кадр и настройки на экране, кнопки неактивны.
+    private(set) var reconnectingSince: Date?
+    /// Связь по Wi-Fi пропала, транспорт ждёт её — с этого момента.
+    @ObservationIgnored private var linkOutageSince: Date?
+    @ObservationIgnored private var linkRTT: TimeInterval?
+    @ObservationIgnored private var qualityPolicy = LiveViewQualityPolicy(now: Date())
+    @ObservationIgnored private var qualityWriting = false
+    @ObservationIgnored private var reconnectTask: Task<Void, Never>?
+    @ObservationIgnored private var reconnectAttempt = 0
+    /// Пока идёт сеанс, macOS не усыпляет программу (App Nap душил превью до 6–12 к/с), систему и экран.
+    @ObservationIgnored private var sessionActivity: NSObjectProtocol?
+    /// Для API автоматизации: сколько раз сеанс восстанавливался и сколько это заняло в последний раз.
+    @ObservationIgnored private(set) var reconnects = 0
+    @ObservationIgnored private(set) var lastRecoverySeconds: Double?
+    /// Кадры за последние 5 с: сколько байт и сколько шёл запрос — пропускная способность для подсказки и API.
+    @ObservationIgnored private var recentFrames: [(at: Date, bytes: Int, seconds: TimeInterval)] = []
+    @ObservationIgnored private let log = Logger(subsystem: "local.zve10viewer", category: "link")
 
     enum TransportKind: String { case usb, wifi }
     /// Чем подключена камера сейчас.
@@ -129,6 +161,7 @@ final class CameraController {
                 self?.tickFrameStats()
                 self?.tickShownStats()
                 self?.tickCableAccess()
+                self?.adaptQuality()
             }
         }
         // без кабеля — ищем камеру в сети
@@ -645,6 +678,13 @@ final class CameraController {
         // сеанс начался — сопряжение, если его не завершили, больше не нужно
         isPairing = false
         wifiStatus = nil
+        qualityPolicy = LiveViewQualityPolicy(now: Date())
+        qualityWriting = false
+        recentFrames = []
+        if sessionActivity == nil {
+            sessionActivity = ProcessInfo.processInfo.beginActivity(
+                options: [.userInitiated, .latencyCritical, .idleDisplaySleepDisabled], reason: "Live view с камеры")
+        }
         let session = CameraSession(transport: transport)
         closeTransport = close
         self.session = session
@@ -664,6 +704,7 @@ final class CameraController {
                 guard !Task.isCancelled else { return }
                 self.phase = .ready
                 self.connectionMessage = nil
+                self.startQuality(session)
                 onReady()
             } catch is CancellationError {
                 return
@@ -737,9 +778,17 @@ final class CameraController {
 
     /// Раз в секунду: если связи нет — ищем камеру в сети и подключаемся.
     private func wifiTick() async {
-        guard wifiWanted, !wifiBusy, wifiPolicy.mayAttempt(enabled: Prefs.wifiEnabled, pairing: isPairing, now: Date()) else { return }
+        guard wifiWanted, reconnectingSince == nil, !wifiBusy,
+              wifiPolicy.mayAttempt(enabled: Prefs.wifiEnabled, pairing: isPairing, now: Date()) else { return }
         wifiBusy = true
         defer { wifiBusy = false }
+        // тесты через прокси «плохой сети» (scripts/badnet.py): только этот адрес, без поиска камеры в сети
+        if AutomationServer.isRequested, let forced = ProcessInfo.processInfo.environment["ZV_PTPIP_HOST"] {
+            if wifiPolicy.maySendInit(paired: Prefs.wifiCameraName != nil, pairing: isPairing) {
+                _ = await tryWiFi(forced, discovered: false)
+            }
+            return
+        }
         // сначала — последний адрес камеры: так подключение после перерыва занимает секунду, а не поиск
         let last = isPairing || Prefs.wifiCameraName == nil ? nil : Prefs.wifiHost
         var lastFailed = false
@@ -788,21 +837,26 @@ final class CameraController {
             + "Обычно это проходит за 1–2 минуты; если нет — выключите и снова включите на камере PC Remote"
     }
 
-    /// Одна попытка подключиться к камере по адресу. discovered — адрес найден поиском сейчас, а не взят из памяти.
-    private func tryWiFi(_ host: String, discovered: Bool) async -> WiFiAttempt {
-        let transport = PTPIPTransport(host: host, identity: identity)
+    /// Нужна ли попытка по Wi-Fi: обычный поиск или тихое восстановление оборвавшегося сеанса.
+    private var wifiAttemptWanted: Bool { wifiWanted || reconnectingSince != nil }
+
+    /// Одна попытка подключиться к камере по адресу. discovered — адрес найден поиском сейчас, а не взят из памяти;
+    /// quick — восстановление сеанса: камера только что была на связи, долго ждать ответа незачем.
+    private func tryWiFi(_ host: String, discovered: Bool, quick: Bool = false) async -> WiFiAttempt {
+        let transport = PTPIPTransport(host: host, identity: identity, reachable: Self.testLinkCheck)
         let pairing = isPairing
         connectingTransport = transport
         defer { if connectingTransport === transport { connectingTransport = nil } }
         if pairing { wifiStatus = "Камера найдена (\(host)). Включите на камере PC Remote Function → Pairing и подтвердите сопряжение" }
         do {
             // при сопряжении камера ждёт подтверждения на экране — ответа ждём дольше
-            let name = try await transport.connect(initTimeout: pairing ? .seconds(60) : .seconds(5))
+            let name = try await transport.connect(connectTimeout: quick ? .seconds(2) : .seconds(5),
+                                                   initTimeout: pairing ? .seconds(60) : quick ? .seconds(3) : .seconds(5))
             // камера приняла программу — значит, сопряжены, даже если связь уже не нужна
             Prefs.wifiHost = host
             Prefs.wifiCameraName = name
             // пока ждали, связь стала не нужна: подключили кабель, выключили Wi-Fi, отменили сопряжение
-            guard wifiWanted, pairing == isPairing else {
+            guard wifiAttemptWanted, pairing == isPairing else {
                 await transport.close()
                 return .dropped
             }
@@ -814,11 +868,29 @@ final class CameraController {
             wifiTransport = transport
             runSession(transport: transport, kind: .wifi, close: { await transport.close() }, prepare: {},
                        onReady: { [weak self] in self?.wifiPolicy.sessionReady() },
-                       onFailure: { [weak self] in self?.wifiLost() })
+                       onFailure: { [weak self] in
+                           Task { [weak self] in
+                               let loss = await transport.loss
+                               self?.wifiLost(loss, transport: transport, host: host)
+                           }
+                       })
+            tasks.append(Task { [weak self] in
+                for await status in transport.linkStatus { self?.linkChanged(status) }
+            })
             return .connected
+        } catch PTPIPError.rejected(let reason) where !pairing && !WiFiPolicy.forgetsPairing(initFailReason: reason) {
+            // камера занята (например, ещё держит прошлое подключение) — сопряжение не трогаем, повторим
+            await transport.close()
+            guard wifiAttemptWanted else { return .dropped }
+            log.info("Init Fail \(reason, privacy: .public): камера занята, повтор")
+            if reconnectingSince == nil {
+                wifiPolicy.attemptFailed(discovered: discovered)
+                showStaleHintIfNeeded(host)
+            }
+            return .failed
         } catch PTPIPError.rejected {
             await transport.close()
-            guard wifiWanted else { return .dropped }
+            guard wifiAttemptWanted else { return .dropped }
             if pairing {
                 wifiStatus = "Камера найдена (\(host)). Включите на камере PC Remote Function → Pairing"
             } else {
@@ -830,20 +902,163 @@ final class CameraController {
         } catch {
             await transport.close()
             // отменили или стало не нужно — это не неудача
-            guard wifiWanted, pairing == isPairing else { return .dropped }
-            wifiPolicy.attemptFailed(discovered: discovered)
-            showStaleHintIfNeeded(host)
+            guard wifiAttemptWanted, pairing == isPairing else { return .dropped }
+            if reconnectingSince == nil {
+                wifiPolicy.attemptFailed(discovered: discovered)
+                showStaleHintIfNeeded(host)
+            }
             return .failed
         }
     }
 
-    /// Сеанс по Wi-Fi оборвался: повтор с растущей паузой, а если камера ждёт на кабеле — она.
-    private func wifiLost() {
+    /// Сеанс по Wi-Fi оборвался. Картинка уже шла и камера, скорее всего, рядом — восстанавливаем тихо: кадр и
+    /// настройки остаются на экране, попытки — сразу и по тому же адресу. Иначе — обычное ожидание с поиском.
+    private func wifiLost(_ loss: LinkLoss?, transport: PTPIPTransport, host: String) {
+        // об одном обрыве сообщают и рукопожатие, и поток свойств; сеанс уже могли восстановить — старый транспорт не трогает новый
+        guard transportKind == .wifi, wifiTransport === transport else { return }
+        log.info("сеанс по Wi-Fi оборвался: \(String(describing: loss), privacy: .public)")
+        let quiet = (frame != nil || reconnectingSince != nil) && (loss?.reconnectsAtOnce ?? true) && Prefs.wifiEnabled
+        guard quiet else {
+            giveUpReconnect()
+            return
+        }
+        if reconnectingSince == nil {
+            reconnectingSince = Date()
+            reconnectAttempt = 0
+        }
+        suspendSession()
+        scheduleReconnect(host)
+    }
+
+    private func scheduleReconnect(_ host: String) {
+        let delay = WiFiPolicy.reconnectDelay(attempt: reconnectAttempt)
+        reconnectAttempt += 1
+        reconnectTask?.cancel()
+        reconnectTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard let self, !Task.isCancelled, self.reconnectingSince != nil else { return }
+            // пока ждали, Wi-Fi выключили в настройках — восстанавливать незачем
+            guard Prefs.wifiEnabled else {
+                self.giveUpReconnect()
+                return
+            }
+            switch await self.tryWiFi(host, discovered: false, quick: true) {
+            case .connected:
+                return
+            case .rejected:
+                self.giveUpReconnect()
+            case .failed, .dropped:
+                guard self.reconnectingSince != nil else { return }
+                if let since = self.reconnectingSince, Date().timeIntervalSince(since) < WiFiPolicy.reconnectWindow {
+                    self.scheduleReconnect(host)
+                } else {
+                    self.giveUpReconnect()
+                }
+            }
+        }
+    }
+
+    /// Тихо восстановить сеанс не вышло (или и не стоило): обычное ожидание — экран «Подключите камеру»,
+    /// поиск в сети с растущей паузой, а если камера ждёт на кабеле — она.
+    private func giveUpReconnect() {
         teardown()
         let seconds = wifiPolicy.sessionLost(now: Date())
         connectionMessage = "Связь по Wi-Fi пропала. Повтор через \(seconds) с…"
         connectAttachedIfAny()
     }
+
+    /// Сеанс оборвался, но камеру ждём обратно: закрыть всё, что связано с соединением, а картинку, настройки,
+    /// таймер записи и ленту снимков оставить на экране.
+    private func suspendSession() {
+        tasks.forEach { $0.cancel() }
+        tasks.removeAll()
+        let close = closeTransport
+        Task { await close?() }
+        closeTransport = nil
+        wifiTransport = nil
+        recordingModeTask?.cancel()
+        recordingModeTask = nil
+        recordingDriver.cancel()
+        session = nil
+        coalescer = nil
+        targets = [:]
+        pending = []
+        isApplyingPreset = false
+        isCapturing = false
+        linkOutageSince = nil
+        phase = .connecting
+    }
+
+    /// Тесты через прокси «плохой сети» (`ZV_LINK_CHECK_URL`, только с API): ping камеры попал бы в сам прокси и
+    /// отвечал бы всегда, даже когда прокси «роняет» Wi-Fi, — о сети спрашиваем датчик прокси (`GET /link`, 200 — есть).
+    private static let testLinkCheck: PTPIPTransport.Reachability? = {
+        guard AutomationServer.isRequested,
+              let url = ProcessInfo.processInfo.environment["ZV_LINK_CHECK_URL"].flatMap(URL.init(string:)),
+              let host = url.host, let port = url.port.flatMap({ NWEndpoint.Port(rawValue: UInt16($0)) }) else { return nil }
+        let path = url.path.isEmpty ? "/" : url.path
+        return { await LinkSensor.isUp(host: host, port: port, path: path) }
+    }()
+
+    /// Транспорт сообщил, что со связью: провал и время ответа камеры.
+    private func linkChanged(_ status: LinkStatus) {
+        if linkOutageSince != status.outageSince {
+            if let since = status.outageSince {
+                log.info("провал связи с \(since.timeIntervalSinceNow, privacy: .public) с")
+            } else if linkOutageSince != nil {
+                log.info("связь вернулась")
+            }
+        }
+        linkOutageSince = status.outageSince
+        if let rtt = status.rtt {
+            linkRTT = rtt
+            qualityPolicy.noteRTT(rtt, at: Date())
+        }
+        tickFrameStats()
+    }
+
+    // MARK: - Качество превью
+
+    /// Сеанс по Wi-Fi готов: качество — высокое; дальше его ведёт политика по каналу.
+    private func startQuality(_ session: CameraSession) {
+        guard transportKind == .wifi,
+              properties[SonyProp.liveViewImageQuality]?.current.intValue == LiveViewQuality.low.rawValue else { return }
+        writeQuality(.high, session)
+    }
+
+    /// Раз в полсекунды: снизить качество превью, если канал его не тянет, или вернуть, когда тянет снова.
+    private func adaptQuality() {
+        guard transportKind == .wifi, phase == .ready, reconnectingSince == nil, let session, !qualityWriting,
+              let current = previewQuality else { return }
+        let wanted: LiveViewQuality?
+        if Prefs.wifiAdaptiveQuality {
+            wanted = qualityPolicy.decide(now: Date(), outage: linkOutageSince != nil)
+        } else {
+            wanted = current == .low ? .high : nil
+        }
+        guard let wanted, wanted != current else { return }
+        log.info("качество превью: \(wanted == .high ? "высокое" : "низкое", privacy: .public)")
+        writeQuality(wanted, session)
+    }
+
+    private func writeQuality(_ quality: LiveViewQuality, _ session: CameraSession) {
+        qualityWriting = true
+        Task { [weak self] in
+            // без ожидания подтверждения: его видно по ширине кадров, а лишние перечитывания свойств отнимают канал
+            try? await session.setQuietly(SonyProp.liveViewImageQuality, to: quality.rawValue, type: PTPType.uint8)
+            self?.qualityWriting = false
+        }
+    }
+
+    /// Пропускная способность по кадрам за последние 5 с, байт/с.
+    var throughput: Double? {
+        let now = Date()
+        let recent = recentFrames.filter { now.timeIntervalSince($0.at) <= 5 && $0.seconds <= 1.5 }
+        let busy = recent.reduce(0.0) { $0 + $1.seconds }
+        guard busy > 0 else { return nil }
+        return Double(recent.reduce(0) { $0 + $1.bytes }) / busy
+    }
+
+    var linkRTTMs: Int? { linkRTT.map { Int(($0 * 1000).rounded()) } }
 
     private func startStreams(_ session: CameraSession, onEnded: @escaping () -> Void) {
         tasks.append(Task { [weak self] in
@@ -856,13 +1071,13 @@ final class CameraController {
         })
         // следующий кадр запрашиваем, пока текущий декодируется: по Wi-Fi запрос идёт 25–35 мс.
         // Не успеваем показать — показываем самый свежий
-        let (frames, sink) = AsyncStream.makeStream(of: Data.self, bufferingPolicy: .bufferingNewest(1))
+        let (frames, sink) = AsyncStream.makeStream(of: LiveViewSample.self, bufferingPolicy: .bufferingNewest(1))
         tasks.append(Task.detached(priority: .userInitiated) {
             defer { sink.finish() }
             var failures = 0
             while !Task.isCancelled {
                 do {
-                    sink.yield(try await session.nextLiveViewFrame())
+                    sink.yield(try await session.nextLiveViewSample())
                     failures = 0
                 } catch TransportError.disconnected {
                     break
@@ -876,11 +1091,11 @@ final class CameraController {
             }
         })
         tasks.append(Task.detached(priority: .userInitiated) { [weak self] in
-            for await jpeg in frames {
-                guard let image = Self.decode(jpeg) else { continue }
+            for await sample in frames {
+                guard let image = Self.decode(sample.jpeg) else { continue }
                 let levels = Self.histogramLevels(of: image)
                 guard !Task.isCancelled else { break }
-                await self?.show(image, jpeg: jpeg, levels: levels)
+                await self?.show(image, sample: sample, levels: levels)
             }
         })
     }
@@ -896,14 +1111,28 @@ final class CameraController {
         }
     }
 
-    private func show(_ image: CGImage, jpeg: Data, levels: [Int]) {
+    private func show(_ image: CGImage, sample: LiveViewSample, levels: [Int]) {
         frame = image
-        lastJPEG = jpeg
+        lastJPEG = sample.jpeg
+        let now = Date()
+        if let since = reconnectingSince, session != nil {
+            // первый кадр нового сеанса после обрыва — сеанс восстановлен
+            reconnects += 1
+            lastRecoverySeconds = now.timeIntervalSince(since)
+            reconnectingSince = nil
+            log.info("сеанс восстановлен за \(now.timeIntervalSince(since), privacy: .public) с")
+        }
+        recentFrames.append((now, sample.bytes, sample.seconds))
+        recentFrames.removeAll { now.timeIntervalSince($0.at) > 5 }
+        if transportKind == .wifi, let level = LiveViewQuality(frameWidth: image.width) {
+            if previewQuality != level { previewQuality = level }
+            if let short = sample.shortReplySeconds { qualityPolicy.noteRTT(short, at: now) }
+            qualityPolicy.record(bytes: sample.bytes, seconds: sample.seconds, level: level, at: now)
+        }
         // в видео белое в live view — 234, в фото — 255: шкала гистограммы — до белого
         let white = LumaStats.whiteLevel(levels: levels, video: mode != .photo)
         histogram = levels.isEmpty ? [] : LumaHistogram.bins(levels: levels, whiteLevel: white)
         histogramStats = LumaStats(levels: levels, whiteLevel: white)
-        let now = Date()
         if let lastFrameAt { frameGaps.append((now, now.timeIntervalSince(lastFrameAt))) }
         lastFrameAt = now
         frameTimes.append(now)
@@ -949,7 +1178,23 @@ final class CameraController {
         frameTimes.removeAll { now.timeIntervalSince($0) > 2 }
         fps = Double(frameTimes.count) / 2
         let live = phase == .settling || phase == .ready
-        isFrameStale = live && frame != nil && (lastFrameAt.map { now.timeIntervalSince($0) > 1.5 } ?? false)
+        let waited = lastFrameAt.map { now.timeIntervalSince($0) } ?? 0
+        let indicator: LinkIndicator
+        if let since = reconnectingSince {
+            indicator = .reconnecting(since: since)
+        } else if !live || frame == nil {
+            indicator = .none
+        } else if let since = linkOutageSince {
+            indicator = .interrupted(since: since)
+        } else if waited >= 4, let last = lastFrameAt {
+            indicator = .interrupted(since: last)
+        } else if waited >= 1.2 {
+            indicator = .weak
+        } else {
+            indicator = .none
+        }
+        if linkIndicator != indicator { linkIndicator = indicator }
+        isFrameStale = indicator != .none
     }
 
     private func writeFinished(_ code: UInt16, _ value: Int64, _ result: SetResult?) {
@@ -966,8 +1211,26 @@ final class CameraController {
     private func teardown() {
         tasks.forEach { $0.cancel() }
         tasks.removeAll()
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        reconnectingSince = nil
         let close = closeTransport
-        Task { await close?() }
+        // качество превью снижали из-за слабого сигнала — камеру оставляем на высоком
+        let restore = transportKind == .wifi && previewQuality == .low ? session : nil
+        Task {
+            if let restore {
+                try? await restore.setQuietly(SonyProp.liveViewImageQuality, to: LiveViewQuality.high.rawValue, type: PTPType.uint8)
+            }
+            await close?()
+        }
+        if let activity = sessionActivity {
+            ProcessInfo.processInfo.endActivity(activity)
+            sessionActivity = nil
+        }
+        previewQuality = nil
+        linkOutageSince = nil
+        linkIndicator = .none
+        recentFrames = []
         device = nil
         closeTransport = nil
         transportKind = nil
@@ -1021,5 +1284,47 @@ final class CameraController {
             return true
         }
         return drawn ? LumaHistogram.levels(rgba: pixels, width: width, height: height, bytesPerRow: bytesPerRow) : []
+    }
+}
+
+/// Датчик связи тестового прокси: GET по TCP без URLSession (обычный HTTP к IP-адресу ATS бы не пустил).
+private enum LinkSensor {
+    static func isUp(host: String, port: NWEndpoint.Port, path: String) async -> Bool {
+        let connection = NWConnection(host: NWEndpoint.Host(host), port: port, using: .tcp)
+        return await withCheckedContinuation { (done: CheckedContinuation<Bool, Never>) in
+            let once = Once()
+            func finish(_ up: Bool) {
+                guard once.claim() else { return }
+                connection.cancel()
+                done.resume(returning: up)
+            }
+            connection.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    connection.send(content: Data("GET \(path) HTTP/1.0\r\n\r\n".utf8), completion: .contentProcessed { _ in })
+                    connection.receive(minimumIncompleteLength: 12, maximumLength: 64) { data, _, _, _ in
+                        finish(data.map { String(decoding: $0, as: UTF8.self).hasPrefix("HTTP/1.1 200") } ?? false)
+                    }
+                case .failed, .cancelled:
+                    finish(false)
+                default:
+                    break
+                }
+            }
+            connection.start(queue: .global(qos: .utility))
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.8) { finish(false) }
+        }
+    }
+
+    private final class Once: @unchecked Sendable {
+        private let lock = NSLock()
+        private var used = false
+        func claim() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            if used { return false }
+            used = true
+            return true
+        }
     }
 }

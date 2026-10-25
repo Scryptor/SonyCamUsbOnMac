@@ -90,6 +90,9 @@ public enum PTPIP {
 
     public static var probeResponse: Data { packet(PacketType.probeResponse, Data()) }
 
+    /// Проба «ты здесь?» по событийному соединению: камера отвечает ProbeResponse за 5–50 мс.
+    public static var probeRequest: Data { packet(PacketType.probeRequest, Data()) }
+
     public static func parseInitReply(_ packet: PTPIPPacket) throws -> PTPIPInitResult {
         var r = ByteReader(packet.payload)
         switch packet.type {

@@ -125,13 +125,8 @@ struct LiveScreen: View {
             Image(decorative: frame, scale: 1)
                 .resizable()
                 .aspectRatio(contentMode: .fit)
-                .opacity(controller.isFrameStale ? 0.45 : 1)
-            if controller.isFrameStale {
-                Label("Нет картинки с камеры…", systemImage: "exclamationmark.triangle")
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
-            }
+                .opacity(controller.linkIndicator.dimsPicture ? 0.55 : 1)
+            LinkOverlay(controller: controller)
         } else {
             ProgressView().controlSize(.large)
         }
@@ -215,7 +210,9 @@ private struct StatusPill: View {
                 ConnectionInfo(controller: controller)
             }
             PillButton(info: .frames, screen: screen) {
-                Text("\(controller.shownFPS) к/с").monospacedDigit()
+                // превью снижено из-за слабого Wi-Fi — видно сразу
+                Text("\(controller.shownFPS) к/с" + (controller.previewQuality == .low ? " · \(controller.frame?.height ?? 360)p" : ""))
+                    .monospacedDigit()
             } popover: {
                 FramesInfo(controller: controller)
             }
@@ -291,6 +288,15 @@ private struct ConnectionInfo: View {
                     if let dbm = details.signalDBm {
                         InfoRow(label: "Сигнал Wi-Fi", value: "\(String(dbm).replacingOccurrences(of: "-", with: "−")) дБм, \(Self.signalWord(dbm))")
                     }
+                    if let quality = controller.previewQuality, let frame = controller.frame {
+                        InfoRow(label: "Превью", value: "\(frame.width)×\(frame.height)"
+                                + (quality == .low ? " — сигнала не хватает на полное качество" : ""))
+                    }
+                    if let throughput = controller.throughput {
+                        InfoRow(label: "Поток превью", value: String(format: "%.1f Мбит/с", throughput * 8 / 1_000_000)
+                                .replacingOccurrences(of: ".", with: ","))
+                    }
+                    if let rtt = controller.linkRTTMs { InfoRow(label: "Отклик камеры", value: "\(rtt) мс") }
                 }
             }
             .textSelection(.enabled)
@@ -420,5 +426,75 @@ private struct InfoLine: View {
         .padding(.vertical, 10)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
         .opacity(controller.phase == .ready ? 1 : 0.5)
+    }
+}
+
+/// Что со связью — поверх кадра: слабый сигнал (плашка сверху, кадр не тускнеет), провал (карточка с временем и
+/// советом), переподключение. Последний кадр остаётся на экране всё это время.
+private struct LinkOverlay: View {
+    let controller: CameraController
+
+    private var wifi: Bool { controller.transportKind == .wifi }
+
+    var body: some View {
+        switch controller.linkIndicator {
+        case .none:
+            EmptyView()
+        case .weak:
+            if wifi {
+                VStack {
+                    Label("Слабый сигнал Wi-Fi", systemImage: "wifi.exclamationmark")
+                        .font(.callout)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .padding(.top, 64)
+                    Spacer()
+                }
+            }
+        case let .interrupted(since):
+            card(title: wifi ? "Связь с камерой прервалась" : "Нет картинки с камеры", since: since,
+                 tip: wifi ? tip : nil)
+        case let .reconnecting(since):
+            card(title: "Переподключаюсь к камере…", since: since, tip: tip)
+        }
+    }
+
+    private var tip: String {
+        let mac = "На Mac помогает выключить AirDrop и Handoff: они уводят Wi-Fi на свои каналы."
+        return controller.wifiDirect ? "Поставьте Mac ближе к камере. " + mac : "Поставьте камеру ближе к роутеру. " + mac
+    }
+
+    private func card(title: String, since: Date, tip: String?) -> some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            let seconds = max(0, Int(context.date.timeIntervalSince(since)))
+            VStack(spacing: 8) {
+                HStack(spacing: 10) {
+                    ProgressView().controlSize(.small)
+                    Text("\(title) · \(seconds / 60):\(String(format: "%02d", seconds % 60))").monospacedDigit()
+                }
+                .font(.headline)
+                if let tip, seconds >= 10 {
+                    Text(tip)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 360)
+                }
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 12)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+        }
+    }
+}
+
+extension CameraController.LinkIndicator {
+    /// Картинка заметно старая — приглушаем её, чтобы не путали с живой.
+    var dimsPicture: Bool {
+        switch self {
+        case .none, .weak: return false
+        case .interrupted, .reconnecting: return true
+        }
     }
 }

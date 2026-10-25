@@ -215,6 +215,9 @@ final class AutomationServer {
         case "wifiEnabled":
             guard let b = Bool(value) else { return "wifiEnabled: true | false" }
             Prefs.wifiEnabled = b
+        case "wifiAdaptiveQuality":
+            guard let b = Bool(value) else { return "wifiAdaptiveQuality: true | false" }
+            Prefs.wifiAdaptiveQuality = b
         case "autoHide":
             guard let b = Bool(value) else { return "autoHide: true | false" }
             Prefs.autoHide = b
@@ -225,6 +228,31 @@ final class AutomationServer {
             return "unknown preference \(key)"
         }
         return nil
+    }
+
+    /// Как идёт связь: состояние для экрана, качество превью, восстановления сеанса, поток и отклик камеры.
+    private func linkState() -> [String: Any] {
+        let state: String
+        var since: Date?
+        switch controller.linkIndicator {
+        case .none: state = "ok"
+        case .weak: state = "weak"
+        case let .interrupted(at):
+            state = "interrupted"
+            since = at
+        case let .reconnecting(at):
+            state = "reconnecting"
+            since = at
+        }
+        return [
+            "state": state,
+            "seconds": since.map { (Date().timeIntervalSince($0) * 10).rounded() / 10 } ?? NSNull(),
+            "quality": controller.previewQuality.map { $0 == .high ? "high" : "low" } ?? NSNull(),
+            "reconnects": controller.reconnects,
+            "lastRecoverySeconds": controller.lastRecoverySeconds.map { ($0 * 10).rounded() / 10 } ?? NSNull(),
+            "throughputKBs": controller.throughput.map { Int($0 / 1024) } ?? NSNull(),
+            "rttMs": controller.linkRTTMs ?? NSNull(),
+        ]
     }
 
     private func state() -> [String: Any] {
@@ -292,7 +320,9 @@ final class AutomationServer {
                 "destination": Prefs.destination.rawValue, "folder": Prefs.folderURL.path,
                 "reviewEnabled": Prefs.reviewEnabled, "reviewSeconds": Prefs.reviewSeconds,
                 "reviewSource": Prefs.reviewSource.rawValue, "autoHide": Prefs.autoHide, "autoHideSeconds": Prefs.autoHideSeconds,
+                "wifiAdaptiveQuality": Prefs.wifiAdaptiveQuality,
             ] as [String: Any],
+            "link": linkState(),
             "cameraDestination": controller.properties[SonyProp.stillImageStoreDestination]?.current.intValue ?? NSNull(),
             "presets": controller.presets.map { preset in
                 ["name": preset.name,

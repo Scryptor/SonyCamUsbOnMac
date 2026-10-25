@@ -16,6 +16,8 @@ public actor CameraSession {
     public nonisolated let snapshots: AsyncStream<[UInt16: SonyProperty]>
     private let snapshotContinuation: AsyncStream<[UInt16: SonyProperty]>.Continuation
     private var eventTask: Task<Void, Never>?
+    private var refreshRunning = false
+    private var refreshWanted = false
 
     public init(transport: PTPTransport, timing: SessionTiming = .standard) {
         self.transport = transport
@@ -84,15 +86,29 @@ public actor CameraSession {
 
     /// Следующий кадр live view (JPEG). Пока кадр не готов, камера отвечает AccessDenied — ждём и повторяем.
     public func nextLiveViewFrame() async throws -> Data {
+        try await nextLiveViewSample().jpeg
+    }
+
+    /// Кадр live view и как он шёл: по этим отсчётам видно, сколько тянет канал.
+    public func nextLiveViewSample() async throws -> LiveViewSample {
+        let clock = ContinuousClock()
+        var shortest: Duration?
         while true {
             try Task.checkCancellation()
+            let sent = clock.now
             let reply = try await rawSend(SonyOp.getObject, [Sony.liveViewHandle])
+            let took = clock.now - sent
             switch reply.code {
             case PTPResponseCode.ok:
-                if let jpeg = LiveViewFrame.jpeg(from: reply.data) { return jpeg }
+                if let jpeg = LiveViewFrame.jpeg(from: reply.data) {
+                    return LiveViewSample(jpeg: jpeg, bytes: reply.data.count, seconds: took.seconds,
+                                          shortReplySeconds: shortest?.seconds)
+                }
                 try await Task.sleep(for: .milliseconds(20))
             case PTPResponseCode.accessDenied, PTPResponseCode.deviceBusy:
-                // кадр ещё не готов или камера занята (например, переключает режим) — ждём и повторяем
+                // кадр ещё не готов или камера занята (например, переключает режим) — ждём и повторяем;
+                // короткий ответ заодно показывает время отклика камеры
+                shortest = min(shortest ?? took, took)
                 try await Task.sleep(for: .milliseconds(20))
             case PTPResponseCode.invalidObjectHandle:
                 try await Task.sleep(for: .milliseconds(50))
@@ -100,6 +116,11 @@ public actor CameraSession {
                 throw SessionError.operationFailed(operation: SonyOp.getObject, code: reply.code)
             }
         }
+    }
+
+    /// Записать значение без ожидания подтверждения и без проверок — для служебных свойств (качество превью).
+    public func setQuietly(_ code: UInt16, to value: Int64, type: UInt16) async throws {
+        try await call(SonyOp.setExtPropValue, [UInt32(code)], outData: PTPValue.encode(value, type: type))
     }
 
     static func allows(_ property: SonyProperty, _ value: Int64) -> Bool {
@@ -128,11 +149,28 @@ public actor CameraSession {
         let events = transport.events
         eventTask = Task { [weak self] in
             for await event in events where event.code == Sony.propertyChangedEvent {
-                try? await self?.refresh()
+                await self?.propertiesChanged()
             }
             // поток событий закончился — камера отключена
             await self?.close()
         }
+    }
+
+    /// Камера сообщила об изменении свойств. Пачка событий — одно перечитывание, а не по одному на событие:
+    /// каждое — ~2,8 КБ и лишний обмен, который на слабом Wi-Fi отнимает кадры у live view.
+    private func propertiesChanged() {
+        refreshWanted = true
+        guard !refreshRunning else { return }
+        refreshRunning = true
+        Task { await self.refreshWhileWanted() }
+    }
+
+    private func refreshWhileWanted() async {
+        while refreshWanted {
+            refreshWanted = false
+            try? await refresh()
+        }
+        refreshRunning = false
     }
 
     func close() {

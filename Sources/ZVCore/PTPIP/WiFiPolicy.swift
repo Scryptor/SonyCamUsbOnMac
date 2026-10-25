@@ -47,4 +47,20 @@ public struct WiFiPolicy: Sendable {
         nextAttempt = now.addingTimeInterval(TimeInterval(seconds))
         return seconds
     }
+
+    // MARK: - Тихое восстановление оборвавшегося сеанса
+
+    /// Сколько восстанавливаем сеанс тихо — с последним кадром на экране, по тому же адресу, без поиска.
+    /// Дальше — обычное ожидание с поиском камеры в сети.
+    public static let reconnectWindow: TimeInterval = 60
+
+    /// Пауза перед попыткой восстановить сеанс: первая — сразу, дальше 0,5, 1, 2, 3, 5, 5… с.
+    public static func reconnectDelay(attempt: Int) -> TimeInterval {
+        let delays: [TimeInterval] = [0, 0.5, 1, 2, 3]
+        return attempt < delays.count ? delays[max(attempt, 0)] : 5
+    }
+
+    /// Отказ камеры в приветствии (Init Fail): забывать ли сопряжение. 1 — камера программу не знает;
+    /// 2 — занята, 3 — без причины: это повторяется позже, сопряжение не трогаем.
+    public static func forgetsPairing(initFailReason reason: UInt32) -> Bool { reason == 1 }
 }

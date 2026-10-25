@@ -14,6 +14,7 @@ struct SettingsView: View {
     @AppStorage(Prefs.Key.wifiEnabled) private var wifiEnabled = true
     @AppStorage(Prefs.Key.wifiCameraName) private var wifiCameraName: String?
     @AppStorage(Prefs.Key.wifiHost) private var wifiHost: String?
+    @AppStorage(Prefs.Key.wifiAdaptiveQuality) private var wifiAdaptiveQuality = true
 
     var body: some View {
         Form {
@@ -67,6 +68,10 @@ struct SettingsView: View {
                     }
                 }
                 Text("Сопряжение — на экране ожидания: «Сопрячь с камерой…». Камера помнит его, пока её не сбросят.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Toggle("Снижать качество превью при слабом Wi-Fi", isOn: $wifiAdaptiveQuality)
+                Text("1024×576 → 640×360, только когда сигнала не хватает: картинка идёт плавнее. При хорошем сигнале — всегда полное качество.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

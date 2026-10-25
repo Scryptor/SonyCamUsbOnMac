@@ -6,16 +6,32 @@ import ZVCore
 /// Ничего не теряется, даже если ожидание оборвалось по тайм-ауту: пакет останется в очереди.
 final class PTPIPChannel: @unchecked Sendable {
     private let connection: NWConnection
-    private let queue = DispatchQueue(label: "zv.ptpip.channel")
+    private let queue = DispatchQueue(label: "zv.ptpip.channel", qos: .userInitiated)
     private let lock = NSLock()
     private var reader = PTPIPPacketReader()
     private var packets: [PTPIPPacket] = []
-    private var waiter: (id: Int, continuation: CheckedContinuation<PTPIPPacket, Error>)?
+    private var waiter: (id: Int, since: Date, continuation: CheckedContinuation<PTPIPPacket, Error>)?
     private var waiterSeq = 0
     private var failure: Error?
+    private var lastRx = Date()
+    /// Связь пропала: ожидание пакета не истекает, пока она не вернётся или транспорт не закроют.
+    private var paused = false
 
     private init(connection: NWConnection) {
         self.connection = connection
+    }
+
+    /// Когда по соединению в последний раз пришли байты.
+    var lastReceived: Date {
+        lock.lock()
+        defer { lock.unlock() }
+        return lastRx
+    }
+
+    func setPaused(_ value: Bool) {
+        lock.lock()
+        paused = value
+        lock.unlock()
     }
 
     /// Адрес этого Mac в сети, через который идёт соединение.
@@ -29,13 +45,20 @@ final class PTPIPChannel: @unchecked Sendable {
     static func open(host: String, port: UInt16, timeout: Duration) async throws -> PTPIPChannel {
         let tcp = NWProtocolTCP.Options()
         tcp.noDelay = true
-        // камера может пропасть без закрытия соединения (выключили, ушла из сети) — keepalive это заметит
+        // Связь по Wi-Fi может пропасть на десятки секунд: камера рядом и ждёт, а TCP сам довезёт данные, когда
+        // связь вернётся. Когда рвать, решает слежение за связью в транспорте; keepalive и предел повторов — запасной
+        // предел около 3 минут (раньше keepalive 5/2/3 рвал соединение уже через 11 с провала)
         tcp.enableKeepalive = true
-        tcp.keepaliveIdle = 5
-        tcp.keepaliveInterval = 2
-        tcp.keepaliveCount = 3
-        let connection = NWConnection(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port)!,
-                                      using: NWParameters(tls: nil, tcp: tcp))
+        tcp.keepaliveIdle = 10
+        tcp.keepaliveInterval = 5
+        tcp.keepaliveCount = 36
+        tcp.connectionDropTime = 190
+        // подтверждать сегменты сразу, а не пачками: камера держит короткий ответ, пока не подтверждён предыдущий
+        tcp.disableAckStretching = true
+        let parameters = NWParameters(tls: nil, tcp: tcp)
+        // запросы и подтверждения — в очередь «видео» Wi-Fi (WMM): их не задерживает другой трафик Mac
+        parameters.serviceClass = .interactiveVideo
+        let connection = NWConnection(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port)!, using: parameters)
         let channel = PTPIPChannel(connection: connection)
         try await channel.start(timeout: timeout)
         return channel
@@ -84,7 +107,8 @@ final class PTPIPChannel: @unchecked Sendable {
         }
     }
 
-    /// Следующий пакет; nil в timeout — ждать сколько угодно.
+    /// Следующий пакет. timeout — сколько можно не получать ни байта (а не ждать целый пакет: файл в 2 МБ
+    /// по слабому Wi-Fi идёт дольше, но непрерывно); nil — ждать сколько угодно.
     func nextPacket(timeout: Duration?) async throws -> PTPIPPacket {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<PTPIPPacket, Error>) in
             lock.lock()
@@ -101,25 +125,41 @@ final class PTPIPChannel: @unchecked Sendable {
             }
             waiterSeq += 1
             let id = waiterSeq
-            waiter = (id, continuation)
+            waiter = (id, Date(), continuation)
             lock.unlock()
-            if let timeout {
-                queue.asyncAfter(deadline: .now() + timeout.seconds) { [weak self] in
-                    self?.expire(id)
-                }
-            }
+            if let timeout { check(id, after: timeout.seconds, idle: timeout.seconds) }
         }
     }
 
+    /// Обычное закрытие (FIN): камера освобождает сеанс, как только его получит.
     func cancel() {
         connection.cancel()
         fail(TransportError.disconnected)
     }
 
-    private func expire(_ id: Int) {
+    /// Сброс (RST): камера освобождает сеанс сразу, даже если застряла на передаче.
+    func abort() {
+        connection.forceCancel()
+        fail(TransportError.disconnected)
+    }
+
+    private func check(_ id: Int, after delay: TimeInterval, idle: TimeInterval) {
+        queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            self?.expire(id, idle: idle)
+        }
+    }
+
+    private func expire(_ id: Int, idle: TimeInterval) {
         lock.lock()
         guard let current = waiter, current.id == id else {
             lock.unlock()
+            return
+        }
+        let quiet = Date().timeIntervalSince(max(lastRx, current.since))
+        if paused || quiet < idle {
+            let pause = paused
+            lock.unlock()
+            check(id, after: pause ? 0.25 : idle - quiet, idle: idle)
             return
         }
         waiter = nil
@@ -141,9 +181,17 @@ final class PTPIPChannel: @unchecked Sendable {
 
     private func deliver(_ data: Data) {
         lock.lock()
+        lastRx = Date()
         reader.feed(data)
         var ready: [(CheckedContinuation<PTPIPPacket, Error>, PTPIPPacket)] = []
-        while let packet = try? reader.next() {
+        var garbled = false
+        while true {
+            let packet: PTPIPPacket?
+            do { packet = try reader.next() } catch {
+                garbled = true
+                break
+            }
+            guard let packet else { break }
             if let current = waiter {
                 waiter = nil
                 ready.append((current.continuation, packet))
@@ -153,6 +201,8 @@ final class PTPIPChannel: @unchecked Sendable {
         }
         lock.unlock()
         for (continuation, packet) in ready { continuation.resume(returning: packet) }
+        // поток сбился (длина пакета меньше заголовка) — дальше его не разобрать: соединение рвём
+        if garbled { abort() }
     }
 
     private func fail(_ error: Error) {
@@ -167,9 +217,13 @@ final class PTPIPChannel: @unchecked Sendable {
 
 /// PTP поверх Wi-Fi (режимы камеры «Wi-Fi Access Point» и «Wi-Fi Direct»).
 /// Как и ImageCaptureCore для USB, сам открывает сессию PTP, а транзакции идут строго по одной.
+/// Пауза связи — не обрыв: сеанс держится, пока камера может вернуться, а рвётся по решению `LinkMonitor`.
 public actor PTPIPTransport: PTPTransport {
     public nonisolated let events: AsyncStream<PTPEvent>
     private nonisolated let eventContinuation: AsyncStream<PTPEvent>.Continuation
+    /// Что со связью: провал и время ответа камеры — для экрана.
+    public nonisolated let linkStatus: AsyncStream<LinkStatus>
+    private nonisolated let statusContinuation: AsyncStream<LinkStatus>.Continuation
     public nonisolated let host: String
     private let identity: PTPIPIdentity
     private let timeout: Duration
@@ -178,23 +232,35 @@ public actor PTPIPTransport: PTPTransport {
     private var nextTransactionID: UInt32 = 1
     private var busy = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
-    private var timeoutsInRow = 0
     private var closed = false
     private var eventTask: Task<Void, Never>?
+    private var watchTask: Task<Void, Never>?
+    private var monitor = LinkMonitor(now: Date())
+    private var seenCommandRx = Date.distantPast
+    private var seenEventRx = Date.distantPast
+    private var lastStatus = LinkStatus()
+    /// Почему транспорт закрылся сам; nil — открыт или его закрыла программа.
+    public private(set) var loss: LinkLoss?
+    /// Есть ли сеть до камеры — спрашивается во время провала связи.
+    public typealias Reachability = @Sendable () async -> Bool
+    private let reachable: Reachability
 
-    public init(host: String, identity: PTPIPIdentity, timeout: Duration = .seconds(8)) {
+    /// reachable — как проверить сеть до камеры во время провала; по умолчанию ICMP ping камеры.
+    public init(host: String, identity: PTPIPIdentity, timeout: Duration = .seconds(8), reachable: Reachability? = nil) {
         self.host = host
         self.identity = identity
         self.timeout = timeout
+        self.reachable = reachable ?? { await CameraPing.ping(host, timeout: 0.8) }
         (events, eventContinuation) = AsyncStream.makeStream()
+        (linkStatus, statusContinuation) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(1))
     }
 
     /// Приветствие, событийный канал, OpenSession. Возвращает имя камеры.
     /// initTimeout — сколько ждать ответа на приветствие (при сопряжении камера ждёт подтверждения).
     @discardableResult
-    public func connect(initTimeout: Duration = .seconds(5)) async throws -> String {
+    public func connect(connectTimeout: Duration = .seconds(5), initTimeout: Duration = .seconds(5)) async throws -> String {
         guard !closed else { throw TransportError.disconnected }
-        let command = try await PTPIPChannel.open(host: host, port: PTPIP.port, timeout: .seconds(5))
+        let command = try await PTPIPChannel.open(host: host, port: PTPIP.port, timeout: connectTimeout)
         // канал — в свойство сразу: close() во время ожидания (отмена сопряжения, «Забыть») должен его оборвать
         guard adopt(command, as: .command) else { throw TransportError.disconnected }
         do {
@@ -204,17 +270,18 @@ public actor PTPIPTransport: PTPTransport {
                 if case let .rejected(reason) = try PTPIP.parseInitReply(reply) { throw PTPIPError.rejected(reason: reason) }
                 throw PTPIPError.unexpectedPacket(reply.type)
             }
-            let event = try await PTPIPChannel.open(host: host, port: PTPIP.port, timeout: .seconds(5))
+            let event = try await PTPIPChannel.open(host: host, port: PTPIP.port, timeout: connectTimeout)
             guard adopt(event, as: .event) else { throw TransportError.disconnected }
             try await event.write(PTPIP.initEventRequest(connectionNumber: connectionNumber))
             let ack = try await event.nextPacket(timeout: .seconds(5))
             guard ack.type == PTPIP.PacketType.initEventAck else { throw PTPIPError.unexpectedPacket(ack.type) }
             listenForEvents(event)
             try await openSession()
+            startWatching()
             return cameraName
         } catch {
-            // каналы уже в свойствах: close() закроет оба (если его уже вызвали — они закрыты тогда же)
-            close()
+            // каналы уже в свойствах: shutDown закроет оба (если транспорт уже закрыли — они закрыты тогда же)
+            shutDown(abortive: false)
             throw error
         }
     }
@@ -243,13 +310,20 @@ public actor PTPIPTransport: PTPTransport {
         try await transact(operation, params, outData: outData, timeout: timeout)
     }
 
-    public func close() {
+    /// Обычное закрытие. Связь есть — сначала CloseSession (так просит Sony), но не дольше полсекунды:
+    /// застрявшая транзакция закрытие не держит. Потом FIN — камера свободна сразу.
+    public func close() async {
         guard !closed else { return }
-        closed = true
-        eventTask?.cancel()
-        command?.cancel()
-        event?.cancel()
-        eventContinuation.finish()
+        if watchTask != nil, !monitor.isOutage {
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask { _ = try? await self.transact(0x1003, [], outData: nil, timeout: .milliseconds(300)) }
+                group.addTask { try? await Task.sleep(for: .milliseconds(500)) }
+                await group.next()
+                group.cancelAll()
+                shutDown(abortive: false)
+            }
+        }
+        shutDown(abortive: false)
     }
 
     /// Сразу после сопряжения камера иногда молчит на первую команду: ждём недолго и повторяем.
@@ -260,7 +334,6 @@ public actor PTPIPTransport: PTPTransport {
                 if reply.isOK || reply.code == 0x201E { return }
                 throw SessionError.operationFailed(operation: 0x1002, code: reply.code)
             } catch TransportError.timeout where attempt < 4 {
-                timeoutsInRow = 0
                 continue
             }
         }
@@ -272,6 +345,8 @@ public actor PTPIPTransport: PTPTransport {
         guard let command, !closed else { throw TransportError.disconnected }
         let tid = nextTransactionID
         nextTransactionID &+= 1
+        monitor.operationStarted(at: Date())
+        defer { monitor.operationFinished() }
         do {
             try await command.write(PTPIP.operationRequest(operation, transactionID: tid, params: params, dataOut: outData != nil))
             if let outData {
@@ -280,27 +355,19 @@ public actor PTPIPTransport: PTPTransport {
             }
             var transaction = PTPIPTransaction(transactionID: tid)
             while true {
-                // тайм-аут — на паузу между пакетами: большой RAW по Wi-Fi идёт дольше, но непрерывно
+                // тайм-аут — на тишину; пока связь пропала, ожидание не истекает: обрыв решает слежение за связью
                 let packet = try await command.nextPacket(timeout: timeout)
                 if packet.type == PTPIP.PacketType.probeRequest {
                     try await command.write(PTPIP.probeResponse)
                     continue
                 }
-                if let reply = transaction.consume(packet) {
-                    timeoutsInRow = 0
-                    return reply
-                }
+                if let reply = transaction.consume(packet) { return reply }
             }
         } catch TransportError.timeout {
-            // две паузы подряд — связи нет: закрываем, программа переподключится
-            timeoutsInRow += 1
-            if timeoutsInRow >= 2 {
-                close()
-                throw TransportError.disconnected
-            }
+            // ответа нет, а связь есть — это решает вызывающий (live view спросит снова); сеанс не рвём
             throw TransportError.timeout(operation: operation)
         } catch TransportError.disconnected {
-            close()
+            abort(.broken)
             throw TransportError.disconnected
         }
     }
@@ -310,15 +377,102 @@ public actor PTPIPTransport: PTPTransport {
         eventTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let packet = try? await event.nextPacket(timeout: nil) else { break }
-                if packet.type == PTPIP.PacketType.probeRequest {
+                switch packet.type {
+                case PTPIP.PacketType.probeRequest:
                     try? await event.write(PTPIP.probeResponse)
-                } else if let ptpEvent = PTPIP.parseEvent(packet) {
-                    continuation.yield(ptpEvent)
+                case PTPIP.PacketType.probeResponse:
+                    await self?.probeAnswered()
+                default:
+                    if let ptpEvent = PTPIP.parseEvent(packet) { continuation.yield(ptpEvent) }
                 }
             }
-            // событийный канал закрылся — камера пропала
-            await self?.close()
+            // событийное соединение оборвалось — сеанс без него не живёт
+            await self?.abort(.broken)
         }
+    }
+
+    // MARK: - Слежение за связью
+
+    private func startWatching() {
+        monitor = LinkMonitor(now: Date())
+        watchTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(250))
+                guard let self, await self.watch() else { break }
+            }
+        }
+    }
+
+    /// Раз в 250 мс: новые байты, проба, ping, решение об обрыве. false — транспорт закрыт.
+    private func watch() -> Bool {
+        guard !closed, let command, let event else { return false }
+        let commandRx = command.lastReceived, eventRx = event.lastReceived
+        if commandRx > seenCommandRx {
+            seenCommandRx = commandRx
+            monitor.commandReceived(at: commandRx)
+        }
+        if eventRx > seenEventRx {
+            seenEventRx = eventRx
+            monitor.eventReceived(at: eventRx)
+        }
+        for action in monitor.tick(now: Date()) {
+            switch action {
+            case .sendProbe:
+                Task { try? await event.write(PTPIP.probeRequest) }
+            case .ping:
+                let check = reachable
+                Task { [weak self] in
+                    let answered = await check()
+                    await self?.pinged(answered)
+                }
+            case let .close(reason):
+                abort(reason)
+                return false
+            }
+        }
+        command.setPaused(monitor.isOutage)
+        publishStatus()
+        return true
+    }
+
+    private func probeAnswered() {
+        monitor.probeAnswered(at: Date())
+        publishStatus()
+    }
+
+    private func pinged(_ answered: Bool) {
+        monitor.pinged(answered, at: Date())
+    }
+
+    private func publishStatus() {
+        let status = monitor.status
+        guard status != lastStatus else { return }
+        lastStatus = status
+        statusContinuation.yield(status)
+    }
+
+    /// Транспорт закрывается сам. Связь вернулась или соединение сломано — RST: камера освобождает сеанс сразу,
+    /// даже если застряла на передаче. Связи нет — обычное закрытие: FIN повторяется и дойдёт, если связь вернётся.
+    private func abort(_ reason: LinkLoss) {
+        guard !closed else { return }
+        loss = reason
+        shutDown(abortive: reason != .noLink)
+    }
+
+    private func shutDown(abortive: Bool) {
+        guard !closed else { return }
+        closed = true
+        watchTask?.cancel()
+        eventTask?.cancel()
+        if abortive {
+            command?.abort()
+            event?.abort()
+        } else {
+            command?.cancel()
+            event?.cancel()
+        }
+        eventContinuation.finish()
+        statusContinuation.finish()
     }
 
     private func acquire() async {
