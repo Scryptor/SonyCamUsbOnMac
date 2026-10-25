@@ -14,7 +14,7 @@ struct LiveScreen: View {
     /// Система координат экрана: в ней тащат гистограмму и мини-карту.
     static let space = "live"
     /// Заголовок главного окна: события прокрутки других окон (настройки, выбор папки) — не наши.
-    static let windowTitle = "ZV-E10 Viewer"
+    static let windowTitle = "Sony Cam Viewer"
 
     var body: some View {
         GeometryReader { geometry in

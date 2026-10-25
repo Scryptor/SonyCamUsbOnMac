@@ -1,6 +1,6 @@
 # API автоматизации
 
-ZV-E10 Viewer умеет принимать команды по локальному HTTP. Через API можно:
+Sony Cam Viewer умеет принимать команды по локальному HTTP. Через API можно:
 
 - узнать состояние камеры и экрана;
 - нажимать те же кнопки, что и мышью;
@@ -22,17 +22,17 @@ API сделан для автоматических тестов и скрип�
 Запустите программу с флагом `--automation`:
 
 ```bash
-open "/Applications/ZV-E10 Viewer.app" --args --automation
+open "/Applications/Sony Cam Viewer.app" --args --automation
 ```
 
 Если программа уже запущена, сначала закройте её: уже запущенной программе `open` флаг не передаст.
 
-Если запускать сам исполняемый файл `ZV-E10 Viewer.app/Contents/MacOS/ZVViewer`, вместо флага можно задать переменную окружения `ZV_AUTOMATION=1`. Порт по умолчанию — 47811, другой задаётся переменной `ZV_AUTOMATION_PORT`.
+Если запускать сам исполняемый файл `Sony Cam Viewer.app/Contents/MacOS/ZVViewer`, вместо флага можно задать переменную окружения `ZV_AUTOMATION=1`. Порт по умолчанию — 47811, другой задаётся переменной `ZV_AUTOMATION_PORT`.
 
 При запуске программа создаёт случайный токен и записывает порт и токен в файл, который может читать только текущий пользователь:
 
 ```
-~/Library/Application Support/ZV-E10 Viewer/automation.json
+~/Library/Application Support/Sony Cam Viewer/automation.json
 {"port": 47811, "token": "…"}
 ```
 
@@ -240,7 +240,7 @@ scripts/zvapi.py GET /frame > frame.jpg
 То же через curl:
 
 ```bash
-INFO="$HOME/Library/Application Support/ZV-E10 Viewer/automation.json"
+INFO="$HOME/Library/Application Support/Sony Cam Viewer/automation.json"
 PORT=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["port"])' "$INFO")
 TOKEN=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["token"])' "$INFO")
 
@@ -253,7 +253,7 @@ curl -s -H "X-ZV-Token: $TOKEN" -d '{"action": "request", "setting": "iso", "val
 ```python
 import json, os, time, urllib.request
 
-info = json.load(open(os.path.expanduser("~/Library/Application Support/ZV-E10 Viewer/automation.json")))
+info = json.load(open(os.path.expanduser("~/Library/Application Support/Sony Cam Viewer/automation.json")))
 
 def call(method, path, body=None):
     req = urllib.request.Request(f"http://127.0.0.1:{info['port']}{path}", method=method,

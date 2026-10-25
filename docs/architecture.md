@@ -1,6 +1,6 @@
 # Устройство кода
 
-Как устроен ZV-E10 Viewer внутри: модули, основные типы, потоки данных, тесты, сборка и выпуск. Как программа говорит с камерой на уровне байтов — в [Протоколе камеры](protocol.md).
+Как устроен Sony Cam Viewer внутри: модули, основные типы, потоки данных, тесты, сборка и выпуск. Как программа говорит с камерой на уровне байтов — в [Протоколе камеры](protocol.md).
 
 - [Общая схема](#общая-схема)
 - [Модули](#модули)
@@ -232,7 +232,7 @@ swift test
 
 ```bash
 scripts/build-app.sh
-open "build/ZV-E10 Viewer.app" --args --automation
+open "build/Sony Cam Viewer.app" --args --automation
 mkdir -p /tmp/zv-e2e && scripts/e2e.py /tmp/zv-e2e
 ```
 
@@ -240,19 +240,21 @@ mkdir -p /tmp/zv-e2e && scripts/e2e.py /tmp/zv-e2e
 
 | Скрипт | Что делает |
 |---|---|
-| `scripts/build-app.sh` | release-сборка, бандл `build/ZV-E10 Viewer.app`: бинарник, `Resources/Info.plist`, иконка; подпись ad-hoc |
-| `scripts/make-dmg.sh` | `build/ZV-E10-Viewer.dmg`: программа и ссылка на «Программы» |
+| `scripts/build-app.sh` | release-сборка, бандл `build/Sony Cam Viewer.app`: бинарник, `Resources/Info.plist`, иконка; подпись ad-hoc |
+| `scripts/make-dmg.sh` | `build/Sony-Cam-Viewer.dmg`: программа и ссылка на «Программы» |
 | `scripts/make-icon.sh` | пересобирает иконку из `Resources/AppIcon.icon` (Icon Composer) в `Resources/Assets.car` и `Resources/AppIcon.icns`; нужен Xcode 26 |
 
 Готовые файлы иконки лежат в репозитории, поэтому обычной сборке Xcode 26 не нужен.
 
 Выпуск новой версии:
 
-1. Поднять `CFBundleShortVersionString` и `CFBundleVersion` в `Resources/Info.plist`.
+1. Поднять `CFBundleShortVersionString` и `CFBundleVersion` в `Resources/Info.plist`, `versionName` и `versionCode` в `android/app/build.gradle.kts`.
 2. `swift test`, при подключённой камере — сквозные тесты.
-3. `scripts/make-dmg.sh`, проверить образ: `hdiutil verify`, запуск программы из образа.
+3. `scripts/make-dmg.sh`, проверить образ: `hdiutil verify`, запуск программы из образа. APK: `./gradlew :app:assembleRelease` в `android/`, копия `app-release.apk` → `build/Sony-Cam-Viewer.apk`.
 4. Коммит, тег `vX.Y.Z`, `git push origin main vX.Y.Z`.
-5. `gh release create vX.Y.Z build/ZV-E10-Viewer.dmg --title "ZV-E10 Viewer X.Y.Z" --notes-file <файл>`.
+5. `gh release create vX.Y.Z build/Sony-Cam-Viewer.dmg build/Sony-Cam-Viewer.apk --title "Sony Cam Viewer X.Y.Z" --notes-file <файл>`.
+
+До 0.5.1 программа называлась ZV-E10 Viewer. Внутри имя осталось прежним там, где к нему привязаны данные: идентификатор `local.zve10viewer` на Mac и пакет `local.zve10viewer` на Android (настройки и пресеты), имя для камеры по Wi-Fi «ZV-E10 Viewer» / «ZV-E10 Viewer Android» (под ним камера помнит сопряжение), папка снимков «Загрузки/ZV-E10» на планшете.
 
 Сборка только под Apple Silicon (arm64). Подписи разработчика и нотаризации нет: программа подписана ad-hoc, установка описана в [README](../README.md#установка-на-mac).
 

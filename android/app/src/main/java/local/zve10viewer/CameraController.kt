@@ -2104,7 +2104,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
     /** Все вкладки текстом — для «Скопировать». */
     fun debugText(): String {
         val time = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US).format(java.util.Date())
-        return debugReport().text("ZV-E10 Viewer ${BuildConfig.VERSION_NAME}, Android ${Build.VERSION.RELEASE} " +
+        return debugReport().text("Sony Cam Viewer ${BuildConfig.VERSION_NAME}, Android ${Build.VERSION.RELEASE} " +
             "(API ${Build.VERSION.SDK_INT}), ${Build.MANUFACTURER} ${Build.MODEL}, $time")
     }
 

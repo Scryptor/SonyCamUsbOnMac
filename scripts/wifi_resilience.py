@@ -2,7 +2,7 @@
 """wifi_resilience.py — прогон «плохого Wi-Fi» через scripts/badnet.py: как программа держит live view.
 
 Mac (API автоматизации; программу запускает сам, адрес камеры подменяет на прокси):
-  scripts/wifi_resilience.py mac --app "build/ZV-E10 Viewer.app" --camera 192.168.1.194 --out /tmp/run [--only S4,S5]
+  scripts/wifi_resilience.py mac --app "build/Sony Cam Viewer.app" --camera 192.168.1.194 --out /tmp/run [--only S4,S5]
 Android (debug-сборка, ptpipHost → IP этого Mac; метрики — по самому протоколу в прокси):
   scripts/wifi_resilience.py android --serial 192.168.1.185:5555 --camera 192.168.1.194 --host-ip 192.168.1.123 --out /tmp/run
 
@@ -40,7 +40,7 @@ def ctl(path, body=None, timeout=5):
 class MacApp:
     def __init__(self, app, out):
         self.app, self.out, self.proc = app, out, None
-        self.info_path = os.path.expanduser("~/Library/Application Support/ZV-E10 Viewer/automation.json")
+        self.info_path = os.path.expanduser("~/Library/Application Support/Sony Cam Viewer/automation.json")
 
     def prefs(self):
         return plistlib.loads(subprocess.run(["defaults", "export", "local.zve10viewer", "-"], capture_output=True).stdout)
@@ -190,7 +190,7 @@ def summarize(key, title, tl, length):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("platform", choices=["mac", "android"])
-    ap.add_argument("--app", default=os.path.join(ROOT, "build/ZV-E10 Viewer.app"))
+    ap.add_argument("--app", default=os.path.join(ROOT, "build/Sony Cam Viewer.app"))
     ap.add_argument("--serial")
     ap.add_argument("--host-ip")
     ap.add_argument("--camera", required=True)

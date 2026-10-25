@@ -7,7 +7,8 @@ struct ZVViewerApp: App {
     @State private var automation: AutomationServer?
 
     var body: some Scene {
-        WindowGroup("ZV-E10 Viewer") {
+        // по заголовку жесты увеличения и галереи узнают главное окно
+        WindowGroup(LiveScreen.windowTitle) {
             RootView(controller: controller, screen: screen)
                 .frame(minWidth: 800, minHeight: 450)
                 .task {

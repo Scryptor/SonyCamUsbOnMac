@@ -1,4 +1,4 @@
-# ZV-E10 Viewer
+# Sony Cam Viewer
 
 Живое видео с камеры Sony по USB или по Wi-Fi и управление её настройками — **на Mac и на Android-планшете**. Замена Imaging Edge Desktop (Remote) без лишнего: открыл — сразу картинка, основные настройки в один клик. Сделано и проверено на ZV-E10, но подходит и для других камер Sony — см. [Какие камеры подойдут](#какие-камеры-подойдут).
 
@@ -6,7 +6,7 @@
 
 | | Mac | Android |
 |---|---|---|
-| **Файл** | [ZV-E10-Viewer.dmg](https://github.com/Scryptor/SonyCamUsbOnMac/releases/latest/download/ZV-E10-Viewer.dmg) | [ZV-E10-Viewer.apk](https://github.com/Scryptor/SonyCamUsbOnMac/releases/latest/download/ZV-E10-Viewer.apk) |
+| **Файл** | [Sony-Cam-Viewer.dmg](https://github.com/Scryptor/SonyCamUsbOnMac/releases/latest/download/Sony-Cam-Viewer.dmg) | [Sony-Cam-Viewer.apk](https://github.com/Scryptor/SonyCamUsbOnMac/releases/latest/download/Sony-Cam-Viewer.apk) |
 | **Что нужно** | Mac на Apple Silicon, macOS 14 или новее | Android 10 или новее, планшет или телефон с USB OTG |
 | **Камера подключается** | кабелем USB-C или по Wi-Fi через домашний роутер | кабелем USB-C или по Wi-Fi через домашний роутер |
 | **Как поставить** | [Установка на Mac](#установка-на-mac) | [Установка на Android](#установка-на-android) |
@@ -68,8 +68,8 @@
 
 Нужен Mac на Apple Silicon и macOS 14 или новее.
 
-1. Скачайте [ZV-E10-Viewer.dmg](https://github.com/Scryptor/SonyCamUsbOnMac/releases/latest/download/ZV-E10-Viewer.dmg).
-2. Откройте его и перетащите «ZV-E10 Viewer» в «Программы».
+1. Скачайте [Sony-Cam-Viewer.dmg](https://github.com/Scryptor/SonyCamUsbOnMac/releases/latest/download/Sony-Cam-Viewer.dmg).
+2. Откройте его и перетащите «Sony Cam Viewer» в «Программы». До версии 0.5.1 программа называлась ZV-E10 Viewer: если она стоит, после установки удалите её — настройки и пресеты у них общие и сохранятся.
 3. Программа не подписана сертификатом разработчика Apple, поэтому при первом запуске macOS её не откроет. Чтобы открыть:
    - попробуйте запустить программу и закройте предупреждение;
    - откройте «Системные настройки» → «Конфиденциальность и безопасность», внизу нажмите «Всё равно открыть».
@@ -77,7 +77,7 @@
    Или одной командой в Терминале:
 
    ```bash
-   xattr -dr com.apple.quarantine "/Applications/ZV-E10 Viewer.app"
+   xattr -dr com.apple.quarantine "/Applications/Sony Cam Viewer.app"
    ```
 
 4. [Настройте камеру](#настройка-камеры) и подключите её к Mac кабелем USB-C.
@@ -88,7 +88,7 @@
 
 Нужен Android 10 или новее и планшет или телефон, к которому по USB можно подключать устройства (USB host, OTG): это умеет почти любой современный. Проверено на Redmi Pad Pro с Android 14.
 
-1. Скачайте [ZV-E10-Viewer.apk](https://github.com/Scryptor/SonyCamUsbOnMac/releases/latest/download/ZV-E10-Viewer.apk) прямо на планшет и откройте его. Android попросит разрешить установку из этого источника — разрешите.
+1. Скачайте [Sony-Cam-Viewer.apk](https://github.com/Scryptor/SonyCamUsbOnMac/releases/latest/download/Sony-Cam-Viewer.apk) прямо на планшет и откройте его. Android попросит разрешить установку из этого источника — разрешите.
 2. [Настройте камеру](#настройка-камеры) и подключите её к планшету кабелем USB-C.
 3. Android спросит, дать ли программе доступ к ZV-E10, — нажмите «ОК». Если в окне есть галочка «всегда открывать при подключении» — отметьте её: тогда программа будет запускаться сама, как только вы подключите камеру.
 
@@ -196,8 +196,8 @@
 
 ```bash
 swift test               # модульные тесты, камера не нужна
-scripts/build-app.sh     # build/ZV-E10 Viewer.app
-scripts/make-dmg.sh      # build/ZV-E10-Viewer.dmg
+scripts/build-app.sh     # build/Sony Cam Viewer.app
+scripts/make-dmg.sh      # build/Sony-Cam-Viewer.dmg
 ```
 
 - `Sources/ZVCore` — протокол PTP, команды Sony, сессия с камерой, настройки, пресеты, съёмка. Без интерфейса, покрыто тестами (`Tests/ZVCoreTests`, в том числе на дампах с настоящей камеры).

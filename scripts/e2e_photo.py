@@ -9,7 +9,7 @@ import json, os, sys, time, urllib.request, urllib.error
 OUT = sys.argv[1]
 FILES = os.path.join(OUT, "files")
 os.makedirs(FILES, exist_ok=True)
-info = json.load(open(os.path.expanduser("~/Library/Application Support/ZV-E10 Viewer/automation.json")))
+info = json.load(open(os.path.expanduser("~/Library/Application Support/Sony Cam Viewer/automation.json")))
 BASE, TOKEN = f"http://127.0.0.1:{info['port']}", info["token"]
 results = []
 

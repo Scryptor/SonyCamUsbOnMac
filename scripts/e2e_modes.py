@@ -4,7 +4,7 @@
 Запуск: scripts/e2e_modes.py <папка для скриншотов>; камера — в видеорежиме, PAL (25/50/100p)."""
 import json, os, sys, time, urllib.request, urllib.error
 OUT = sys.argv[1]
-info = json.load(open(os.path.expanduser("~/Library/Application Support/ZV-E10 Viewer/automation.json")))
+info = json.load(open(os.path.expanduser("~/Library/Application Support/Sony Cam Viewer/automation.json")))
 BASE = f"http://127.0.0.1:{info['port']}"; TOKEN = info["token"]; results = []
 def call(method, path, body=None):
     req = urllib.request.Request(BASE + path, method=method, data=json.dumps(body).encode() if body is not None else None)

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Сквозной тест ZV-E10 Viewer через локальный API автоматизации.
+"""Сквозной тест Sony Cam Viewer через локальный API автоматизации.
 Запоминает исходные настройки камеры и в конце возвращает их, проверяя чтением."""
 import json, os, sys, time, urllib.request, urllib.error
 
 OUT = sys.argv[1]
-info = json.load(open(os.path.expanduser("~/Library/Application Support/ZV-E10 Viewer/automation.json")))
+info = json.load(open(os.path.expanduser("~/Library/Application Support/Sony Cam Viewer/automation.json")))
 BASE = f"http://127.0.0.1:{info['port']}"
 TOKEN = info["token"]
 results = []

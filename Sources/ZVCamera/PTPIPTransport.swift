@@ -542,10 +542,13 @@ public struct PTPIPIdentity: Sendable {
     }
 
     private static let key = "ptpipGUID"
+    /// Имя, которым программа представляется камере по Wi-Fi, — прежнее, «ZV-E10 Viewer», и после переименования
+    /// в Sony Cam Viewer: под ним камера запомнила сопряжение, а с новым именем могла бы его не узнать.
+    private static let name = "ZV-E10 Viewer"
 
     public static func load(defaults: UserDefaults = UserDefaults(suiteName: "local.zve10viewer") ?? .standard) -> PTPIPIdentity {
         if let hex = defaults.string(forKey: key), let guid = Data(hex: hex), guid.count == 16 {
-            return PTPIPIdentity(guid: guid, name: "ZV-E10 Viewer")
+            return PTPIPIdentity(guid: guid, name: name)
         }
         return reset(defaults: defaults)
     }
@@ -554,7 +557,7 @@ public struct PTPIPIdentity: Sendable {
     public static func reset(defaults: UserDefaults = UserDefaults(suiteName: "local.zve10viewer") ?? .standard) -> PTPIPIdentity {
         let guid = Data((0..<16).map { _ in UInt8.random(in: 0...255) })
         defaults.set(guid.map { String(format: "%02x", $0) }.joined(), forKey: key)
-        return PTPIPIdentity(guid: guid, name: "ZV-E10 Viewer")
+        return PTPIPIdentity(guid: guid, name: name)
     }
 }
 

@@ -126,7 +126,7 @@ enum DebugReport {
 
     /// Все вкладки текстом.
     static func text(_ c: CameraController, _ d: CameraController.ConnectionDetails) -> String {
-        var lines = ["ZV-E10 Viewer \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"), "
+        var lines = ["Sony Cam Viewer \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"), "
             + "macOS \(ProcessInfo.processInfo.operatingSystemVersionString), \(Date().formatted(date: .numeric, time: .standard))"]
         for tab in ScreenState.DebugTab.allCases {
             lines.append("")

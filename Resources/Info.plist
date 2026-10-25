@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleDisplayName</key>
-	<string>ZV-E10 Viewer</string>
+	<string>Sony Cam Viewer</string>
 	<key>CFBundleExecutable</key>
 	<string>ZVViewer</string>
 	<key>CFBundleIconFile</key>
@@ -13,7 +13,7 @@
 	<key>CFBundleIdentifier</key>
 	<string>local.zve10viewer</string>
 	<key>CFBundleName</key>
-	<string>ZV-E10 Viewer</string>
+	<string>Sony Cam Viewer</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

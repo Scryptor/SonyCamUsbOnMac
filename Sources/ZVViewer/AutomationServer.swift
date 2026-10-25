@@ -43,7 +43,7 @@ final class AutomationServer {
     /// Порт и токен — в файл, доступный только текущему пользователю.
     private func writeInfo(port: UInt16) throws {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("ZV-E10 Viewer", isDirectory: true)
+            .appendingPathComponent("Sony Cam Viewer", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let file = dir.appendingPathComponent("automation.json")
         let info = try JSONSerialization.data(withJSONObject: ["port": Int(port), "token": token])
@@ -98,7 +98,7 @@ final class AutomationServer {
             }
         case ("GET", "/screenshot"):
             // ?window=presets — окно «Пресеты» вместо главного
-            let title = request.query["window"] == "presets" ? "Пресеты" : "ZV-E10 Viewer"
+            let title = request.query["window"] == "presets" ? "Пресеты" : LiveScreen.windowTitle
             guard let png = screenshot(title: title) else { return Self.json(409, ["error": "no window"]) }
             return HTTPResponse.encode(status: 200, contentType: "image/png", body: png)
         case ("GET", "/frame"):
@@ -465,7 +465,7 @@ final class AutomationServer {
     /// Снимок собственного окна (без разрешения на запись экрана) вместе с открытыми подсказками:
     /// popover — отдельное окно, его дорисовываем поверх на своё место.
     private func screenshot(title: String) -> Data? {
-        let main = title == "ZV-E10 Viewer" ? NSApp.mainWindow : nil
+        let main = title == LiveScreen.windowTitle ? NSApp.mainWindow : nil
         guard let window = NSApp.windows.first(where: { $0.isVisible && $0.title == title }) ?? main,
               let view = window.contentView,
               let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return nil }

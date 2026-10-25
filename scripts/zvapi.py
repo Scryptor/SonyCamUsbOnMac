@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """zvapi.py <METHOD> <path> [json-body]  — один запрос к API автоматизации; печатает ответ."""
 import json, os, sys, urllib.request, urllib.error
-info = json.load(open(os.path.expanduser("~/Library/Application Support/ZV-E10 Viewer/automation.json")))
+info = json.load(open(os.path.expanduser("~/Library/Application Support/Sony Cam Viewer/automation.json")))
 method, path = sys.argv[1], sys.argv[2]
 body = sys.argv[3].encode() if len(sys.argv) > 3 else None
 req = urllib.request.Request(f"http://127.0.0.1:{info['port']}{path}", data=body, method=method)

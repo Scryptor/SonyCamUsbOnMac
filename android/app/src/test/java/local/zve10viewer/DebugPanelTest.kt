@@ -161,9 +161,9 @@ class DebugPanelTest {
             DebugTab.link to listOf(DebugRow("Подключение", "Wi-Fi"), DebugRow("Отклик камеры", "6 мс")),
             DebugTab.log to listOf(DebugRow("13:45:10.123", "подключился к 192.168.1.194")),
         ))
-        val text = report.text("ZV-E10 Viewer 0.2.2")
+        val text = report.text("Sony Cam Viewer 0.2.2")
         assertEquals(listOf(
-            "ZV-E10 Viewer 0.2.2",
+            "Sony Cam Viewer 0.2.2",
             "",
             "== Связь ==",
             "Подключение: Wi-Fi",

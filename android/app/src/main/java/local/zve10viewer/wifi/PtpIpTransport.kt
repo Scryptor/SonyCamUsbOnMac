@@ -65,7 +65,8 @@ data class PtpIpIdentity(val guid: ByteArray, val name: String) {
             return PtpIpIdentity(guid, NAME)
         }
 
-        // латиницей: имя показывается на экране камеры при сопряжении
+        // латиницей: имя показывается на экране камеры при сопряжении. Прежнее и после переименования в Sony Cam Viewer:
+        // под ним камера запомнила сопряжение
         private const val NAME = "ZV-E10 Viewer Android"
     }
 }
