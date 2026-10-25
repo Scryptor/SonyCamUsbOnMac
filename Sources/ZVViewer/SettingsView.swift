@@ -15,6 +15,10 @@ struct SettingsView: View {
     @AppStorage(Prefs.Key.wifiCameraName) private var wifiCameraName: String?
     @AppStorage(Prefs.Key.wifiHost) private var wifiHost: String?
     @AppStorage(Prefs.Key.wifiAdaptiveQuality) private var wifiAdaptiveQuality = true
+    @AppStorage(Prefs.Key.tallyEnabled) private var tallyEnabled = true
+    @AppStorage(Prefs.Key.tallyWidth) private var tallyWidth = 3.0
+    @AppStorage(Prefs.Key.tallyOpacity) private var tallyOpacity = 0.7
+    @AppStorage(Prefs.Key.tallyBlink) private var tallyBlink = false
 
     var body: some View {
         Form {
@@ -52,6 +56,32 @@ struct SettingsView: View {
                 .pickerStyle(.radioGroup)
                 .disabled(!reviewEnabled)
                 Text("Если снимок сохраняется только на карту, показывается кадр с камеры.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section("Запись") {
+                Toggle("Красная рамка вокруг картинки во время записи", isOn: $tallyEnabled)
+                Group {
+                    LabeledContent("Толщина:") {
+                        HStack {
+                            Slider(value: $tallyWidth, in: 1...12, step: 1).frame(width: 200)
+                            Text("\(Int(tallyWidth)) pt").monospacedDigit()
+                        }
+                    }
+                    LabeledContent("Яркость:") {
+                        HStack {
+                            Slider(value: $tallyOpacity, in: 0.3...1, step: 0.05).frame(width: 200)
+                            Text("\(Int((tallyOpacity * 100).rounded())) %").monospacedDigit()
+                        }
+                    }
+                    Toggle("Мигать", isOn: $tallyBlink)
+                    LabeledContent("Так она выглядит:") {
+                        TallyPreview(width: tallyWidth, opacity: tallyOpacity, blink: tallyBlink)
+                    }
+                }
+                .disabled(!tallyEnabled)
+                .opacity(tallyEnabled ? 1 : 0.5)
+                Text("Как тэлли у мониторов: издалека видно, что идёт запись. «● REC» с таймером виден всегда.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

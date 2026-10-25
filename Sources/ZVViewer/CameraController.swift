@@ -68,8 +68,12 @@ final class CameraController {
         var detail: String
         var urls: [URL]
         var source: String
-        /// nil — показывается, пока не закроют (снимок открыт из ленты).
+        /// Когда закроется сам; nil — пока не закроют.
         var endsAt: Date?
+        /// Сколько всего показывается — для кольца обратного отсчёта.
+        var duration: TimeInterval?
+        /// Какой съёмке принадлежит: скачанный снимок подменяет кадр только в своём просмотре.
+        var capture: UUID?
     }
 
     @ObservationIgnored private var reviewTask: Task<Void, Never>?
@@ -485,9 +489,12 @@ final class CameraController {
         // сколько файлов ждать — по формату снимка: RAW+JPEG — два
         let files = properties[SonyProp.fileFormat]?.current.intValue.map { $0 == 2 ? 2 : 1 }
         let progress = wifiTransport?.dataProgress
+        let capture = UUID()
         let (phases, sink) = AsyncStream<CapturePhase>.makeStream()
         Task { [weak self] in
-            for await phase in phases { self?.captureMoved(to: phase, review: reviewOn ? source : nil, progress: progress) }
+            for await phase in phases {
+                self?.captureMoved(to: phase, review: reviewOn ? capture : nil, progress: progress)
+            }
         }
         Task { [weak self] in
             guard let self else { return }
@@ -516,11 +523,15 @@ final class CameraController {
                 let megabytes = Double(objects.reduce(0) { $0 + $1.data.count }) / 1_048_576
                 let detail = String(format: "%.1f МБ · «%@»", megabytes, FileManager.default.displayName(atPath: folder.path))
                 self.showStatus("Сохранено: \(shot.title)")
-                if reviewOn, self.review != nil {
+                // просмотр этой съёмки ещё на экране — скачанный снимок встаёт на место кадра, время не сбрасывается
+                if reviewOn, var current = self.review, current.capture == capture {
                     let downloaded = source == .downloaded && preview.image != nil
-                    self.showReview(Review(image: downloaded ? preview.image : cameraFrame, title: shot.title, detail: detail,
-                                           urls: urls, source: downloaded ? "Загруженный снимок" : "Кадр с камеры", endsAt: nil),
-                                    timed: true)
+                    current.image = downloaded ? preview.image : current.image
+                    current.title = shot.title
+                    current.detail = detail
+                    current.urls = urls
+                    current.source = downloaded ? "Загруженный снимок" : "Кадр с камеры"
+                    self.review = current
                 }
             } catch {
                 self.dismissReview()
@@ -531,8 +542,9 @@ final class CameraController {
     }
 
     /// Снимок перешёл на следующий этап. Спуск отработан — шторка и просмотр (кадр той секунды, когда камера снимала);
-    /// качается файл — по Wi-Fi видно, сколько пришло.
-    private func captureMoved(to phase: CapturePhase, review source: Prefs.ReviewSource?, progress: DataProgress?) {
+    /// просмотр идёт заданное время с этого момента, скачанный снимок потом встанет на место кадра. Качается файл —
+    /// по Wi-Fi видно, сколько пришло.
+    private func captureMoved(to phase: CapturePhase, review capture: UUID?, progress: DataProgress?) {
         guard isCapturing else { return }
         capturePhase = phase
         switch phase {
@@ -540,10 +552,9 @@ final class CameraController {
             break
         case .exposing:
             emit(.shutterFired)
-            if let source {
-                // загруженный снимок появится после скачивания
-                showReview(Review(image: frame, title: "Снимок", detail: source == .camera ? "" : "Загружаю…",
-                                  urls: [], source: "Кадр с камеры", endsAt: nil), timed: source == .camera)
+            if let capture {
+                showReview(Review(image: frame, title: "Снимок", detail: "", urls: [], source: "Кадр с камеры",
+                                  endsAt: nil, capture: capture), timed: true)
             }
         case .downloading:
             guard let progress, progressTask == nil else { return }
@@ -597,6 +608,7 @@ final class CameraController {
         }
         let seconds = Prefs.reviewSeconds
         value.endsAt = Date().addingTimeInterval(TimeInterval(seconds))
+        value.duration = TimeInterval(seconds)
         review = value
         reviewTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(seconds))

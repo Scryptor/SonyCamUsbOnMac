@@ -212,30 +212,76 @@ struct CaptureFlash: View {
     }
 }
 
-/// Красная рамка вокруг видимой картинки, пока идёт запись, — как тэлли у мониторов. Запись началась — вспыхивает,
-/// остановилась — тает.
+/// Красная рамка вокруг видимой картинки, пока идёт запись, — как тэлли у мониторов. Запись началась — вспыхивает
+/// и садится до заданной яркости, остановилась — тает. Включается, толщина, яркость и мигание — в настройках.
 struct TallyBorder: View {
     let recording: Bool
     let rect: CGRect
-    @State private var opacity = 0.0
+    @AppStorage(Prefs.Key.tallyEnabled) private var enabled = true
+    @AppStorage(Prefs.Key.tallyWidth) private var width = 3.0
+    @AppStorage(Prefs.Key.tallyOpacity) private var strength = 0.7
+    @AppStorage(Prefs.Key.tallyBlink) private var blink = false
+    /// Непрозрачность без мигания: 1 — вспышка на старте, затем заданная яркость, 0 — записи нет.
+    @State private var level = 0.0
+
+    var body: some View {
+        if enabled {
+            TimelineView(.animation(minimumInterval: nil, paused: !(recording && blink))) { context in
+                TallyFrame(rect: rect, width: width,
+                           opacity: level * (recording && blink ? Self.pulse(context.date) : 1))
+            }
+            .allowsHitTesting(false)
+            .onAppear { level = recording ? strength : 0 }
+            .onChange(of: strength) { _, value in if recording { level = value } }
+            .onChange(of: recording) { _, on in
+                if on {
+                    withAnimation(.easeOut(duration: 0.1)) { level = 1 } completion: {
+                        withAnimation(.easeInOut(duration: 0.4)) { level = strength }
+                    }
+                } else {
+                    withAnimation(.easeOut(duration: 0.3)) { level = 0 }
+                }
+            }
+        }
+    }
+
+    /// Мигание: от полной заданной яркости до четверти и обратно за секунду, плавно.
+    static func pulse(_ date: Date) -> Double {
+        0.25 + 0.75 * (0.5 + 0.5 * cos(date.timeIntervalSinceReferenceDate * 2 * .pi))
+    }
+}
+
+/// Сама рамка: снаружи не выходит за прямоугольник картинки.
+struct TallyFrame: View {
+    let rect: CGRect
+    let width: Double
+    let opacity: Double
 
     var body: some View {
         Rectangle()
-            .strokeBorder(Color.red, lineWidth: 3)
+            .strokeBorder(Color.red, lineWidth: width)
             .frame(width: max(rect.width, 0), height: max(rect.height, 0))
             .position(x: rect.midX, y: rect.midY)
             .opacity(opacity)
-            .allowsHitTesting(false)
-            .onAppear { opacity = recording ? 0.7 : 0 }
-            .onChange(of: recording) { _, on in
-                if on {
-                    withAnimation(.easeOut(duration: 0.1)) { opacity = 1 } completion: {
-                        withAnimation(.easeInOut(duration: 0.4)) { opacity = 0.7 }
-                    }
-                } else {
-                    withAnimation(.easeOut(duration: 0.3)) { opacity = 0 }
-                }
+    }
+}
+
+/// Образец рамки в настройках: тёмный кадр с рамкой как есть, с миганием, если оно включено.
+struct TallyPreview: View {
+    let width: Double
+    let opacity: Double
+    let blink: Bool
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: nil, paused: !blink)) { context in
+            ZStack {
+                LinearGradient(colors: [Color(white: 0.28), Color(white: 0.12)], startPoint: .top, endPoint: .bottom)
+                TallyFrame(rect: CGRect(x: 0, y: 0, width: 160, height: 90), width: width,
+                           opacity: opacity * (blink ? TallyBorder.pulse(context.date) : 1))
             }
+            .frame(width: 160, height: 90)
+            .clipShape(RoundedRectangle(cornerRadius: 4))
+        }
     }
 }
 

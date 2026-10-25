@@ -231,8 +231,11 @@ struct ReviewOverlay: View {
     var body: some View {
         ZStack {
             Color.black
+            // скачанный снимок встаёт на место кадра с камеры плавно
             if let image = review.image {
                 Image(decorative: image, scale: 1).resizable().aspectRatio(contentMode: .fit)
+                    .id(ObjectIdentifier(image))
+                    .transition(.opacity)
             } else {
                 ProgressView().controlSize(.large)
             }
@@ -261,23 +264,30 @@ struct ReviewOverlay: View {
             if let endsAt = review.endsAt {
                 HStack {
                     Spacer()
-                    Countdown(endsAt: endsAt).padding(.trailing, 20)
+                    Countdown(endsAt: endsAt, duration: review.duration ?? 3).padding(.trailing, 20)
                 }
             }
         }
+        .animation(.easeInOut(duration: 0.25), value: review.image.map(ObjectIdentifier.init))
         .contentShape(Rectangle())
         .onTapGesture(perform: onClose)
     }
 }
 
+/// Сколько ещё показывается снимок: кольцо плавно убывает, в середине — целые секунды.
 private struct Countdown: View {
     let endsAt: Date
+    let duration: TimeInterval
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 0.25)) { context in
+        TimelineView(.animation) { context in
             let left = max(0, endsAt.timeIntervalSince(context.date))
             ZStack {
                 Circle().stroke(.white.opacity(0.25), lineWidth: 4)
+                Circle()
+                    .trim(from: 0, to: duration > 0 ? left / duration : 0)
+                    .stroke(.white, style: StrokeStyle(lineWidth: 4, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
                 Text("\(Int(left.rounded(.up)))").font(.title2.weight(.bold)).monospacedDigit()
             }
             .frame(width: 64, height: 64)

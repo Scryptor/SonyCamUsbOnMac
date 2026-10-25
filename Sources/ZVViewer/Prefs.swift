@@ -52,6 +52,10 @@ enum Prefs {
         static let wifiHost = "wifiHost"
         static let wifiCameraName = "wifiCameraName"
         static let wifiAdaptiveQuality = "wifiAdaptiveQuality"
+        static let tallyEnabled = "tallyEnabled"
+        static let tallyWidth = "tallyWidth"
+        static let tallyOpacity = "tallyOpacity"
+        static let tallyBlink = "tallyBlink"
     }
 
     private static var defaults: UserDefaults { .standard }
@@ -115,6 +119,30 @@ enum Prefs {
     }
 
     /// Снижать качество превью (1024×576 → 640×360), когда Wi-Fi его не тянет. При хорошем сигнале — всегда полное.
+    /// Красная рамка вокруг картинки во время записи.
+    static var tallyEnabled: Bool {
+        get { defaults.object(forKey: Key.tallyEnabled) as? Bool ?? true }
+        set { defaults.set(newValue, forKey: Key.tallyEnabled) }
+    }
+
+    /// Её толщина, pt: 1…12.
+    static var tallyWidth: Double {
+        get { min(max(defaults.object(forKey: Key.tallyWidth) as? Double ?? 3, 1), 12) }
+        set { defaults.set(min(max(newValue, 1), 12), forKey: Key.tallyWidth) }
+    }
+
+    /// Её яркость (непрозрачность): 0,3…1.
+    static var tallyOpacity: Double {
+        get { min(max(defaults.object(forKey: Key.tallyOpacity) as? Double ?? 0.7, 0.3), 1) }
+        set { defaults.set(min(max(newValue, 0.3), 1), forKey: Key.tallyOpacity) }
+    }
+
+    /// Мигает ли она: плавно, раз в секунду.
+    static var tallyBlink: Bool {
+        get { defaults.object(forKey: Key.tallyBlink) as? Bool ?? false }
+        set { defaults.set(newValue, forKey: Key.tallyBlink) }
+    }
+
     static var wifiAdaptiveQuality: Bool {
         get { defaults.object(forKey: Key.wifiAdaptiveQuality) as? Bool ?? true }
         set { defaults.set(newValue, forKey: Key.wifiAdaptiveQuality) }

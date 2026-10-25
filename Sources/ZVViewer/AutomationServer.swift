@@ -245,6 +245,18 @@ final class AutomationServer {
         case "autoHide":
             guard let b = Bool(value) else { return "autoHide: true | false" }
             Prefs.autoHide = b
+        case "tallyEnabled":
+            guard let b = Bool(value) else { return "tallyEnabled: true | false" }
+            Prefs.tallyEnabled = b
+        case "tallyWidth":
+            guard let n = Double(value), (1...12).contains(n) else { return "tallyWidth: 1…12" }
+            Prefs.tallyWidth = n
+        case "tallyOpacity":
+            guard let n = Double(value), (0.3...1).contains(n) else { return "tallyOpacity: 0.3…1" }
+            Prefs.tallyOpacity = n
+        case "tallyBlink":
+            guard let b = Bool(value) else { return "tallyBlink: true | false" }
+            Prefs.tallyBlink = b
         case "autoHideSeconds":
             guard let n = Int(value), (1...30).contains(n) else { return "autoHideSeconds: 1…30" }
             Prefs.autoHideSeconds = n
@@ -365,6 +377,8 @@ final class AutomationServer {
                 "reviewEnabled": Prefs.reviewEnabled, "reviewSeconds": Prefs.reviewSeconds,
                 "reviewSource": Prefs.reviewSource.rawValue, "autoHide": Prefs.autoHide, "autoHideSeconds": Prefs.autoHideSeconds,
                 "wifiAdaptiveQuality": Prefs.wifiAdaptiveQuality,
+                "tallyEnabled": Prefs.tallyEnabled, "tallyWidth": Prefs.tallyWidth, "tallyOpacity": Prefs.tallyOpacity,
+                "tallyBlink": Prefs.tallyBlink,
             ] as [String: Any],
             "link": linkState(),
             "cameraDestination": controller.properties[SonyProp.stillImageStoreDestination]?.current.intValue ?? NSNull(),
