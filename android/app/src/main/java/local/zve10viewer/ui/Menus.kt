@@ -149,7 +149,8 @@ private fun Tile(controller: CameraController, screen: ScreenState, slot: FnSlot
             horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center,
         ) {
             Text("Все", color = Secondary, fontSize = 14.sp)
-            Text("⚙", color = Color.White, fontSize = 19.sp)
+            // высотой со строку значения у соседних плиток
+            TopBarIcon(TopBarGlyph.settings, Modifier.size(width = 37.dp, height = 26.dp))
         }
     }
 }

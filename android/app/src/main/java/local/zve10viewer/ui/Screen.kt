@@ -63,6 +63,8 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.offset
 import android.os.Build
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Rect
@@ -313,9 +315,13 @@ private fun WaitingScreen(controller: CameraController, screen: ScreenState, not
             Text(it, color = Secondary, fontSize = 17.sp)
         }
     }
-    Text("⚙", color = Color.White, fontSize = 22.sp, textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-        modifier = Modifier.align(Alignment.TopStart).padding(18.dp).size(44.dp)
-            .background(PanelLight, RoundedCornerShape(9.dp)).clickable { settingsOpen = true }.padding(top = 6.dp))
+    Box(
+        Modifier.align(Alignment.TopStart).padding(18.dp).size(44.dp).background(PanelLight, RoundedCornerShape(9.dp))
+            .semantics { contentDescription = "Настройки" }.clickable { settingsOpen = true },
+        contentAlignment = Alignment.Center,
+    ) {
+        TopBarIcon(TopBarGlyph.settings)
+    }
     if (settingsOpen) {
         SettingsOverlay(controller, onClose = { settingsOpen = false }, onDebug = {
             settingsOpen = false
@@ -811,12 +817,7 @@ private fun TopBar(controller: CameraController, screen: ScreenState) {
                 .clickable { controller.toggleHistogram() },
             contentAlignment = Alignment.Center,
         ) {
-            Canvas(Modifier.size(22.dp)) {
-                val w = size.width / 5
-                listOf(0.5f, 0.85f, 0.65f).forEachIndexed { i, h ->
-                    drawRect(Color.White, Offset(w * (i * 2 - 0.5f + 1), size.height * (1 - h)), Size(w, size.height * h))
-                }
-            }
+            TopBarIcon(TopBarGlyph.histogram)
         }
         // строка состояния справа вверху: показать или убрать
         Box(
@@ -824,15 +825,7 @@ private fun TopBar(controller: CameraController, screen: ScreenState) {
                 .clickable { controller.toggleStatusBar() },
             contentAlignment = Alignment.Center,
         ) {
-            Canvas(Modifier.size(22.dp)) {
-                val stroke = 2.dp.toPx()
-                val top = size.height * 0.15f
-                val frame = Size(size.width - stroke, size.height * 0.7f - stroke)
-                val corner = CornerRadius(3.dp.toPx())
-                // рамка экрана с полосой сверху
-                drawRoundRect(Color.White, Offset(stroke / 2, top + stroke / 2), frame, corner, style = Stroke(stroke))
-                drawRoundRect(Color.White, Offset(stroke / 2, top + stroke / 2), Size(frame.width, frame.height * 0.32f), corner)
-            }
+            TopBarIcon(TopBarGlyph.statusLine)
         }
         controller.presets.forEachIndexed { index, preset ->
             Box {
@@ -865,18 +858,17 @@ private fun TopBar(controller: CameraController, screen: ScreenState) {
                 .clickable(enabled = controller.phase == CameraController.Phase.ready) { controller.savePreset() },
             contentAlignment = Alignment.Center,
         ) {
-            // «+» рисуем сами, как значок гистограммы: символ шрифта стоял выше центра и был мельче соседей
-            Canvas(Modifier.size(20.dp)) {
-                val stroke = 2.5.dp.toPx()
-                drawLine(Color.White, Offset(size.width / 2, 0f), Offset(size.width / 2, size.height), stroke, StrokeCap.Round)
-                drawLine(Color.White, Offset(0f, size.height / 2), Offset(size.width, size.height / 2), stroke, StrokeCap.Round)
-            }
+            // сохранить пресет: звезда с плюсом
+            TopBarIcon(TopBarGlyph.savePreset)
         }
-        Text("⚙", color = Color.White, fontSize = 22.sp,
-            modifier = Modifier.size(44.dp).background(PanelLight, RoundedCornerShape(9.dp))
-                .clickable { screen.closeOverlays(); screen.settingsOpen = true }
-                .padding(top = 6.dp),
-            textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+        Box(
+            Modifier.size(44.dp).background(PanelLight, RoundedCornerShape(9.dp))
+                .semantics { contentDescription = "Настройки" }
+                .clickable { screen.closeOverlays(); screen.settingsOpen = true },
+            contentAlignment = Alignment.Center,
+        ) {
+            TopBarIcon(TopBarGlyph.settings)
+        }
     }
     if (renaming >= 0) {
         AlertDialog(
