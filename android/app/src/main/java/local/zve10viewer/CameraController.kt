@@ -807,14 +807,18 @@ class CameraController(private val context: Context, private val scope: Coroutin
         }
     }
 
-    /** Открывает снимок из ленты поверх видео (пока не закроют): снимок читается из файла. */
-    fun openShot(index: Int) {
-        val shot = shots.getOrNull(index) ?: return
-        scope.launch {
-            val image = shot.jpeg?.let { file -> withContext(Dispatchers.IO) { saver.decode(file.uri, 2560)?.asImageBitmap() } }
-            showReview(Review(image ?: shot.cameraFrame ?: shot.thumbnail, shot.title, "«${saver.folderTitle}»", shot.files,
-                "Снимок из ленты", null), timed = false)
+    /** «Поделиться» снимком — системное окно выбора программы; у RAW+JPEG — оба файла. */
+    fun share(files: List<SavedFile>) {
+        if (files.isEmpty()) return
+        val intent = if (files.size == 1) {
+            Intent(Intent.ACTION_SEND).setType(files[0].mime).putExtra(Intent.EXTRA_STREAM, files[0].uri)
+        } else {
+            Intent(Intent.ACTION_SEND_MULTIPLE).setType("image/*")
+                .putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(files.map { it.uri }))
         }
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        val chooser = Intent.createChooser(intent, null).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        runCatching { context.startActivity(chooser) }.onFailure { showStatus("Не удалось поделиться: ${it.message}") }
     }
 
     private fun feedback(event: FeedbackEvent) {

@@ -145,6 +145,9 @@ class ScreenState {
     /** Где меню Fn, пока оно открыто: гистограмма поднимается над ним, а не прячется под ним. */
     var fnMenuRect by mutableStateOf<Rect?>(null)
 
+    /** Галерея: какой снимок открыт (по id, а не по месту в ленте — новый снимок его не сбивает); null — закрыта. */
+    var galleryShot by mutableStateOf<Long?>(null)
+
     val controlsHidden: Boolean get() = manualHidden || autoHidden
     val overlayOpen: Boolean get() = fnOpen || allSettingsOpen || settingsOpen || pillInfo != null
 
@@ -309,7 +312,7 @@ private fun LiveScreen(controller: CameraController, screen: ScreenState) {
     LaunchedEffect(Unit) {
         while (true) {
             delay(500)
-            val busy = screen.overlayOpen || controller.review != null
+            val busy = screen.overlayOpen || controller.review != null || screen.galleryShot != null
             if (busy || !controller.prefs.autoHide) {
                 screen.autoHidden = false
             } else if (!screen.autoHidden && System.currentTimeMillis() - screen.lastActivity > controller.prefs.autoHideSeconds * 1000L) {
@@ -379,6 +382,7 @@ private fun LiveScreen(controller: CameraController, screen: ScreenState) {
             })
         }
         controller.review?.let { ReviewOverlay(controller, it) }
+        if (screen.galleryShot != null) GalleryOverlay(controller, screen)
         if (hint) {
             Text("Элементы скрыты · нажмите, чтобы показать", color = Color.White, fontSize = 16.sp,
                 modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 28.dp)
@@ -471,7 +475,7 @@ private fun Controls(controller: CameraController, screen: ScreenState, feedback
         if (!screen.fnOpen && controller.shots.isNotEmpty()) {
             Box(Modifier.align(Alignment.BottomStart).padding(bottom = 76.dp)
                 .onSizeChanged { screen.stripHeight = it.height.toFloat() }) {
-                ShotsStrip(controller, feedback)
+                ShotsStrip(controller, feedback) { screen.galleryShot = it.id }
             }
         }
         Box(Modifier.align(Alignment.BottomCenter).padding(end = if (screen.fnOpen) 110.dp else 0.dp)) {

@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -420,11 +421,12 @@ private fun RecordButton(controller: CameraController, feedback: FeedbackState) 
 }
 
 /**
- * Последние снимки и стоп-кадры: касание — открыть, долгое касание — открыть файл в другой программе. Новая миниатюра
- * появляется с «пружинкой» и белой рамкой; к миниатюре стоп-кадра сначала долетает сам кадр.
+ * Последние снимки и стоп-кадры: касание — галерея на этом снимке, «+N» — на седьмом; долгое касание — открыть файл в
+ * другой программе. Новая миниатюра появляется с «пружинкой» и белой рамкой; к миниатюре стоп-кадра сначала долетает
+ * сам кадр.
  */
 @Composable
-fun ShotsStrip(controller: CameraController, feedback: FeedbackState) {
+fun ShotsStrip(controller: CameraController, feedback: FeedbackState, onOpen: (CameraController.Shot) -> Unit) {
     // лента на экране — стоп-кадр летит в неё; спрятали — в угол
     DisposableEffect(Unit) {
         feedback.stripVisible = true
@@ -437,11 +439,15 @@ fun ShotsStrip(controller: CameraController, feedback: FeedbackState) {
         verticalAlignment = Alignment.CenterVertically) {
         controller.shots.take(6).forEachIndexed { index, shot ->
             key(shot.id) {
-                ShotThumbnail(controller, shot, feedback, first = index == 0, onClick = { controller.openShot(index) })
+                ShotThumbnail(controller, shot, feedback, first = index == 0, onClick = { onOpen(shot) })
             }
         }
-        if (controller.shots.size > 6) Text("+${controller.shots.size - 6}", color = Secondary, fontSize = 14.sp,
-            modifier = Modifier.padding(horizontal = 6.dp))
+        if (controller.shots.size > 6) {
+            Text("+${controller.shots.size - 6}", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                modifier = Modifier.size(width = 52.dp, height = 64.dp).clip(RoundedCornerShape(8.dp)).background(PanelLight)
+                    .clickable { controller.shots.getOrNull(6)?.let(onOpen) }.wrapContentHeight())
+        }
     }
 }
 
