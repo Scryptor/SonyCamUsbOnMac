@@ -35,10 +35,13 @@ PROPERTY_CHANGED = 0xC203
 S1, S2, MOVIE_REC = 0xD2C1, 0xD2C2, 0xD2C8
 FOCUS_FOUND, OBJECT_IN_MEMORY, RECORDING, FILE_FORMAT = 0xD213, 0xD215, 0xD21D, 0xD253
 EXPOSURE_PROGRAM, BATTERY = 0x500E, 0xD218
+WHITE_BALANCE, COLOR_TEMP, MANUAL_WB = 0x5005, 0xD20F, 0x8012  # температура открыта только в «Цвет. темп.»
 MODES = {"photo": 0x1, "video": 0x78053}                   # буква M в фото и в видео
 SSDP_GROUP, SSDP_PORT = "239.255.255.250", 1900
 SSDP_ST = "urn:schemas-sony-com:service:DigitalImaging:1"
 MARKS = {"flip": ["-f", "horizontal"], "flop": ["-f", "vertical"], "rotate": ["-r", "180"]}
+# --reject: запись в эти свойства камера принимает, а значение не меняет — как настоящая, когда не может
+REJECTABLE = {"iso": 0xD21E, "shutter": 0xD20D, "aperture": 0x5007, "whiteBalance": 0x5005, "exposureProgram": 0x500E}
 # размеры значений по типу PTP: INT8…UINT128
 SIZES = {1: 1, 2: 1, 3: 2, 4: 2, 5: 4, 6: 4, 7: 8, 8: 8, 9: 16, 10: 16}
 FORMATS = {1: "<b", 2: "<B", 3: "<h", 4: "<H", 5: "<i", 6: "<I", 7: "<q", 8: "<Q"}
@@ -138,14 +141,17 @@ class Properties:
     def __init__(self, blob):
         self.blob = bytearray(blob)
         self.current = {}                                   # код → (смещение, тип)
+        self.flags = {}                                     # код → смещение байта «включено»
         pos = 8
         while pos < len(self.blob):
+            start = pos
             code, ptype = struct.unpack_from("<HH", self.blob, pos)
             pos += 6                                        # код, тип, get/set, включено
             pos = self._skip(ptype, pos)                    # значение по умолчанию
             if ptype == 0xFFFF and pos >= len(self.blob):
                 break
             self.current[code] = (pos, ptype)
+            self.flags[code] = start + 5
             pos = self._skip(ptype, pos)
             if pos >= len(self.blob):
                 break
@@ -189,6 +195,14 @@ class Properties:
         struct.pack_into(fmt, self.blob, pos, value)
         return True
 
+    def enabled(self, code):
+        return code not in self.flags or self.blob[self.flags[code]] == 1
+
+    def enable(self, code, on):
+        """Открыть или закрыть свойство (байт «включено»): так камера открывает температуру в «Цвет. темп.»."""
+        if code in self.flags:
+            self.blob[self.flags[code]] = 1 if on else 0
+
     def set_raw(self, code, data):
         if code not in self.current or self.current[code][1] not in FORMATS:
             return False
@@ -204,10 +218,12 @@ class Camera:
         self.photo = open(args.photo, "rb").read() if args.photo else big_photo(jpeg)
         self.rate = args.rate
         self.ignore_record = args.ignore_record
+        self.record_delay = args.record_delay
         self.name = args.name
         self.busy = args.busy
         self.pairing = args.pairing
         self.known_guids = set()                            # кого «сопрягли» (--pairing)
+        self.reject = {REJECTABLE[name] for name in (args.reject.split(",") if args.reject else [])}
         self.quality = 2
         self.last_frame = 0.0
         self.conn = 0
@@ -225,6 +241,7 @@ class Camera:
             self.props.set(BATTERY, args.battery)
         if args.mode:
             self.props.set(EXPOSURE_PROGRAM, MODES[args.mode])
+        self.props.enable(COLOR_TEMP, self.props.get(WHITE_BALANCE) == MANUAL_WB)
         self.events = []                                    # писатели соединений событий
         self.objects = []                                   # снимки в памяти камеры: (имя, данные)
         self.number = 1000
@@ -255,7 +272,7 @@ class Camera:
                 loop_print("кнопка записи — не реагирую (--ignore-record)")
                 return
             target = 0 if self.props.get(RECORDING) == 1 else 1
-            self.later(0.8, lambda: (self.changed(RECORDING, target),
+            self.later(self.record_delay, lambda: (self.changed(RECORDING, target),
                                      loop_print(f"запись {'началась' if target else 'остановлена'}")))
 
     def shoot(self):
@@ -371,8 +388,17 @@ def respond(cam, code, params, out):
         if params[0] == 0xD26A:
             cam.quality = 1 if out[0] == 1 else 2
             print(f"качество превью → {'низкое' if cam.quality == 1 else 'высокое'}", flush=True)
+        elif params[0] in cam.reject:
+            print(f"запись 0x{params[0]:04X} — не меняю (--reject)", flush=True)
+        elif not cam.props.enabled(params[0]):
+            print(f"запись 0x{params[0]:04X} — свойство сейчас закрыто, не меняю", flush=True)
         elif cam.props.set_raw(params[0], out):
+            value = cam.props.get(params[0])
+            print(f"записано 0x{params[0]:04X} = {value} (0x{value & 0xFFFFFFFF:X})", flush=True)
             cam.changed(params[0])
+            if params[0] == WHITE_BALANCE:
+                cam.props.enable(COLOR_TEMP, cam.props.get(WHITE_BALANCE) == MANUAL_WB)
+                cam.changed(COLOR_TEMP)
     if code == 0x9207 and params and len(out) >= 2:
         cam.control(params[0], struct.unpack_from("<H", out)[0])
     return None, OK
@@ -384,6 +410,7 @@ async def main():
     ap.add_argument("--photo", help="JPEG, который камера отдаёт как снимок (по умолчанию — растянутый кадр live view)")
     ap.add_argument("--rate", type=int, default=0, help="скорость отдачи снимка, байт/с (0 — без ограничения)")
     ap.add_argument("--ignore-record", action="store_true", help="не реагировать на кнопку записи")
+    ap.add_argument("--record-delay", type=float, default=0.8, help="через сколько секунд запись начинается и останавливается")
     ap.add_argument("--name", default=NAME, help="имя камеры в ответе на приветствие")
     ap.add_argument("--serial", help="серийный номер в DeviceInfo (по нему программа отличает камеры)")
     ap.add_argument("--mark", choices=sorted(MARKS), help="кадр отражён (flip/flop) или повёрнут (rotate)")
@@ -392,6 +419,7 @@ async def main():
     ap.add_argument("--ssdp", action="store_true", help="отвечать на поиск в сети (SSDP), как камера Sony")
     ap.add_argument("--busy", action="store_true", help="не отвечать на приветствие — камера занята")
     ap.add_argument("--pairing", action="store_true", help="незнакомому GUID отвечать через 3 с — сопряжение")
+    ap.add_argument("--reject", help="свойства, запись в которые не меняет значение: " + ",".join(REJECTABLE))
     a = ap.parse_args()
     cam = Camera(a)
     host, port = a.listen.rsplit(":", 1)
@@ -400,7 +428,8 @@ async def main():
         await asyncio.get_running_loop().create_datagram_endpoint(lambda: SSDPResponder(cam, host, int(port)),
                                                                   sock=ssdp_socket())
     extras = [f"№ …{a.serial[-4:]}" if a.serial else "", a.mark or "", f"батарея {a.battery}%" if a.battery is not None else "",
-              a.mode or "", "SSDP" if a.ssdp else "", "занята" if a.busy else "", "сопряжение" if a.pairing else ""]
+              a.mode or "", "SSDP" if a.ssdp else "", "занята" if a.busy else "", "сопряжение" if a.pairing else "",
+              f"не меняет {a.reject}" if a.reject else ""]
     print(f"поддельная {cam.name}: {a.listen}, кадр {len(cam.frames[2]) // 1024} / {len(cam.frames[1]) // 1024} КБ, "
           f"снимок {len(cam.photo) // 1024} КБ" + "".join(f", {e}" for e in extras if e), flush=True)
     async with server:

@@ -4,7 +4,8 @@
 У каждой свой серийный номер (программа отличает их по нему), своя картинка (у B кадр отражён, у C повёрнут, у D
 перевёрнут), свой заряд и режим. Все отвечают на поиск в сети (SSDP) с портом в X-PTPIP-Port. Ctrl+C гасит все.
 
-  scripts/fake_cameras.py [--host 127.0.0.1] [--count 3] [--pairing B] [--busy C] [--no-ssdp]
+  scripts/fake_cameras.py [--host 127.0.0.1] [--count 3] [--pairing B] [--busy C] [--reject C:iso] [--slow-record C]
+                          [--no-ssdp]
   scripts/fake_cameras.py --host 192.168.1.123      # для планшета: адрес Mac в сети
 """
 import argparse, os, signal, subprocess, sys, threading
@@ -31,6 +32,8 @@ def main():
     ap.add_argument("--pairing", default="", help="буквы камер, которым нужно сопряжение, например B")
     ap.add_argument("--busy", default="", help="буквы камер, которые не отвечают на приветствие, например C")
     ap.add_argument("--no-ssdp", action="store_true", help="не отвечать на поиск в сети")
+    ap.add_argument("--reject", default="", help="камера:свойства, запись в которые не меняет значение, например C:iso")
+    ap.add_argument("--slow-record", default="", help="буквы камер, у которых запись начинается и останавливается за 2 с")
     a = ap.parse_args()
     children = []
     for i, cam in enumerate(CAMERAS[:a.count]):
@@ -45,6 +48,12 @@ def main():
             args.append("--pairing")
         if letter in a.busy.upper():
             args.append("--busy")
+        if letter in a.slow_record.upper():
+            args += ["--record-delay", "2"]
+        for spec in filter(None, a.reject.split(";")):
+            who, _, props = spec.partition(":")
+            if who.upper() == letter:
+                args += ["--reject", props]
         child = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         threading.Thread(target=relay, args=(letter, child.stdout), daemon=True).start()
         children.append(child)

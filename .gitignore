@@ -11,3 +11,4 @@ android/build/
 android/app/build/
 android/local.properties
 .claude/worktrees/
+__pycache__/

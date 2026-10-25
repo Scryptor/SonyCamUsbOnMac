@@ -55,9 +55,11 @@ public struct KnownCamera: Codable, Equatable, Sendable, Identifiable {
     public var lastUsed: Date?
     /// В ленте камер: программа держит её на связи рядом с главной.
     public var inStrip: Bool
+    /// Связана с главной: повторяет за ней настройки, пресеты и запись.
+    public var linked: Bool
 
     public init(id: String, aliases: [String] = [], name: String, model: String, host: String? = nil, port: UInt16? = nil,
-                paired: Bool = false, lastUsed: Date? = nil, inStrip: Bool = false) {
+                paired: Bool = false, lastUsed: Date? = nil, inStrip: Bool = false, linked: Bool = false) {
         self.id = id
         self.aliases = aliases
         self.name = name
@@ -67,6 +69,7 @@ public struct KnownCamera: Codable, Equatable, Sendable, Identifiable {
         self.paired = paired
         self.lastUsed = lastUsed
         self.inStrip = inStrip
+        self.linked = linked
     }
 
     public var endpoint: CameraEndpoint? { host.map { CameraEndpoint(host: $0, port: port ?? PTPIP.port) } }
@@ -76,7 +79,7 @@ public struct KnownCamera: Codable, Equatable, Sendable, Identifiable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, aliases, name, model, host, port, paired, lastUsed, strip
+        case id, aliases, name, model, host, port, paired, lastUsed, strip, linked
     }
 
     public init(from decoder: Decoder) throws {
@@ -90,6 +93,7 @@ public struct KnownCamera: Codable, Equatable, Sendable, Identifiable {
         paired = try c.decodeIfPresent(Bool.self, forKey: .paired) ?? false
         lastUsed = try c.decodeIfPresent(Int.self, forKey: .lastUsed).map { Date(timeIntervalSince1970: TimeInterval($0)) }
         inStrip = try c.decodeIfPresent(Bool.self, forKey: .strip) ?? false
+        linked = try c.decodeIfPresent(Bool.self, forKey: .linked) ?? false
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -103,6 +107,7 @@ public struct KnownCamera: Codable, Equatable, Sendable, Identifiable {
         try c.encode(paired, forKey: .paired)
         if let lastUsed { try c.encode(Int(lastUsed.timeIntervalSince1970), forKey: .lastUsed) }
         if inStrip { try c.encode(true, forKey: .strip) }
+        if linked { try c.encode(true, forKey: .linked) }
     }
 }
 
@@ -393,10 +398,24 @@ public struct CameraRoster: Equatable, Sendable {
         known[index].name = trimmed
     }
 
-    /// В ленту или из неё.
+    /// В ленту или из неё; убранная из ленты — и не связана.
     public mutating func setInStrip(_ id: String, _ inStrip: Bool) {
         guard let index = known.firstIndex(where: { $0.id == id }) else { return }
         known[index].inStrip = inStrip
+        if !inStrip { known[index].linked = false }
+    }
+
+    /// Связать с главной или отвязать.
+    public mutating func setLinked(_ id: String, _ linked: Bool) {
+        guard let index = known.firstIndex(where: { $0.id == id }) else { return }
+        known[index].linked = linked
+    }
+
+    /// Главной стала камера ленты `main`. Связанная — прежняя главная (если она в ленте) тоже связана: группа остаётся
+    /// вместе. Несвязанная — связи не меняются.
+    public mutating func switchedTo(_ main: String, from previous: String?) {
+        guard camera(main)?.linked == true, let previous, previous != main, camera(previous)?.inStrip == true else { return }
+        setLinked(previous, true)
     }
 
     public mutating func forget(_ id: String) {
@@ -466,6 +485,50 @@ public enum CameraStripPlan {
                                  now: Date) -> [KnownCamera] {
         members(roster, main: main).filter { camera in
             !connected.contains(camera.id) && (lastAttempt[camera.id].map { now.timeIntervalSince($0) >= retry } ?? true)
+        }
+    }
+}
+
+/// Что не удалось на связанных камерах за одну серию изменений — одной строкой состояния: «Не удалось на «C»: ISO 51200»,
+/// несколько камер — через «; ».
+public struct GroupFailures: Equatable, Sendable {
+    public private(set) var items: [(camera: String, what: String)] = []
+
+    public init() {}
+
+    public static func == (a: GroupFailures, b: GroupFailures) -> Bool {
+        a.items.map { "\($0.camera)\u{1}\($0.what)" } == b.items.map { "\($0.camera)\u{1}\($0.what)" }
+    }
+
+    public var isEmpty: Bool { items.isEmpty }
+
+    /// Одно и то же дважды не повторяем.
+    public mutating func add(camera: String, what: String) {
+        guard !items.contains(where: { $0.camera == camera && $0.what == what }) else { return }
+        items.append((camera, what))
+    }
+
+    public var text: String? {
+        guard !items.isEmpty else { return nil }
+        var order: [String] = []
+        var byCamera: [String: [String]] = [:]
+        for item in items {
+            if byCamera[item.camera] == nil { order.append(item.camera) }
+            byCamera[item.camera, default: []].append(item.what)
+        }
+        let parts = order.map { "на «\($0)»: " + (byCamera[$0] ?? []).joined(separator: ", ") }
+        return "Не удалось " + parts.joined(separator: "; ")
+    }
+
+    /// Что не дошло: «ISO 51200», «1/50», «f/2.8», «AWB», «Видео M», «Фокус AF-C», «запись».
+    public static func label(_ id: SettingID, _ value: Int64) -> String {
+        switch id {
+        case .shutter, .aperture, .colorTemperature, .whiteBalance, .exposureProgram, .movieRecordingSetting:
+            return ValueFormatter.label(id, value)
+        case .iso:
+            return "ISO " + ValueFormatter.label(id, value)
+        default:
+            return id.shortTitle + " " + ValueFormatter.label(id, value)
         }
     }
 }

@@ -20,7 +20,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import local.zve10viewer.ptp.TransportException
 import local.zve10viewer.session.CameraSession
+import local.zve10viewer.session.GroupFollower
 import local.zve10viewer.session.LiveViewQuality
+import local.zve10viewer.settings.Preset
+import local.zve10viewer.settings.PresetResult
+import local.zve10viewer.settings.SettingID
 import local.zve10viewer.settings.WiFiAddress
 import local.zve10viewer.sony.SonyProp
 import local.zve10viewer.wifi.LinkLoss
@@ -50,6 +54,7 @@ class OpenCamera(
 /**
  * Камера в ленте: свой открытый сеанс, превью низкого качества около 5 к/с (уменьшенный кадр), запись и заряд. Связь
  * пропала — сеанс закрыт, плитка «нет связи» с последним кадром; заново подключает контроллер. Строк состояния нет.
+ * Связанная с главной — повторяет за ней настройки (write), пресеты (apply) и запись (setRecording).
  */
 class SideCamera(val id: String, name: String, private val scope: CoroutineScope, private val liveViewWanted: StateFlow<Boolean>) {
     var name by mutableStateOf(name)
@@ -70,10 +75,14 @@ class SideCamera(val id: String, name: String, private val scope: CoroutineScope
         private set
     /** Связь пропала сама (не закрыли и не отдали главному экрану). */
     var onLost: (SideCamera) -> Unit = {}
+    /** Последнее значение от главной не прижилось: камера не дала его выбрать, менять нельзя или не подтвердила. */
+    var onWriteFailed: (SideCamera, SettingID, Long) -> Unit = { _, _, _ -> }
 
     private var open: OpenCamera? = null
     private val jobs = mutableListOf<Job>()
     private val frameTimes = ArrayDeque<Long>()
+    /** Повтор за главной на этом сеансе; null — сеанса нет. */
+    private var follower: GroupFollower? = null
 
     /** Камера в ленте: сеанс — её; превью — низкое, закрытие вернёт камере высокое. */
     fun attach(camera: OpenCamera) {
@@ -92,6 +101,7 @@ class SideCamera(val id: String, name: String, private val scope: CoroutineScope
             if (open === camera) lost(camera)
         }
         jobs += scope.launch(Dispatchers.IO) { liveView(camera) }
+        follower = GroupFollower(camera.session, scope) { id, value -> onWriteFailed(this, id, value) }
     }
 
     /** Отдать сеанс главному экрану: свои корутины — стоп, сеанс открыт. */
@@ -114,9 +124,24 @@ class SideCamera(val id: String, name: String, private val scope: CoroutineScope
         detach()?.close()
     }
 
+    // MARK: - Группа: повтор за главной
+
+    /** То же значение, что на главной. */
+    fun write(id: SettingID, value: Long) {
+        follower?.write(id, value)
+    }
+
+    /** Запись — к тому же состоянию, что на главной. Возвращает, вышло ли. */
+    suspend fun setRecording(on: Boolean): Boolean = follower?.setRecording(on) ?: false
+
+    /** Пресет — и на эту камеру; null — сеанса нет. */
+    suspend fun apply(preset: Preset): PresetResult? = follower?.apply(preset)
+
     private fun stopJobs() {
         jobs.forEach { it.cancel() }
         jobs.clear()
+        follower?.stop()
+        follower = null
     }
 
     private fun lost(camera: OpenCamera) {

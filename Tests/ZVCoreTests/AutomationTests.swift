@@ -117,5 +117,7 @@ import Testing
     #expect(try decode(#"{"action":"searchCameras"}"#) == .searchCameras)
     #expect(try decode(#"{"action":"addToStrip","id":"3f2a"}"#) == .addToStrip("3f2a"))
     #expect(try decode(#"{"action":"removeFromStrip","id":"3f2a"}"#) == .removeFromStrip("3f2a"))
+    #expect(try decode(#"{"action":"linkCamera","id":"3f2a","linked":true}"#) == .linkCamera("3f2a", true))
+    #expect(try decode(#"{"action":"linkCamera","id":"3f2a","linked":false}"#) == .linkCamera("3f2a", false))
     #expect(throws: (any Error).self) { try decode(#"{"action":"selectCamera"}"#) }
 }

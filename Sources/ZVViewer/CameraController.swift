@@ -220,6 +220,9 @@ final class CameraController {
     @ObservationIgnored private var stripAttempts: [String: Date] = [:]
     /// К каким камерам ленты без плитки сейчас стучимся.
     @ObservationIgnored private var stripConnecting: Set<String> = []
+    /// Что не удалось на связанных камерах за текущую серию — одной строкой через секунду.
+    @ObservationIgnored private var groupFailures = GroupFailures()
+    @ObservationIgnored private var groupStatusTask: Task<Void, Never>?
     @ObservationIgnored private var wifiUSN: [CameraEndpoint: String] = [:]
     @ObservationIgnored private var usbKeys: [String: ObjectIdentifier] = [:]
     @ObservationIgnored private var currentUSBSerial: String?
@@ -437,7 +440,12 @@ final class CameraController {
                 try? await Task.sleep(for: .milliseconds(100))
                 guard let self, !Task.isCancelled else { return }
                 if self.isWritable(.colorTemperature) {
-                    if self.property(.colorTemperature)?.current.intValue != kelvin { self.request(.colorTemperature, kelvin) }
+                    if self.property(.colorTemperature)?.current.intValue != kelvin {
+                        self.request(.colorTemperature, kelvin)
+                    } else {
+                        // на главной уже такая — связанным её всё равно ставим
+                        for side in self.linkedSides { side.write(.colorTemperature, kelvin) }
+                    }
                     return
                 }
             }
@@ -452,6 +460,8 @@ final class CameraController {
         targets[id.code] = value
         pending.insert(id)
         Task { await coalescer.submit(id.code, value) }
+        // связанные камеры ленты — то же значение
+        for side in linkedSides { side.write(id, value) }
     }
 
     /// Шаг по списку значений (стрелки, колесо): считаем от последнего запроса, а не от подтверждённого значения,
@@ -483,6 +493,13 @@ final class CameraController {
         guard recordingToggle.press(recording: isRecording, at: Date()) else { return }
         recordCallInFlight = true
         emit(.accepted(.record))
+        // связанные — к тому же состоянию, что будет на главной, и сразу, а не после неё
+        let target = !isRecording
+        for side in linkedSides {
+            Task { [weak self] in
+                if await !side.setRecording(target) { self?.groupFailed(side, "запись") }
+            }
+        }
         Task { [weak self] in
             let recording = try? await session.toggleRecording()
             guard let self else { return }
@@ -799,6 +816,13 @@ final class CameraController {
         presetBase[presetMode] = index
         isApplyingPreset = true
         statusMessage = "Применяю «\(preset.name)»…"
+        for side in linkedSides {
+            Task { [weak self] in
+                for id in await side.apply(preset) {
+                    self?.groupFailed(side, preset.values[id].map { GroupFailures.label(id, $0) } ?? id.shortTitle)
+                }
+            }
+        }
         Task { [weak self] in
             let result = await session.apply(preset)
             guard let self else { return }
@@ -1249,9 +1273,10 @@ final class CameraController {
     }
 
     /// Камера из ленты — главная, сразу: её открытый сеанс переходит на большой экран. Прежняя главная по Wi-Fi —
-    /// в ленту, по кабелю — отключается.
-    private func promote(_ side: SideCamera) {
+    /// в ленту, по кабелю — отключается. `lost` — главная, которая пропала: сеанса у неё уже нет.
+    private func promote(_ side: SideCamera, after lost: String? = nil) {
         guard let handed = side.handOver() else { return }
+        let previous = lost ?? currentCameraID
         sideCameras.removeAll { $0 === side }
         choosing = nil
         pairingTarget = nil
@@ -1259,7 +1284,35 @@ final class CameraController {
         reconnectTask?.cancel()
         reconnectTask = nil
         moveMainAside()
+        // переключились на связанную — прежняя главная тоже связана: группа остаётся вместе
+        roster.switchedTo(side.id, from: previous)
+        storeRoster()
         adoptMain(handed)
+    }
+
+    // MARK: - Группа камер
+
+    /// Связанные камеры ленты на связи: повторяют за главной настройки, пресеты и запись.
+    var linkedSides: [SideCamera] {
+        sideCameras.filter { $0.connected && roster.camera($0.id)?.linked == true }
+    }
+
+    /// Связать камеру ленты с главной или отвязать.
+    func linkCamera(_ id: String, _ linked: Bool) {
+        roster.setLinked(id, linked)
+        storeRoster()
+    }
+
+    /// На связанной не прижилось — в строку состояния раз на серию: «Не удалось на «C»: ISO 51200».
+    private func groupFailed(_ side: SideCamera, _ what: String) {
+        groupFailures.add(camera: roster.camera(side.id)?.name ?? "камера", what: what)
+        groupStatusTask?.cancel()
+        groupStatusTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard let self, !Task.isCancelled else { return }
+            if let text = self.groupFailures.text { self.showStatus(text) }
+            self.groupFailures = GroupFailures()
+        }
     }
 
     /// Главный экран берёт открытый сеанс из ленты: без рукопожатия и ожидания — камера уже готова.
@@ -1312,8 +1365,17 @@ final class CameraController {
 
     private func sideCamera(_ id: String, _ endpoint: CameraEndpoint) -> SideCamera {
         if let side = sideCameras.first(where: { $0.id == id }) { return side }
-        let side = SideCamera(id: id, endpoint: endpoint)
+        let side = newSideCamera(id, endpoint)
         sideCameras.append(side)
+        return side
+    }
+
+    private func newSideCamera(_ id: String, _ endpoint: CameraEndpoint) -> SideCamera {
+        let side = SideCamera(id: id, endpoint: endpoint)
+        side.onWriteFailed = { [weak self, weak side] setting, value in
+            guard let self, let side else { return }
+            self.groupFailed(side, GroupFailures.label(setting, value))
+        }
         return side
     }
 
@@ -1333,7 +1395,7 @@ final class CameraController {
             stripAttempts[camera.id] = Date()
             // плитка — у камеры, что уже была на связи в этом запуске; новая появится, когда ответит
             let known = sideCameras.first { $0.id == camera.id }
-            let side = known ?? SideCamera(id: camera.id, endpoint: endpoint)
+            let side = known ?? newSideCamera(camera.id, endpoint)
             if known == nil { stripConnecting.insert(camera.id) }
             Task { [weak self] in
                 guard let self else { return }
@@ -1711,8 +1773,8 @@ final class CameraController {
         teardown()
         // в ленте есть камеры на связи — главной становится первая; пропавшая, если она в ленте, — плиткой «нет связи»
         if let side = sideCameras.first(where: \.connected) {
-            promote(side)
             if let lost, lost.inStrip, let endpoint = lost.endpoint { _ = sideCamera(lost.id, endpoint) }
+            promote(side, after: lost?.id)
             return
         }
         let seconds = wifiPolicy.sessionLost(now: Date())

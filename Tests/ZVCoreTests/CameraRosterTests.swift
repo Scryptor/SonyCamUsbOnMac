@@ -238,3 +238,48 @@ private func usb(_ key: String, serial: String? = nil) -> CameraSighting {
     roster.setInStrip(ids[3], false)
     #expect(CameraStripPlan.members(roster, main: ids[0]).map(\.id) == [ids[2], ids[1]])
 }
+
+@Test func linkedFlagIsStoredOnlyWhenSetAndLeavesWithTheStrip() throws {
+    var roster = CameraRoster()
+    let b = roster.connected(serial: "B", model: "ZV-E10", link: .wifi(CameraEndpoint(host: "10.0.0.6")), now: now)
+    roster.setInStrip(b, true)
+    roster.setLinked(b, true)
+    let text = String(decoding: try #require(roster.encoded()), as: UTF8.self)
+    #expect(text.contains(#""linked":true"#))
+    #expect(CameraRoster.load(cameras: Data(text.utf8), preferred: nil, legacyName: nil, legacyHost: nil).camera(b)?.linked == true)
+    roster.setInStrip(b, false)                       // убрали из ленты — и не связана
+    #expect(roster.camera(b)?.linked == false)
+    #expect(!String(decoding: try #require(roster.encoded()), as: UTF8.self).contains("linked"))
+}
+
+@Test func switchingToALinkedCameraKeepsTheGroupTogether() {
+    var roster = CameraRoster()
+    let a = roster.connected(serial: "A", model: "ZV-E10", link: .wifi(CameraEndpoint(host: "10.0.0.5")), now: now)
+    let b = roster.connected(serial: "B", model: "ZV-E10", link: .wifi(CameraEndpoint(host: "10.0.0.6")), now: now)
+    let c = roster.connected(serial: "C", model: "ZV-E10", link: .wifi(CameraEndpoint(host: "10.0.0.7")), now: now)
+    for id in [a, b, c] { roster.setInStrip(id, true) }
+    roster.switchedTo(c, from: a)                     // на несвязанную — связи не меняются
+    #expect(roster.camera(a)?.linked == false)
+    roster.setLinked(b, true)
+    roster.switchedTo(b, from: c)                     // на связанную — прежняя главная тоже связана
+    #expect(roster.camera(c)?.linked == true)
+    roster.setInStrip(a, false)
+    roster.switchedTo(b, from: a)                     // прежняя не в ленте — связывать нечего
+    #expect(roster.camera(a)?.linked == false)
+    roster.switchedTo(b, from: nil)
+    roster.switchedTo(b, from: b)
+    #expect(roster.camera(b)?.linked == true)
+}
+
+@Test func groupFailuresMakeOneStatusLine() {
+    var failures = GroupFailures()
+    #expect(failures.text == nil)
+    failures.add(camera: "C", what: GroupFailures.label(.iso, 51200))
+    failures.add(camera: "C", what: GroupFailures.label(.iso, 51200))   // дважды — один раз
+    #expect(failures.text == "Не удалось на «C»: ISO 51200")
+    failures.add(camera: "B", what: "запись")
+    failures.add(camera: "C", what: GroupFailures.label(.aperture, 180))
+    #expect(failures.text == "Не удалось на «C»: ISO 51200, f/1.8; на «B»: запись")
+    #expect(GroupFailures.label(.focusMode, 0x8004) == "Фокус AF-C")
+    #expect(GroupFailures.label(.shutter, 0x10032) == "1/50")
+}

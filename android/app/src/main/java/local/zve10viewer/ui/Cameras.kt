@@ -1,5 +1,6 @@
 package local.zve10viewer.ui
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -37,8 +38,13 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.contentDescription
@@ -185,34 +191,45 @@ private fun RenameCameraDialog(name: String, onSave: (String) -> Unit, onDismiss
 /**
  * Лента камер — колонка слева под верхней панелью: главная (выделена) и камеры ленты. Плитка — превью, имя, «● REC» во
  * время записи, заряд, если 20 % и меньше, «нет связи» поверх последнего кадра. Касание камеры ленты — она главная;
- * долгое нажатие — «Сделать главной», «Убрать из ленты».
+ * долгое нажатие — «Сделать главной», «Убрать из ленты». Цепочка справа внизу — связать камеру с главной: горит —
+ * связана; у главной цепочка (без кнопки) — когда хоть одна связана.
  */
 @Composable
 fun CameraStrip(controller: CameraController, modifier: Modifier = Modifier) {
     Column(modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
         val battery = controller.property(SettingID.battery)?.current?.intValue?.toInt()?.takeIf { it in 0..100 }
+        val book = controller.cameraBook
         StripTile(controller.frame, controller.cameraName, main = true, recording = controller.recordingStartedAt != null,
-            battery = battery, connected = controller.phase == CameraController.Phase.ready)
+            battery = battery, connected = controller.phase == CameraController.Phase.ready,
+            linked = controller.sideCameras.any { book.find(it.id)?.linked == true })
         controller.sideCameras.forEach { side ->
-            StripTile(side.frame, controller.cameraBook.find(side.id)?.name ?: side.name, main = false, recording = side.recording,
-                battery = side.battery, connected = side.connected,
-                onMain = { controller.makeMain(side.id) }, onRemove = { controller.removeFromStrip(side.id) })
+            val linked = book.find(side.id)?.linked == true
+            StripTile(side.frame, book.find(side.id)?.name ?: side.name, main = false, recording = side.recording,
+                battery = side.battery, connected = side.connected, linked = linked,
+                onMain = { controller.makeMain(side.id) }, onRemove = { controller.removeFromStrip(side.id) },
+                onLink = { controller.setLinked(side.id, !linked) })
         }
     }
 }
 
+/** linked — у камеры ленты: связана с главной; у главной — ведёт группу. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun StripTile(frame: ImageBitmap?, name: String, main: Boolean, recording: Boolean, battery: Int?, connected: Boolean,
-                      onMain: () -> Unit = {}, onRemove: () -> Unit = {}) {
+                      linked: Boolean, onMain: () -> Unit = {}, onRemove: () -> Unit = {}, onLink: () -> Unit = {}) {
     var menu by remember { mutableStateOf(false) }
+    val description = when {
+        !main -> "$name — в ленте"
+        linked -> "$name — главная, ведёт группу"
+        else -> "$name — главная"
+    }
     Box {
         Box(
             Modifier.size(width = 200.dp, height = 112.dp).clip(RoundedCornerShape(10.dp)).background(Color.Black)
                 .border(if (main) 3.dp else 1.dp, if (main) Accent else PanelLight, RoundedCornerShape(10.dp))
                 // у главной — ни касания, ни меню: она уже на большом экране
                 .combinedClickable(enabled = !main, onClick = onMain, onLongClick = { menu = true })
-                .semantics { contentDescription = if (main) "$name — главная" else "$name — в ленте" },
+                .semantics { contentDescription = description },
         ) {
             frame?.let {
                 Image(it, contentDescription = null, contentScale = ContentScale.Crop,
@@ -229,6 +246,20 @@ private fun StripTile(frame: ImageBitmap?, name: String, main: Boolean, recordin
                 if (recording) Text("● REC", color = Color(0xFFFF453A), fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                 battery?.takeIf { it <= 20 }?.let { Text("$it%", color = Amber, fontSize = 12.sp) }
             }
+            // цепочка: у камеры ленты — кнопка (своё касание: камеру главной не делает), у главной — значок, когда она
+            // ведёт группу
+            if (!main || linked) {
+                val button = if (main) Modifier else Modifier.clip(CircleShape).clickable(onClick = onLink)
+                    .semantics { contentDescription = if (linked) "Отвязать от главной" else "Связать с главной" }
+                Box(Modifier.align(Alignment.BottomEnd).padding(bottom = 22.dp).then(button).padding(5.dp).size(30.dp)
+                    .background(if (linked && !main) Accent else Panel, CircleShape), contentAlignment = Alignment.Center) {
+                    ChainGlyph(when {
+                        main -> Accent
+                        linked -> Color.White
+                        else -> Color.White.copy(alpha = 0.6f)
+                    }, Modifier.size(18.dp))
+                }
+            }
         }
         DropdownMenu(menu, onDismissRequest = { menu = false }) {
             if (connected) {
@@ -241,6 +272,22 @@ private fun StripTile(frame: ImageBitmap?, name: String, main: Boolean, recordin
                 menu = false
                 onRemove()
             })
+        }
+    }
+}
+
+/** Два звена цепи наискось. */
+@Composable
+private fun ChainGlyph(color: Color, modifier: Modifier) {
+    Canvas(modifier) {
+        val w = size.minDimension
+        val link = Size(w * 0.56f, w * 0.3f)
+        val corner = CornerRadius(link.height / 2)
+        val stroke = Stroke(maxOf(w * 0.1f, 1.5.dp.toPx()))
+        rotate(-45f) {
+            val y = center.y - link.height / 2
+            drawRoundRect(color, Offset(center.x - link.width * 0.82f, y), link, corner, style = stroke)
+            drawRoundRect(color, Offset(center.x - link.width * 0.18f, y), link, corner, style = stroke)
         }
     }
 }

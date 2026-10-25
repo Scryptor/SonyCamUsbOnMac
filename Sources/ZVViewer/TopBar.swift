@@ -2,7 +2,7 @@ import SwiftUI
 import ZVCore
 
 /// Слева сверху: кнопки гистограммы и строки состояния, пресеты (кнопка со списком), «☆+» — сохранить настройки
-/// (текущий пресет изменён — в него или новым), и настройки.
+/// (текущий пресет изменён — в него или новым), и настройки; справа от них — сообщение программы.
 struct TopBar: View {
     let controller: CameraController
     let screen: ScreenState
@@ -16,7 +16,8 @@ struct TopBar: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        // сообщение — справа от панели, в том же ряду: ни ленту камер под панелью не сдвигает, ни на неё не ложится
+        HStack(spacing: 8) {
             HStack(spacing: 6) {
                 Button(action: screen.toggleHistogram) {
                     TopBarIconView(icon: .histogram)
@@ -69,16 +70,16 @@ struct TopBar: View {
             }
             .padding(5)
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
-
             if let status = controller.statusMessage {
                 HStack(spacing: 6) {
                     if controller.isApplyingPreset { ProgressView().controlSize(.mini) }
-                    Text(status)
+                    Text(status).lineLimit(1).truncationMode(.middle)
                 }
                 .font(.callout)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
                 .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+                .help(status)
             }
         }
         // новый пресет — сразу с именем; под полем — что войдёт

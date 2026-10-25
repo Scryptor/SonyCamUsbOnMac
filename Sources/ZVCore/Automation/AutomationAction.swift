@@ -75,9 +75,11 @@ public enum AutomationAction: Equatable, Sendable, Decodable {
     /// Лента камер: держать камеру на связи рядом с главной или убрать её.
     case addToStrip(String)
     case removeFromStrip(String)
+    /// Группа: связать камеру ленты с главной (повторяет настройки, пресеты и запись) или отвязать.
+    case linkCamera(String, Bool)
 
     private enum Keys: String, CodingKey {
-        case action, key, setting, offset, value, group, name, index, confirm, mode, x, y, factor, included, from, to, id
+        case action, key, setting, offset, value, group, name, index, confirm, mode, x, y, factor, included, from, to, id, linked
     }
 
     public init(from decoder: Decoder) throws {
@@ -147,6 +149,7 @@ public enum AutomationAction: Equatable, Sendable, Decodable {
         case "searchCameras": self = .searchCameras
         case "addToStrip": self = .addToStrip(try c.decode(String.self, forKey: .id))
         case "removeFromStrip": self = .removeFromStrip(try c.decode(String.self, forKey: .id))
+        case "linkCamera": self = .linkCamera(try c.decode(String.self, forKey: .id), try c.decodeIfPresent(Bool.self, forKey: .included) ?? (try c.decode(Bool.self, forKey: .linked)))
         default:
             throw DecodingError.dataCorruptedError(forKey: .action, in: c, debugDescription: "неизвестная команда \(action)")
         }

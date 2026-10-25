@@ -40,7 +40,8 @@ sealed class CameraLink {
  * Камера, к которой программа уже подключалась. id — отпечаток серийного номера (сам номер не хранится); aliases — другие
  * отпечатки той же камеры (по Wi-Fi — USN из ответа на поиск, по кабелю — серийный номер USB, если он не совпал); name —
  * как назвали; host и port — где была по Wi-Fi в последний раз (port — только если не 15740); paired — сопряжена;
- * lastUsed — когда подключались, секунды Unix; inStrip — в ленте камер: программа держит её на связи рядом с главной.
+ * lastUsed — когда подключались, секунды Unix; inStrip — в ленте камер: программа держит её на связи рядом с главной;
+ * linked — связана с главной: повторяет за ней настройки, пресеты и запись.
  */
 data class KnownCamera(
     val id: String,
@@ -52,6 +53,7 @@ data class KnownCamera(
     val paired: Boolean = false,
     val lastUsed: Long? = null,
     val inStrip: Boolean = false,
+    val linked: Boolean = false,
 ) {
     val address: WiFiAddress? get() = host?.let { WiFiAddress(it, port ?: PtpIp.PORT) }
 
@@ -188,11 +190,28 @@ data class CameraBook(val cameras: List<KnownCamera> = emptyList(), val preferre
     /** «Забыть сопряжение» (новый GUID): ни одна камера программу больше не знает, имена остаются. */
     fun unpairedAll(): CameraBook = copy(cameras = cameras.map { it.copy(paired = false) })
 
-    /** «В ленту» / «Убрать из ленты»; камера, с которой переключились на другую, тоже уходит в ленту. */
+    /** «В ленту» / «Убрать из ленты» (убранная — и не связана); камера, с которой переключились на другую, тоже уходит в ленту. */
     fun withStrip(id: String, inStrip: Boolean): CameraBook {
         val camera = find(id) ?: return this
-        if (camera.inStrip == inStrip) return this
-        return copy(cameras = cameras.map { if (it.id == id) it.copy(inStrip = inStrip) else it })
+        val linked = camera.linked && inStrip
+        if (camera.inStrip == inStrip && camera.linked == linked) return this
+        return copy(cameras = cameras.map { if (it.id == id) it.copy(inStrip = inStrip, linked = linked) else it })
+    }
+
+    /** Цепочка на плитке ленты: связать с главной или отвязать. */
+    fun withLinked(id: String, linked: Boolean): CameraBook {
+        val camera = find(id) ?: return this
+        if (camera.linked == linked) return this
+        return copy(cameras = cameras.map { if (it.id == id) it.copy(linked = linked) else it })
+    }
+
+    /**
+     * Главной стала камера ленты main. Связанная — прежняя главная (она уже в ленте) тоже связана: группа остаётся
+     * вместе. Несвязанная — связи не меняются.
+     */
+    fun switchedTo(main: String, previous: String?): CameraBook {
+        if (find(main)?.linked != true || previous == null || previous == main || find(previous)?.inStrip != true) return this
+        return withLinked(previous, true)
     }
 
     /**
@@ -335,6 +354,7 @@ data class CameraBook(val cameras: List<KnownCamera> = emptyList(), val preferre
                 camera.lastUsed?.let { item.put("lastUsed", it) }
                 // не в ленте — поля нет: запись та же, что у прежних версий
                 if (camera.inStrip) item.put("strip", true)
+                if (camera.linked) item.put("linked", true)
                 put(item)
             }
         }.toString()
@@ -353,7 +373,7 @@ data class CameraBook(val cameras: List<KnownCamera> = emptyList(), val preferre
                 val port = if (item.has("port") && !item.isNull("port")) item.optInt("port").takeIf { it in 1..65535 && it != PtpIp.PORT } else null
                 val lastUsed = if (item.has("lastUsed") && !item.isNull("lastUsed")) item.optLong("lastUsed") else null
                 KnownCamera(id, name ?: model, model, aliases, text(item, "host"), port, item.optBoolean("paired", false), lastUsed,
-                    item.optBoolean("strip", false))
+                    item.optBoolean("strip", false), item.optBoolean("linked", false))
             }
         }.getOrDefault(emptyList())
 
@@ -394,5 +414,36 @@ object CameraStrip {
             }
             .take(room)
             .toList()
+    }
+}
+
+/**
+ * Что не удалось на связанных камерах за одну серию изменений — одной строкой состояния: «Не удалось на «C»: ISO 51200»,
+ * несколько камер — через «; ». Неизменяемая, как книга; как на Mac (GroupFailures в ZVCore/Session/CameraRoster.swift).
+ */
+data class GroupFailures(val items: List<Pair<String, String>> = emptyList()) {
+    /** Одно и то же дважды не повторяем. */
+    fun plus(camera: String, what: String): GroupFailures =
+        if (camera to what in items) this else GroupFailures(items + (camera to what))
+
+    val text: String?
+        get() {
+            if (items.isEmpty()) return null
+            val byCamera = LinkedHashMap<String, MutableList<String>>()
+            items.forEach { (camera, what) -> byCamera.getOrPut(camera) { mutableListOf() } += what }
+            return "Не удалось " + byCamera.entries.joinToString("; ") { (camera, failed) -> "на «$camera»: " + failed.joinToString(", ") }
+        }
+
+    companion object {
+        /** Запись не началась или не остановилась. */
+        const val RECORDING = "запись"
+
+        /** Что не дошло: «ISO 51200», «1/50», «f/2.8», «AWB», «Видео M», «Фокус AF-C». */
+        fun label(id: SettingID, value: Long): String = when (id) {
+            SettingID.shutter, SettingID.aperture, SettingID.colorTemperature, SettingID.whiteBalance, SettingID.exposureProgram,
+            SettingID.movieRecordingSetting -> ValueFormatter.label(id, value)
+            SettingID.iso -> "ISO " + ValueFormatter.label(id, value)
+            else -> id.shortTitle + " " + ValueFormatter.label(id, value)
+        }
     }
 }

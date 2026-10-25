@@ -314,6 +314,9 @@ final class AutomationServer {
         case let .removeFromStrip(id):
             guard controller.roster.camera(id) != nil else { return "no known camera \(id)" }
             controller.removeFromStrip(id)
+        case let .linkCamera(id, linked):
+            guard controller.roster.camera(id) != nil else { return "no known camera \(id)" }
+            controller.linkCamera(id, linked)
         }
         return nil
     }
@@ -537,12 +540,17 @@ final class AutomationServer {
         guard !controller.sideCameras.isEmpty else { return [] }
         let main: [String: Any] = ["id": controller.currentCameraID ?? NSNull(), "name": controller.currentCameraName,
                                    "main": true, "connected": controller.phase == .ready, "recording": controller.isRecording,
+                                   "linked": controller.roster.camera(controller.currentCameraID)?.linked ?? false,
                                    "battery": controller.property(.battery)?.current.intValue ?? NSNull(),
                                    "fps": controller.shownFPS]
         return [main] + controller.sideCameras.map { side in
             ["id": side.id, "name": controller.roster.camera(side.id)?.name ?? "Камера", "main": false,
              "connected": side.connected, "recording": side.recording, "battery": side.battery ?? NSNull(),
-             "fps": side.fps, "port": Int(side.endpoint.port)] as [String: Any]
+             "fps": side.fps, "port": Int(side.endpoint.port),
+             "linked": controller.roster.camera(side.id)?.linked ?? false,
+             // что дошло до камеры ленты — для тестов группы
+             "values": Dictionary(uniqueKeysWithValues: [SettingID.iso, .shutter, .aperture, .whiteBalance, .colorTemperature, .exposureProgram]
+                .compactMap { id in side.properties[id.code]?.current.intValue.map { (id.rawValue, $0) } })] as [String: Any]
         }
     }
 

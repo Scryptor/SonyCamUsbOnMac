@@ -83,6 +83,7 @@ import local.zve10viewer.settings.KnownCamera
 import local.zve10viewer.settings.CurrentCamera
 import local.zve10viewer.settings.CaptureMode
 import local.zve10viewer.settings.FileNaming
+import local.zve10viewer.settings.GroupFailures
 import local.zve10viewer.settings.LumaHistogram
 import local.zve10viewer.settings.LumaStats
 import local.zve10viewer.settings.Preset
@@ -332,6 +333,9 @@ class CameraController(private val context: Context, private val scope: Coroutin
     /** К каким камерам ленты сейчас стучимся и когда стучались в последний раз. */
     private val sideConnecting = HashMap<String, Job>()
     private val sideTried = HashMap<String, Long>()
+    /** Что не удалось на связанных камерах за текущую серию — одной строкой через секунду. */
+    private var groupFailures = GroupFailures()
+    private var groupStatusJob: Job? = null
     /** Адрес, к которому сейчас стучится главная: камеру по нему в ленту не тянем. */
     private var mainAttempt: WiFiAddress? = null
     /** Провал связи по Wi-Fi: ждём ответа, а ничего не приходит. Сеанс держим, кадр остаётся на экране. */
@@ -633,7 +637,12 @@ class CameraController(private val context: Context, private val scope: Coroutin
             repeat(40) {
                 delay(100)
                 if (isWritable(SettingID.colorTemperature)) {
-                    if (property(SettingID.colorTemperature)?.current?.intValue != kelvin) request(SettingID.colorTemperature, kelvin)
+                    if (property(SettingID.colorTemperature)?.current?.intValue != kelvin) {
+                        request(SettingID.colorTemperature, kelvin)
+                    } else {
+                        // на главной уже такая — связанным её всё равно ставим
+                        linkedSides.forEach { it.write(SettingID.colorTemperature, kelvin) }
+                    }
                     return@launch
                 }
             }
@@ -649,6 +658,8 @@ class CameraController(private val context: Context, private val scope: Coroutin
         targets[id.code] = value
         pending = pending + id
         coalescer.submit(id.code, value)
+        // связанные камеры ленты — то же значение
+        linkedSides.forEach { it.write(id, value) }
     }
 
     /** Шаг по списку значений: считаем от последнего запроса, иначе быстрые шаги упирались бы в ожидание камеры. */
@@ -687,6 +698,11 @@ class CameraController(private val context: Context, private val scope: Coroutin
         if (!toggle.press(isRecording, System.currentTimeMillis())) return
         recordingRequest = toggle.request
         feedback(FeedbackEvent.Accepted(FeedbackTarget.record))
+        // связанные — к тому же состоянию, что будет на главной, и сразу, а не после неё
+        val target = !isRecording
+        linkedSides.forEach { side ->
+            scope.launch { if (!side.setRecording(target)) groupFailed(side, GroupFailures.RECORDING) }
+        }
         recordingCall = scope.launch {
             val recording = try {
                 session.toggleRecording()
@@ -1033,6 +1049,14 @@ class CameraController(private val context: Context, private val scope: Coroutin
         isApplyingPreset = true
         statusJob?.cancel()
         statusMessage = "Применяю «${preset.name}»…"
+        val values = PresetCatalog.effective(preset)
+        linkedSides.forEach { side ->
+            scope.launch {
+                side.apply(preset)?.skipped?.forEach { id ->
+                    groupFailed(side, values[id]?.let { GroupFailures.label(id, it) } ?: id.shortTitle)
+                }
+            }
+        }
         scope.launch {
             val result = session.apply(preset)
             isApplyingPreset = false
@@ -1302,6 +1326,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
             journal("«${lost.name}» в ленте — нет связи")
             sideTried[lost.id] = System.currentTimeMillis()
         }
+        side.onWriteFailed = { failed, setting, value -> groupFailed(failed, GroupFailures.label(setting, value)) }
         sideCameras = sideCameras + side
         return side
     }
@@ -1311,8 +1336,11 @@ class CameraController(private val context: Context, private val scope: Coroutin
         sideCameras = sideCameras.filter { it !== side }
     }
 
-    /** Камера ленты — главная сразу: её открытый сеанс переходит на большой экран, прежняя главная — в ленту. */
-    private fun promote(side: SideCamera) {
+    /**
+     * Камера ленты — главная сразу: её открытый сеанс переходит на большой экран, прежняя главная (previous) — в ленту.
+     * Связанная стала главной — прежняя главная тоже связана: группа остаётся вместе.
+     */
+    private fun promote(side: SideCamera, previous: String? = currentCameraId) {
         if (!side.connected || !freeForSwitch()) return
         // freeForSwitch могла убрать её (сеанс прежней главной лёг на её же место) — берём сеанс сейчас
         val open = side.detach() ?: return
@@ -1321,6 +1349,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
         pairingTarget = null
         wifiStatus = null
         if (choice is CameraLink.WiFi) choice = null
+        updateBook(cameraBook.switchedTo(side.id, previous))
         adoptSession(open)
     }
 
@@ -1337,6 +1366,32 @@ class CameraController(private val context: Context, private val scope: Coroutin
         sideConnecting.remove(id)?.cancel()
         sideCameras.firstOrNull { it.id == id }?.let { removeSide(it, close = true) }
         journal("«${cameraBook.find(id)?.name ?: id}» — убрана из ленты")
+    }
+
+    // MARK: - Группа камер
+
+    /** Связанные камеры ленты на связи: повторяют за главной настройки, пресеты и запись. */
+    private val linkedSides: List<SideCamera>
+        get() = sideCameras.filter { it.connected && cameraBook.find(it.id)?.linked == true }
+
+    /** Цепочка на плитке ленты: связать камеру с главной или отвязать. */
+    fun setLinked(id: String, linked: Boolean) {
+        updateBook(cameraBook.withLinked(id, linked))
+        journal("«${cameraBook.find(id)?.name ?: id}» — ${if (linked) "связана с главной" else "отвязана от главной"}")
+    }
+
+    /** На связанной не прижилось — в строку состояния раз на серию: «Не удалось на «C»: ISO 51200». */
+    private fun groupFailed(side: SideCamera, what: String) {
+        groupFailures = groupFailures.plus(cameraBook.find(side.id)?.name ?: side.name, what)
+        groupStatusJob?.cancel()
+        groupStatusJob = scope.launch {
+            delay(1000)
+            groupFailures.text?.let { text ->
+                Log.i(TAG, text)
+                showStatus(text)
+            }
+            groupFailures = GroupFailures()
+        }
     }
 
     /** Плитка ленты: касание — сделать главной. */
@@ -2128,7 +2183,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
         }
         if (successor != null) {
             journal("главная пропала — главной становится «${successor.name}» из ленты")
-            promote(successor)
+            promote(successor, previous = lostId)
             return
         }
         val seconds = wifiPolicy.sessionLost(System.currentTimeMillis())

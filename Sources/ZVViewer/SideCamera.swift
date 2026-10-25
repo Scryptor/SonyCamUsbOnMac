@@ -5,6 +5,25 @@ import Observation
 import ZVCamera
 import ZVCore
 
+/// Очередь из одного места: следующий ждёт, пока предыдущий не отпустит.
+private actor WriteGate {
+    private var busy = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func acquire() async {
+        guard busy else {
+            busy = true
+            return
+        }
+        // место передаёт release — busy так и остаётся true
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func release() {
+        if waiters.isEmpty { busy = false } else { waiters.removeFirst().resume() }
+    }
+}
+
 /// Камера в ленте: свой открытый сеанс по Wi-Fi, превью низкого качества около 5 к/с, запись, заряд. Сеанс передаётся
 /// главному экрану (`handOver`) и обратно (`adopt`) — без переподключения.
 @MainActor
@@ -37,6 +56,14 @@ final class SideCamera: Identifiable {
     @ObservationIgnored private var deviceInfo: DeviceInfo?
     @ObservationIgnored private var tasks: [Task<Void, Never>] = []
     @ObservationIgnored private var frameTimes: [Date] = []
+    /// Записи от главной (группа): по свойству одна за раз, только последнее значение.
+    @ObservationIgnored private var coalescer: WriteCoalescer?
+    /// На всю камеру — одна запись за раз (и пресет целиком); нажатия записи — по одному, своей очередью.
+    @ObservationIgnored private var writeGate: WriteGate?
+    @ObservationIgnored private var recordGate: WriteGate?
+    @ObservationIgnored private var requested: [UInt16: Int64] = [:]
+    /// Последнее значение не прижилось: камера не дала его выбрать или не подтвердила.
+    @ObservationIgnored var onWriteFailed: ((SettingID, Int64) -> Void)?
 
     /// Пауза между кадрами в ленте: около 5 к/с — плитке хватает, канал свободен для главной.
     static let frameInterval: Duration = .milliseconds(200)
@@ -80,6 +107,18 @@ final class SideCamera: Identifiable {
         recordingStartedAt = handed.recordingStartedAt ?? (recording ? Date() : nil)
         connected = true
         let session = handed.session
+        requested = [:]
+        // по одной записи за раз и на всю камеру: формат и параметры записи, баланс белого и температуру камера,
+        // занятая прошлой записью, пропускает
+        let gate = WriteGate()
+        writeGate = gate
+        recordGate = WriteGate()
+        coalescer = WriteCoalescer { [weak self] code, value in
+            await gate.acquire()
+            let result = await Self.put(code, value, on: session)
+            await gate.release()
+            await self?.writeFinished(code, value, result)
+        }
         Task { try? await session.setQuietly(SonyProp.liveViewImageQuality, to: LiveViewQuality.low.rawValue, type: PTPType.uint8) }
         tasks.append(Task { [weak self] in
             for await snapshot in session.snapshotStream() { self?.apply(snapshot) }
@@ -100,6 +139,74 @@ final class SideCamera: Identifiable {
                 try? await Task.sleep(for: SideCamera.frameInterval)
             }
         })
+    }
+
+    // MARK: - Группа: повтор за главной
+
+    /// То же значение, что на главной. Уже такое — не пишем.
+    func write(_ id: SettingID, _ value: Int64) {
+        guard connected, let coalescer else { return }
+        // температура — ещё и в режиме «Цвет. темп.»: без него та же цифра на камере ничего не значит
+        let same = properties[id.code]?.current.intValue == value
+            && (id != .colorTemperature || properties[SonyProp.whiteBalance]?.current.intValue == WhiteBalanceTemperature.manualMode)
+        if same, requested[id.code] == nil { return }
+        requested[id.code] = value
+        Task { await coalescer.submit(id.code, value) }
+    }
+
+    /// Одна запись. Температура — сначала «Цвет. темп.» в балансе белого, если камера не в нём: как ползунок на главной.
+    private nonisolated static func put(_ code: UInt16, _ value: Int64, on session: CameraSession) async -> SetResult? {
+        if code == SonyProp.colorTemp {
+            let manual = WhiteBalanceTemperature.manualMode
+            if await session.properties[SonyProp.whiteBalance]?.current.intValue != manual {
+                guard (try? await session.set(SonyProp.whiteBalance, to: manual)) == .confirmed else { return nil }
+            }
+            // температуру камера открывает не сразу после смены режима
+            for _ in 0..<40 {
+                if await session.properties[code]?.isWritable == true { break }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+        }
+        let result = try? await session.set(code, to: value)
+        // формат камера подтверждает раньше, чем готова принять следующую запись — как на главной
+        if code == SonyProp.movieFileFormat { try? await Task.sleep(for: .milliseconds(500)) }
+        return result
+    }
+
+    private func writeFinished(_ code: UInt16, _ value: Int64, _ result: SetResult?) {
+        // промежуточные значения (быстрые шаги) не считаем: судим только последнее
+        guard requested[code] == value else { return }
+        requested[code] = nil
+        guard result != .confirmed, let id = SettingID.allCases.first(where: { $0.code == code }) else { return }
+        onWriteFailed?(id, value)
+    }
+
+    /// Запись — к тому же состоянию, что на главной: нажимаем, только если иначе. Нажатия — по одному: «стоп», пока
+    /// камера не ответила на «пуск», смотрит уже на её ответ. Возвращает, вышло ли.
+    func setRecording(_ on: Bool) async -> Bool {
+        guard connected, let session, let recordGate else { return false }
+        await recordGate.acquire()
+        var done = false
+        // пока ждали очереди, сеанс могли отдать главному экрану — его запись не трогаем
+        if connected, self.session === session {
+            if await session.properties[SonyProp.movieRecordingState]?.current.intValue == (on ? 1 : 0) {
+                done = true
+            } else {
+                done = (try? await session.toggleRecording()) == on
+            }
+        }
+        await recordGate.release()
+        return done
+    }
+
+    /// Пресет — и на эту камеру, в очереди записей. Возвращает, что не применилось.
+    func apply(_ preset: Preset) async -> [SettingID] {
+        guard connected, let session, let writeGate else { return [] }
+        await writeGate.acquire()
+        var skipped: [SettingID] = []
+        if connected, self.session === session { skipped = await session.apply(preset).skipped }
+        await writeGate.release()
+        return skipped
     }
 
     /// Отдать сеанс главному экрану: слушать перестаём, соединение не закрываем.
@@ -126,6 +233,10 @@ final class SideCamera: Identifiable {
     private func stopTasks() {
         tasks.forEach { $0.cancel() }
         tasks.removeAll()
+        coalescer = nil
+        writeGate = nil
+        recordGate = nil
+        requested = [:]
     }
 
     private func lost() {
