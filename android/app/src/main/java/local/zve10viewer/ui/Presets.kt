@@ -312,7 +312,8 @@ private fun PresetList(controller: CameraController, screen: ScreenState, select
 @Composable
 private fun PresetEditor(controller: CameraController, screen: ScreenState, index: Int, focusName: Boolean, onNameFocused: () -> Unit,
                          modifier: Modifier) {
-    val preset = controller.presets[index]
+    // пресет удалили — пока окно перестраивается, номер мог устареть
+    val preset = controller.presets.getOrNull(index) ?: return
     val online = controller.phase == CameraController.Phase.ready
     var deleting by remember { mutableStateOf(false) }
     Column(modifier.padding(horizontal = 20.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {

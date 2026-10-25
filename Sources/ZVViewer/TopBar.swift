@@ -6,7 +6,6 @@ import ZVCore
 struct TopBar: View {
     let controller: CameraController
     let screen: ScreenState
-    @State private var newName = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -61,16 +60,9 @@ struct TopBar: View {
                 .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
             }
         }
-        // новый пресет — сразу с именем; под полем — что войдёт
-        .alert("Новый пресет", isPresented: Binding(get: { screen.presetNaming }, set: { screen.presetNaming = $0 })) {
-            TextField("Название", text: $newName)
-            Button("Сохранить") { controller.savePreset(name: newName) }
-            Button("Отмена", role: .cancel) {}
-        } message: {
-            Text(PresetCatalog.summary(PresetCatalog.capture(name: "", from: controller.properties)))
-        }
-        .onChange(of: screen.presetNaming) { _, naming in
-            if naming { newName = controller.nextPresetName }
+        // новый пресет — сразу с именем и кадром
+        .sheet(isPresented: Binding(get: { screen.presetNaming }, set: { screen.presetNaming = $0 })) {
+            NewPresetSheet(controller: controller, screen: screen)
         }
     }
 }
