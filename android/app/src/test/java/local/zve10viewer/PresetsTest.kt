@@ -200,8 +200,6 @@ class PresetsTest {
         assertNull(PresetCatalog.moved(listOf(a, b, c), -1, 0))
         assertEquals("Пресет 1", PresetCatalog.newName(emptyList()))
         assertEquals("Пресет 3", PresetCatalog.newName(listOf(a, b)))
-        // «Пресет 3» уже есть — следующее свободное
-        assertEquals("Пресет 4", PresetCatalog.newName(listOf(Preset("Пресет 3", emptyMap()), b)))
         assertEquals("Вечер — копия", PresetCatalog.copyName("Вечер"))
     }
 
@@ -210,6 +208,8 @@ class PresetsTest {
         assertEquals(PresetCatalog.order.size, grouped.size)
         assertEquals(PresetCatalog.order.toSet(), grouped.toSet())
         assertEquals(listOf("Экспозиция", "Цвет и картинка", "Фокус"), PresetCatalog.groups.map { it.first })
+        assertEquals(listOf(SettingID.shutter, SettingID.aperture, SettingID.iso, SettingID.exposureComp, SettingID.metering,
+            SettingID.dro), PresetCatalog.groups[0].second)
     }
 
     @Test fun freshPresetFromTheRealCameraIsOnTheCamera() {

@@ -4,11 +4,9 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -27,18 +25,13 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.zIndex
 import kotlin.math.roundToInt
@@ -47,6 +40,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -71,6 +65,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
@@ -152,6 +147,17 @@ class ScreenState {
     /** Галерея: какой снимок открыт (по id, а не по месту в ленте — новый снимок его не сбивает); null — закрыта. */
     var galleryShot by mutableStateOf<Long?>(null)
 
+    /** Список пресетов под кнопкой пресетов. */
+    var presetMenuOpen by mutableStateOf(false)
+    /** Окошко «Новый пресет» — имя и что войдёт. */
+    var newPresetOpen by mutableStateOf(false)
+    /** Окно пресетов и какой пресет в нём выбран (номер с 0). Переживает обрыв связи: на экране ожидания оно то же. */
+    var presetsOpen by mutableStateOf(false)
+    var presetsSelected by mutableIntStateOf(0)
+    /** Где верхняя панель и кнопка пресетов (по горизонтали, в точках экрана) — список встаёт под кнопкой. */
+    var topBarLeft by mutableFloatStateOf(0f)
+    var presetButtonLeft by mutableFloatStateOf(0f)
+
     /**
      * Цифровое увеличение видео — свойство экрана: переживает фото / видео / S&Q, запись, смену качества превью и
      * поворот; сбрасывается, когда связь кончилась и показан экран ожидания.
@@ -165,12 +171,27 @@ class ScreenState {
     var bicubic by mutableStateOf(true)
 
     val controlsHidden: Boolean get() = manualHidden || autoHidden
-    val overlayOpen: Boolean get() = fnOpen || allSettingsOpen || settingsOpen || pillInfo != null
+    /** Открыто меню, панель, список пресетов или окошко: элементы не прячутся сами, касание видео закрывает. */
+    val overlayOpen: Boolean
+        get() = fnOpen || allSettingsOpen || settingsOpen || pillInfo != null || presetMenuOpen || newPresetOpen || presetsOpen
 
     fun togglePillInfo(info: PillInfo) {
         val open = pillInfo != info
         closeOverlays()
         if (open) pillInfo = info
+    }
+
+    fun togglePresetMenu() {
+        val open = !presetMenuOpen
+        closeOverlays()
+        presetMenuOpen = open
+    }
+
+    /** Окно пресетов на пресете с этим номером (с 0). */
+    fun openPresets(index: Int) {
+        closeOverlays()
+        presetsSelected = index
+        presetsOpen = true
     }
 
     fun noteActivity() {
@@ -181,6 +202,7 @@ class ScreenState {
     fun openFn(id: SettingID?) {
         if (id != null) selected = id
         pillInfo = null
+        presetMenuOpen = false
         allSettingsOpen = false
         settingsOpen = false
         fnOpen = true
@@ -194,6 +216,7 @@ class ScreenState {
         fnOpen = false
         settingsOpen = false
         pillInfo = null
+        presetMenuOpen = false
         allSettingsOpen = true
     }
 
@@ -203,6 +226,9 @@ class ScreenState {
         settingsOpen = false
         editing = null
         pillInfo = null
+        presetMenuOpen = false
+        newPresetOpen = false
+        presetsOpen = false
     }
 }
 
@@ -321,20 +347,25 @@ private fun WaitingScreen(controller: CameraController, screen: ScreenState, not
         SettingsOverlay(controller, onClose = { settingsOpen = false }, onDebug = {
             settingsOpen = false
             screen.debugOpen = true
+        }, onPresets = {
+            settingsOpen = false
+            screen.openPresets(0)
         })
     }
+    // пресеты правятся и без камеры: имена, порядок, что менять; значения — когда она на связи
+    if (screen.presetsOpen) PresetsOverlay(controller, screen)
     }
 }
 
 /** Настройки поверх экрана: касание мимо панели закрывает, касания по самой панели (и её полям) — нет. */
 @Composable
-private fun SettingsOverlay(controller: CameraController, onClose: () -> Unit, onDebug: () -> Unit) {
+private fun SettingsOverlay(controller: CameraController, onClose: () -> Unit, onDebug: () -> Unit, onPresets: () -> Unit) {
     Box(
         Modifier.fillMaxSize().background(Color(0x99000000)).pointerInput(Unit) { detectTapGestures { onClose() } },
         contentAlignment = Alignment.Center,
     ) {
         Box(Modifier.width(560.dp).fillMaxHeight(0.9f).pointerInput(Unit) { detectTapGestures { } }) {
-            SettingsPanel(controller, Modifier.fillMaxSize(), onDebug)
+            SettingsPanel(controller, Modifier.fillMaxSize(), onDebug, onPresets)
         }
     }
 }
@@ -351,8 +382,14 @@ private fun LiveScreen(controller: CameraController, screen: ScreenState) {
     LaunchedEffect(controller.shootingMode) {
         if (controller.shootingMode != ShootingMode.slowQuick && screen.pillInfo == PillInfo.slowMotion) screen.pillInfo = null
     }
-    // связь пропала — подсказки к ней больше нет
-    DisposableEffect(Unit) { onDispose { screen.pillInfo = null } }
+    // связь пропала — подсказки к ней больше нет; список пресетов и «Новый пресет» без камеры не нужны
+    DisposableEffect(Unit) {
+        onDispose {
+            screen.pillInfo = null
+            screen.presetMenuOpen = false
+            screen.newPresetOpen = false
+        }
+    }
     // автоскрытие: через заданное в настройках время без касаний, если не открыто меню, панель или просмотр снимка
     LaunchedEffect(Unit) {
         while (true) {
@@ -451,8 +488,10 @@ private fun LiveScreen(controller: CameraController, screen: ScreenState) {
             SettingsOverlay(controller, onClose = { screen.settingsOpen = false }, onDebug = {
                 screen.settingsOpen = false
                 screen.debugOpen = true
-            })
+            }, onPresets = { screen.openPresets(controller.activePresetIndex ?: 0) })
         }
+        if (screen.presetsOpen) PresetsOverlay(controller, screen)
+        if (screen.newPresetOpen) NewPresetDialog(controller) { screen.newPresetOpen = false }
         controller.review?.let { ReviewOverlay(controller, it) }
         if (screen.galleryShot != null) GalleryOverlay(controller, screen)
         if (hint) {
@@ -565,6 +604,11 @@ private fun Controls(controller: CameraController, screen: ScreenState, feedback
     Box(Modifier.fillMaxSize().padding(18.dp)) {
         Column(Modifier.align(Alignment.TopStart)) {
             TopBar(controller, screen)
+            if (screen.presetMenuOpen) {
+                // под самой кнопкой пресетов, а не под началом панели
+                val start = with(LocalDensity.current) { (screen.presetButtonLeft - screen.topBarLeft).coerceAtLeast(0f).toDp() }
+                PresetMenu(controller, screen, Modifier.padding(start = start, top = 8.dp))
+            }
             controller.statusMessage?.let {
                 Text(it, color = Color.White, fontSize = 15.sp, modifier = Modifier.padding(top = 8.dp)
                     .background(Panel, RoundedCornerShape(10.dp)).padding(horizontal = 12.dp, vertical = 7.dp))
@@ -759,14 +803,12 @@ private fun InfoLine(controller: CameraController, onOpen: (SettingID?) -> Unit)
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
+/** Слева сверху: гистограмма, закрепление строки состояния, пресеты (кнопка со списком), ☆+ — новый пресет, ⚙. */
 @Composable
 private fun TopBar(controller: CameraController, screen: ScreenState) {
-    var menuFor by remember { mutableIntStateOf(-1) }
-    var renaming by remember { mutableIntStateOf(-1) }
-    var newName by remember { mutableStateOf("") }
     Row(
-        Modifier.background(Panel, RoundedCornerShape(12.dp)).padding(6.dp),
+        Modifier.onGloballyPositioned { screen.topBarLeft = it.positionInRoot().x }
+            .background(Panel, RoundedCornerShape(12.dp)).padding(6.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
@@ -784,38 +826,18 @@ private fun TopBar(controller: CameraController, screen: ScreenState) {
         ) {
             TopBarIcon(TopBarGlyph.statusLine)
         }
-        controller.presets.forEachIndexed { index, preset ->
-            Box {
-                Text(
-                    if (index < 9) "${index + 1} · ${preset.name}" else preset.name,
-                    color = Color.White, fontSize = 16.sp, maxLines = 1,
-                    modifier = Modifier.background(PanelLight, RoundedCornerShape(9.dp))
-                        .combinedClickable(
-                            enabled = controller.phase == CameraController.Phase.ready && !controller.isApplyingPreset,
-                            onClick = { controller.applyPreset(index) },
-                            onLongClick = { menuFor = index },
-                        )
-                        .padding(horizontal = 14.dp, vertical = 11.dp),
-                )
-                DropdownMenu(expanded = menuFor == index, onDismissRequest = { menuFor = -1 }) {
-                    DropdownMenuItem(text = { Text("Переименовать…") }, onClick = {
-                        newName = preset.name
-                        renaming = index
-                        menuFor = -1
-                    })
-                    DropdownMenuItem(text = { Text("Удалить") }, onClick = {
-                        controller.deletePreset(index)
-                        menuFor = -1
-                    })
-                }
-            }
-        }
+        // одна кнопка вместо ряда: много пресетов не наезжают на строку состояния
+        PresetButton(controller, screen, Modifier.onGloballyPositioned { screen.presetButtonLeft = it.positionInRoot().x })
         Box(
             Modifier.size(44.dp).background(PanelLight, RoundedCornerShape(9.dp))
-                .clickable(enabled = controller.phase == CameraController.Phase.ready) { controller.savePreset() },
+                .semantics { contentDescription = "Новый пресет" }
+                .clickable(enabled = controller.phase == CameraController.Phase.ready) {
+                    screen.closeOverlays()
+                    screen.newPresetOpen = true
+                },
             contentAlignment = Alignment.Center,
         ) {
-            // сохранить пресет: звезда с плюсом
+            // сохранить текущие настройки новым пресетом — сразу с именем: звезда с плюсом
             TopBarIcon(TopBarGlyph.savePreset)
         }
         Box(
@@ -826,15 +848,6 @@ private fun TopBar(controller: CameraController, screen: ScreenState) {
         ) {
             TopBarIcon(TopBarGlyph.settings)
         }
-    }
-    if (renaming >= 0) {
-        AlertDialog(
-            onDismissRequest = { renaming = -1 },
-            title = { Text("Название пресета") },
-            text = { OutlinedTextField(newName, { newName = it }, singleLine = true) },
-            confirmButton = { TextButton({ controller.renamePreset(renaming, newName); renaming = -1 }) { Text("Сохранить") } },
-            dismissButton = { TextButton({ renaming = -1 }) { Text("Отмена") } },
-        )
     }
 }
 
@@ -1018,7 +1031,7 @@ private fun HistogramRow(figures: List<Triple<String, String, Boolean>>) {
 
 /** Настройки программы (кнопка ⚙). */
 @Composable
-private fun SettingsPanel(controller: CameraController, modifier: Modifier, onDebug: () -> Unit) {
+private fun SettingsPanel(controller: CameraController, modifier: Modifier, onDebug: () -> Unit, onPresets: () -> Unit) {
     val prefs = controller.prefs
     var destination by remember { mutableStateOf(prefs.destination) }
     var reviewEnabled by remember { mutableStateOf(prefs.reviewEnabled) }
@@ -1112,6 +1125,13 @@ private fun SettingsPanel(controller: CameraController, modifier: Modifier, onDe
         } else {
             Text("Камера ещё не подключалась по Wi-Fi", color = Secondary, fontSize = 14.sp)
         }
+        Spacer(Modifier.height(8.dp))
+        Row(Modifier.fillMaxWidth().clickable(onClick = onPresets).padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("Пресеты…", color = Color.White, fontSize = 16.sp, modifier = Modifier.weight(1f))
+            Text("›", color = Accent, fontSize = 22.sp)
+        }
+        Text("Имена, порядок и что меняет каждый пресет. То же — долгое нажатие на кнопку пресетов вверху.",
+            color = Secondary, fontSize = 13.sp)
         Spacer(Modifier.height(8.dp))
         Row(Modifier.fillMaxWidth().clickable(onClick = onDebug).padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("Отладка", color = Color.White, fontSize = 16.sp, modifier = Modifier.weight(1f))

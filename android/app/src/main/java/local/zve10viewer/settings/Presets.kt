@@ -52,14 +52,9 @@ object PresetCatalog {
         return Preset(name, values)
     }
 
-    /** Группы окна пресетов — как во «Всех настройках»; вместе — ровно настройки каталога. */
-    val groups: List<Pair<String, List<SettingID>>> = listOf(
-        "Экспозиция" to listOf(SettingID.shutter, SettingID.aperture, SettingID.iso, SettingID.exposureComp,
-            SettingID.metering, SettingID.dro),
-        "Цвет и картинка" to listOf(SettingID.whiteBalance, SettingID.colorTemperature, SettingID.wbShiftAB,
-            SettingID.wbShiftGM, SettingID.creativeStyle, SettingID.pictureProfile),
-        "Фокус" to listOf(SettingID.focusMode, SettingID.focusArea),
-    )
+    /** Группы окна пресетов — как во «Всех настройках», только настройки каталога: экспозиция, цвет, фокус. */
+    val groups: List<Pair<String, List<SettingID>>> = listOf(SettingGroup.exposure, SettingGroup.color, SettingGroup.focus)
+        .map { group -> group.title to group.settings.filter { it in order } }
 
     /** Меняет ли пресет настройку: значение есть и не выключено. */
     fun includes(preset: Preset, id: SettingID): Boolean = id in preset.values && id !in preset.skip
@@ -152,12 +147,8 @@ object PresetCatalog {
         return presets.toMutableList().also { it.add(to, it.removeAt(from)) }
     }
 
-    /** Имя нового пресета: «Пресет N» по месту, которое он займёт; занято — следующее свободное. */
-    fun newName(presets: List<Preset>): String {
-        var n = presets.size + 1
-        while (presets.any { it.name == "Пресет $n" }) n++
-        return "Пресет $n"
-    }
+    /** Имя нового пресета, если его не назвали: «Пресет N» по месту, которое он займёт, — как на Mac. */
+    fun newName(presets: List<Preset>): String = "Пресет ${presets.size + 1}"
 
     /** Имя копии: «Вечер — копия». */
     fun copyName(name: String): String = "$name — копия"
