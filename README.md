@@ -47,6 +47,10 @@
 |---|---|
 | ![Mac: меню Fn с балансом белого](docs/screenshots/2-fn.png) | ![Android: меню Fn](docs/screenshots/7-android-fn.png) |
 
+| Окно пресетов на планшете |
+|---|
+| ![Android: окно пресетов](docs/screenshots/8-android-presets.png) |
+
 | Все настройки | Фоторежим | Просмотр после съёмки |
 |---|---|---|
 | ![Все настройки](docs/screenshots/3-all.png) | ![Фоторежим](docs/screenshots/4-photo.png) | ![Просмотр снимка](docs/screenshots/5-review.png) |
