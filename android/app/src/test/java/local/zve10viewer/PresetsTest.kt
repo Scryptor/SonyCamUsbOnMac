@@ -200,6 +200,9 @@ class PresetsTest {
         assertNull(PresetCatalog.moved(listOf(a, b, c), -1, 0))
         assertEquals("Пресет 1", PresetCatalog.newName(emptyList()))
         assertEquals("Пресет 3", PresetCatalog.newName(listOf(a, b)))
+        // после удаления «Пресет 2» уже есть — имя не повторяется
+        assertEquals("Пресет 3", PresetCatalog.newName(listOf(Preset("Пресет 2", emptyMap()))))
+        assertEquals("Пресет 4", PresetCatalog.newName(listOf(Preset("Пресет 3", emptyMap()), Preset("Пресет 2", emptyMap()))))
         assertEquals("Вечер — копия", PresetCatalog.copyName("Вечер"))
     }
 

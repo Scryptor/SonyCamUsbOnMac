@@ -139,3 +139,18 @@ import Testing
     // свойства нет — выбирать не из чего
     #expect(PresetCatalog.options(.shutter, nil, preset).isEmpty)
 }
+
+@Test func newNameTakesTheNextFreeNumber() {
+    #expect(PresetCatalog.newName([]) == "Пресет 1")
+    #expect(PresetCatalog.newName([Preset(name: "Вечер", values: [:])]) == "Пресет 2")
+    // после удаления «Пресет 2» уже есть — имя не повторяется
+    #expect(PresetCatalog.newName([Preset(name: "Пресет 2", values: [:])]) == "Пресет 3")
+    #expect(PresetCatalog.newName([Preset(name: "Пресет 3", values: [:]), Preset(name: "Пресет 2", values: [:])]) == "Пресет 4")
+}
+
+@Test func unknownSettingInValuesDoesNotLoseThePreset() throws {
+    let future = #"[{"name":"Новый","values":{"iso":400,"somethingNew":7}},{"name":"Второй","values":{"aperture":280}}]"#
+    let presets = try JSONDecoder().decode([Preset].self, from: Data(future.utf8))
+    #expect(presets.map(\.name) == ["Новый", "Второй"])
+    #expect(presets[0].values == [.iso: 400])
+}

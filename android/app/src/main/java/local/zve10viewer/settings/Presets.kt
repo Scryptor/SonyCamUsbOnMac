@@ -147,8 +147,13 @@ object PresetCatalog {
         return presets.toMutableList().also { it.add(to, it.removeAt(from)) }
     }
 
-    /** Имя нового пресета, если его не назвали: «Пресет N» по месту, которое он займёт, — как на Mac. */
-    fun newName(presets: List<Preset>): String = "Пресет ${presets.size + 1}"
+    /** Имя нового пресета, если его не назвали: «Пресет N» по месту, которое он займёт; занят такой — следующий номер, как на Mac. */
+    fun newName(presets: List<Preset>): String {
+        val taken = presets.map { it.name }.toSet()
+        var number = presets.size + 1
+        while ("Пресет $number" in taken) number++
+        return "Пресет $number"
+    }
 
     /** Имя копии: «Вечер — копия». */
     fun copyName(name: String): String = "$name — копия"

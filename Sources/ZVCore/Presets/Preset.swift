@@ -20,7 +20,9 @@ public struct Preset: Codable, Equatable, Sendable {
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         name = try c.decode(String.self, forKey: .name)
-        values = try c.decode([SettingID: Int64].self, forKey: .values)
+        // незнакомую настройку из будущей версии пропускаем: иначе не прочитался бы весь список пресетов
+        values = Dictionary(uniqueKeysWithValues: try c.decode([String: Int64].self, forKey: .values)
+            .compactMap { key, value in SettingID(rawValue: key).map { ($0, value) } })
         // у пресетов до окна пресетов поля нет; незнакомую настройку из будущей версии пропускаем
         skip = Set((try c.decodeIfPresent([String].self, forKey: .skip) ?? []).compactMap(SettingID.init(rawValue:)))
     }
@@ -67,6 +69,14 @@ public enum PresetCatalog {
             }
         }
         return Preset(name: name, values: values)
+    }
+
+    /// Имя нового пресета, если его не назвали: «Пресет N» по месту, которое он займёт; занят такой — следующий номер.
+    public static func newName(_ presets: [Preset]) -> String {
+        let taken = Set(presets.map(\.name))
+        var number = presets.count + 1
+        while taken.contains("Пресет \(number)") { number += 1 }
+        return "Пресет \(number)"
     }
 
     /// Что пресет применит: без выключенных настроек и без цветовой температуры, если баланс белого он ставит

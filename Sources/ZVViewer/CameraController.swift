@@ -678,7 +678,7 @@ final class CameraController {
     // MARK: - Пресеты
 
     /// Имя нового пресета, если его не назвали.
-    var nextPresetName: String { "Пресет \(presets.count + 1)" }
+    var nextPresetName: String { PresetCatalog.newName(presets) }
 
     /// Какой пресет сейчас стоит на камере: первый, у которого всё, что он ставит, совпадает; nil — никакой.
     var activePresetIndex: Int? { presets.firstIndex { PresetCatalog.matches($0, properties) } }
@@ -697,6 +697,8 @@ final class CameraController {
     func applyPreset(_ index: Int) {
         guard presets.indices.contains(index), phase == .ready, !isApplyingPreset, let session else { return }
         let preset = presets[index]
+        // всё выключено — писать нечего, а «применено 0 из 0» ничего не объясняет
+        guard !PresetCatalog.effective(preset).isEmpty else { return showStatus("«\(preset.name)» ничего не меняет") }
         isApplyingPreset = true
         statusMessage = "Применяю «\(preset.name)»…"
         Task { [weak self] in
