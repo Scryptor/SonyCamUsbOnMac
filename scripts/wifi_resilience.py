@@ -135,9 +135,12 @@ def run_scenario(app, key, log):
         ctl("/set", action["set"])
     end_impair = t0 + length
     restored = False
+    during = None
     while time.monotonic() < end_impair + after:
         now = time.monotonic()
         if not restored and now >= end_impair:
+            # точные паузы между кадрами за время порчи — по самому прокси, а не по опросу раз в 0,25 с
+            during = ctl("/state")
             ctl("/profile", {"name": "good"})
             restored = True
         p = ctl("/state")
@@ -146,7 +149,10 @@ def run_scenario(app, key, log):
         time.sleep(0.25)
     log.write(json.dumps({"key": key, "timeline": timeline}, ensure_ascii=False) + "\n")
     log.flush()
-    return summarize(key, title, timeline, length)
+    result = summarize(key, title, timeline, length)
+    if during and length:
+        result.update(gap_p95_ms=during["gap_ms_p95"], gap_p99_ms=during["gap_ms_p99"], gap_max_ms=during["gap_ms_max"])
+    return result
 
 
 def summarize(key, title, tl, length):
