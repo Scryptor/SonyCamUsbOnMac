@@ -83,10 +83,26 @@ try:
     check("в фото доступен формат снимка", setting(s, "fileFormat")["writable"], setting(s, "fileFormat")["label"])
     shot("p01-photo")
 
-    # 3. Снимок с просмотром загруженного файла
+    # 3. Снимок с просмотром: появляется, когда камера сработала, и идёт ровно заданное время с этого момента;
+    # скачался раньше — встаёт на место кадра, нет (RAW+JPEG по Wi-Fi) — просмотр закрывается вовремя, а загрузку
+    # показывает кнопка спуска
     code, _ = act(action="capture")
     check("снимок без confirm отклоняется", code == 409)
     act(action="capture", confirm=True)
+    s, ok = wait(lambda s: s["review"] is not None, timeout=6)
+    check("просмотр появился, когда камера сработала", ok and s["review"]["timed"],
+          json.dumps(s["review"], ensure_ascii=False)[:120] if s and s["review"] else "нет просмотра")
+    shot("p02-review")
+    shown_at, swapped = time.time(), False
+    while time.time() - shown_at < 8:
+        rv = state()["review"]
+        if rv is None:
+            break
+        swapped |= rv["source"] == "Загруженный снимок" and rv["hasImage"]
+        time.sleep(0.1)
+    lasted = time.time() - shown_at
+    check("просмотр идёт заданное время с момента спуска", abs(lasted - 2) < 0.8,
+          f"{lasted:.1f} с при 2 с; скачанный снимок {'встал на место кадра' if swapped else 'не успел — загрузку показывает кнопка'}")
     s, ok = wait(lambda s: not s["capturing"] and len(s["shots"]) > shots_before, timeout=25)
     check("снимок сделан и скачан", ok, s["status"] or "")
     files = s["shots"][0]["files"] if s["shots"] else []
@@ -98,12 +114,6 @@ try:
             check("JPEG настоящий", head[:2] == b"\xff\xd8", os.path.basename(f))
         if f.upper().endswith(".ARW"):
             check("ARW настоящий (TIFF)", head == b"II*\x00", os.path.basename(f))
-    rv = s["review"]
-    check("просмотр показывает загруженный снимок", rv and rv["source"] == "Загруженный снимок" and rv["hasImage"] and rv["timed"],
-          json.dumps(rv, ensure_ascii=False)[:120] if rv else "нет просмотра")
-    shot("p02-review")
-    s, ok = wait(lambda s: s["review"] is None, timeout=4)
-    check("просмотр закрылся сам через ~2 с", ok)
 
     # 4. Просмотр кадра с камеры, закрытие вручную
     pref("reviewSource", "camera")
