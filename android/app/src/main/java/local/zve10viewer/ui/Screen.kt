@@ -157,6 +157,8 @@ class ScreenState {
     /** Где верхняя панель и кнопка пресетов (по горизонтали, в точках экрана) — список встаёт под кнопкой. */
     var topBarLeft by mutableFloatStateOf(0f)
     var presetButtonLeft by mutableFloatStateOf(0f)
+    /** Левый край строки состояния (0 — ещё не разложена): кнопка пресетов до неё не дотягивается. */
+    var statusPillLeft by mutableFloatStateOf(0f)
 
     /**
      * Цифровое увеличение видео — свойство экрана: переживает фото / видео / S&Q, запись, смену качества превью и
@@ -491,7 +493,11 @@ private fun LiveScreen(controller: CameraController, screen: ScreenState) {
             }, onPresets = { screen.openPresets(controller.activePresetIndex ?: 0) })
         }
         if (screen.presetsOpen) PresetsOverlay(controller, screen)
-        if (screen.newPresetOpen) NewPresetDialog(controller) { screen.newPresetOpen = false }
+        // касания в окошке — в своём окне, экран их не видит: закрыли — считаем касанием, элементы не исчезают сразу
+        if (screen.newPresetOpen) NewPresetDialog(controller) {
+            screen.newPresetOpen = false
+            screen.noteActivity()
+        }
         controller.review?.let { ReviewOverlay(controller, it) }
         if (screen.galleryShot != null) GalleryOverlay(controller, screen)
         if (hint) {
@@ -636,7 +642,8 @@ private fun Controls(controller: CameraController, screen: ScreenState, feedback
 @Composable
 private fun StatusPill(controller: CameraController, screen: ScreenState) {
     Row(
-        Modifier.background(Panel, RoundedCornerShape(14.dp))
+        Modifier.onGloballyPositioned { screen.statusPillLeft = it.positionInRoot().x }
+            .background(Panel, RoundedCornerShape(14.dp))
             // долгое нажатие — панель отладки; короткие по надписям — подсказки, как раньше
             .onLongPress {
                 screen.pillInfo = null

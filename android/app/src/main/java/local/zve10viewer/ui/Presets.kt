@@ -1,5 +1,6 @@
 package local.zve10viewer.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -87,8 +88,13 @@ private const val EMPTY_HINT = "Пресетов пока нет. «Сохран
 @Composable
 fun PresetButton(controller: CameraController, screen: ScreenState, modifier: Modifier = Modifier) {
     val active = controller.activePresetIndex
+    // длинное имя не дотягивает панель до строки состояния справа (она шире во время записи): справа от кнопки ещё ☆+
+    // и ⚙ — 106 dp, и зазор 12
+    val room = with(LocalDensity.current) {
+        if (screen.statusPillLeft > 0f) (screen.statusPillLeft - screen.presetButtonLeft).toDp() - 118.dp else 320.dp
+    }
     Row(
-        modifier.height(44.dp).widthIn(max = 320.dp)
+        modifier.height(44.dp).widthIn(max = room.coerceIn(120.dp, 320.dp))
             .background(if (screen.presetMenuOpen) Accent else PanelLight, RoundedCornerShape(9.dp))
             .combinedClickable(onClick = { screen.togglePresetMenu() }, onLongClick = { screen.openPresets(active ?: 0) })
             .padding(horizontal = 14.dp),
@@ -199,24 +205,26 @@ fun NewPresetDialog(controller: CameraController, onDismiss: () -> Unit) {
 }
 
 /**
- * Окно пресетов поверх экрана, как «Настройки». Слева — список: номер, имя, кратко значения, галочка у того, что стоит
+ * Окно пресетов поверх экрана, как «Настройки». Слева — список: номер, имя, кратко значения, галочка у каждого, что стоит
  * на камере; «Выше» / «Ниже» двигают выбранный; «+ Сохранить текущие» — новый пресет с камеры. Справа — выбранный: имя
  * (правится на месте), «Применить», «Взять с камеры», «Дублировать», «Удалить» и его настройки группами. Всё сохраняется
- * сразу, кнопки «Сохранить» нет. Касание мимо панели закрывает окно.
+ * сразу, кнопки «Сохранить» нет. Закрывают ×, «Назад» и касание мимо панели.
  */
 @Composable
 fun PresetsOverlay(controller: CameraController, screen: ScreenState) {
     val presets = controller.presets
     val selected = screen.presetsSelected.coerceIn(0, maxOf(0, presets.lastIndex))
     val online = controller.phase == CameraController.Phase.ready
-    // новый пресет или копия: имя сразу выделено — можно печатать
+    // новый пресет с камеры: имя сразу выделено — можно печатать
     var focusName by remember { mutableStateOf(false) }
+    BackHandler { screen.presetsOpen = false }
     Box(
         Modifier.fillMaxSize().background(Color(0x99000000)).pointerInput(Unit) { detectTapGestures { screen.presetsOpen = false } },
         contentAlignment = Alignment.Center,
     ) {
+        // непрозрачная: под окном на экране ожидания — крупный белый текст, он просвечивал бы сквозь значения
         Column(
-            Modifier.fillMaxWidth(0.92f).fillMaxHeight(0.92f).background(Color(0xF22C2C2E), RoundedCornerShape(18.dp))
+            Modifier.fillMaxWidth(0.92f).fillMaxHeight(0.92f).background(Color(0xFF2C2C2E), RoundedCornerShape(18.dp))
                 .pointerInput(Unit) { detectTapGestures { } },
         ) {
             Row(Modifier.fillMaxWidth().padding(start = 24.dp, end = 12.dp, top = 10.dp, bottom = 6.dp),
@@ -426,7 +434,8 @@ private fun PresetSettingRow(controller: CameraController, index: Int, preset: P
     // включить можно, если значение есть или его есть откуда взять
     val canSwitch = !onlyManual && (value != null || PresetCatalog.initialValue(id, controller.properties) != null)
     val note = when {
-        onlyManual -> "только при «Цвет. темп.»"
+        // неразрывный пробел: «Цвет. темп.» не разрывается между строками узкой колонки
+        onlyManual -> "только при «Цвет. темп.»"
         online && value != null && options.isEmpty() -> "камера сейчас не даёт выбрать"
         else -> null
     }
