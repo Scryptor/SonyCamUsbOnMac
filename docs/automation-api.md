@@ -91,7 +91,7 @@ open "/Applications/ZV-E10 Viewer.app" --args --automation
 | `status` | строка или `null` | сообщение под пресетами, например «Сохранено: …» |
 | `review` | объект или `null` | просмотр снимка после съёмки: `title`, `source` («Загруженный снимок», «Кадр с камеры»), `timed` (закроется сам), `hasImage`, `files` (пути) |
 | `shots` | массив | снимки и стоп-кадры сессии, новые сначала: `title`, `files` |
-| `prefs` | объект | настройки программы: `destination`, `folder`, `reviewEnabled`, `reviewSeconds`, `reviewSource`, `autoHide`, `autoHideSeconds`, `wifiAdaptiveQuality` |
+| `prefs` | объект | настройки программы: `destination`, `folder`, `reviewEnabled`, `reviewSeconds`, `reviewSource`, `autoHide`, `autoHideSeconds`, `wifiAdaptiveQuality`, `tallyEnabled`, `tallyWidth`, `tallyOpacity`, `tallyBlink` |
 | `cameraDestination` | число или `null` | куда камера сохраняет снимки (`0xD222`): 1 — Mac, 16 — карта, 17 — оба |
 | `presets` | массив | `name` и `values` — словарь «настройка → значение» |
 | `ui` | объект | что на экране: `fnOpen`, `allSettingsOpen`, `selected`, `group`, `editing` (если открыта строка), `info` (если открыта подсказка из плашки: `connection`, `frames` или `slowMotion`), `histogram`, `histogramPosition` — где гистограмма (`x`, `y` — доли свободного места; `null` — на месте по умолчанию), `controlsHidden`, `manualHidden`, `debug` — открыта ли панель отладки, `debugTab` — её вкладка, `gallery` — открытая галерея (`index` снимка в `shots`, `title`) или `null`, `zoom` — цифровое увеличение (`factor`, `centerX`, `centerY` — точка кадра в центре экрана, доли), `statusBar` — строка состояния (`on`, `pinned`) |
@@ -201,6 +201,10 @@ open "/Applications/ZV-E10 Viewer.app" --args --automation
 | `autoHideSeconds` | `1`…`30` |
 | `wifiEnabled` | `true`, `false` |
 | `wifiAdaptiveQuality` | `true`, `false` — снижать качество превью при слабом Wi-Fi |
+| `tallyEnabled` | `true`, `false` — красная рамка вокруг картинки во время записи |
+| `tallyWidth` | `1`…`12` — её толщина, pt |
+| `tallyOpacity` | `0.3`…`1` — её яркость |
+| `tallyBlink` | `true`, `false` — мигать |
 
 Неизвестный ключ или недопустимое значение — 409.
 
