@@ -85,6 +85,21 @@ class SessionTest {
         session.close()
     }
 
+    @Test fun presetWritesOnlyWhatItApplies() = runTest {
+        val camera = FakeCamera().apply { props += FakeCamera.Prop(SonyProp.COLOR_TEMP, PtpType.UINT16, 5600, range = PropertyRange(2500, 9900, 100)) }
+        val session = ready(camera, this)
+        // ISO выключен, температура при «Дневном» не действует — их не пишем
+        val preset = Preset("День", mapOf(SettingID.whiteBalance to 4L, SettingID.colorTemperature to 3200L, SettingID.wbShiftAB to 196L,
+            SettingID.iso to 400L), skip = setOf(SettingID.iso))
+        val before = camera.sent.size
+        val result = session.apply(preset)
+        assertEquals(listOf(SettingID.whiteBalance, SettingID.wbShiftAB), result.applied)
+        assertEquals(emptyList<SettingID>(), result.skipped)
+        val written = camera.sent.drop(before).filter { it.first == SonyOp.SET_EXT_PROP_VALUE }.map { it.second[0].toInt() }
+        assertEquals(listOf(SonyProp.WHITE_BALANCE, SonyProp.AB_SHIFT), written)
+        session.close()
+    }
+
     @Test fun presetsSurviveJson() {
         val presets = listOf(Preset("Вечер", mapOf(SettingID.iso to 400L, SettingID.shutter to 0x10032L)))
         assertEquals(presets, PresetCatalog.fromJson(PresetCatalog.toJson(presets)))
