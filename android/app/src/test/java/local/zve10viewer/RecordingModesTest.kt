@@ -3,7 +3,9 @@ package local.zve10viewer
 import local.zve10viewer.settings.CaptureMode
 import local.zve10viewer.settings.FnSlot
 import local.zve10viewer.settings.RecordingMode
+import local.zve10viewer.settings.RecordingModeDriver
 import local.zve10viewer.settings.RecordingModes
+import local.zve10viewer.settings.RecordingStep
 import local.zve10viewer.settings.SettingCatalog
 import local.zve10viewer.settings.SettingID
 import org.junit.Assert.assertEquals
@@ -51,17 +53,83 @@ class RecordingModesTest {
         assertEquals(SettingID.fileFormat, SettingCatalog.infoLine(CaptureMode.photo).last())
     }
 
-    @Test fun recordingModePlanAccountsForAFormatWriteInFlight() {
-        val hd100 = RecordingMode(9, 0x1D)
-        val fourK60 = RecordingMode(8, 0x24)
-        // формат уже тот — только параметры
-        assertEquals(RecordingModes.Plan.settingOnly, RecordingModes.plan(hd100, confirmedFormat = 9, requestedFormat = null))
-        // другой формат — сначала формат
-        assertEquals(RecordingModes.Plan.formatThenSetting, RecordingModes.plan(hd100, confirmedFormat = 8, requestedFormat = null))
-        // передумали, пока камера переключается в HD: камера ещё в 4K, но формат HD уже в пути — снова формат 4K
-        assertEquals(RecordingModes.Plan.formatThenSetting, RecordingModes.plan(fourK60, confirmedFormat = 8, requestedFormat = 9))
-        // нужный формат уже в пути — дождаться его, потом параметры
-        assertEquals(RecordingModes.Plan.waitForFormat, RecordingModes.plan(hd100, confirmedFormat = 8, requestedFormat = 9))
+    private val fourKAllowed = listOf<Long>(0x21, 0x24)
+    private val hdAllowed = listOf<Long>(0x04, 0x19, 0x05, 0x1B, 0x1D, 0x1F)
+
+    @Test fun recordingStepLooksAtWhatTheCameraHasNow() {
+        val hd25 = RecordingMode(9, 0x1B)
+        // камера в 4K — сначала формат
+        assertEquals(RecordingStep.WriteFormat(9), RecordingModes.nextStep(hd25, 8, 0x21, fourKAllowed))
+        // формат уже HD, а параметры камера показывает прежние (код 4K) — пишем нужные
+        assertEquals(RecordingStep.WriteSetting(0x1B), RecordingModes.nextStep(hd25, 9, 0x21, hdAllowed))
+        // формат HD, а список параметров ещё от 4K — ждём
+        assertEquals(RecordingStep.Wait, RecordingModes.nextStep(hd25, 9, 0x21, fourKAllowed))
+        assertEquals(RecordingStep.Done, RecordingModes.nextStep(hd25, 9, 0x1B, hdAllowed))
+        // камера без свойства формата — только параметры
+        assertEquals(RecordingStep.WriteSetting(0x1B), RecordingModes.nextStep(hd25, null, 0x1D, hdAllowed))
+    }
+
+    @Test fun recordingModeDriverRetriesASkippedWriteThenGivesUp() {
+        // камера отвечает «готово», но пропускает запись, пришедшую, пока она применяет прошлую, — повторяем, но не вечно
+        val driver = RecordingModeDriver()
+        driver.choose(RecordingMode(9, 0x1D))
+        repeat(RecordingModeDriver.MAX_ATTEMPTS) {
+            assertEquals(RecordingStep.WriteFormat(9), driver.next(8, 0x21, fourKAllowed))
+        }
+        assertEquals(null, driver.next(8, 0x21, fourKAllowed))
+        assertEquals(null, driver.target)
+    }
+
+    @Test fun recordingModeDriverFollowsTheLatestChoice() {
+        val driver = RecordingModeDriver()
+        driver.choose(RecordingMode(8, 0x24))
+        assertEquals(RecordingStep.WriteFormat(8), driver.next(9, 0x1D, hdAllowed))
+        // передумали, пока камера переключалась в 4K (параметры она показывает прежние): формат обратно, потом параметры
+        driver.choose(RecordingMode(9, 0x1B))
+        assertEquals(RecordingStep.WriteFormat(9), driver.next(8, 0x1D, fourKAllowed))
+        assertEquals(RecordingStep.WriteSetting(0x1B), driver.next(9, 0x1D, hdAllowed))
+        assertEquals(null, driver.next(9, 0x1B, hdAllowed))
+        assertEquals(null, driver.target)
+    }
+
+    @Test fun recordingModeDriverStartsCountingAgainAfterANewChoice() {
+        val driver = RecordingModeDriver()
+        driver.choose(RecordingMode(9, 0x1D))
+        assertEquals(RecordingStep.WriteFormat(9), driver.next(8, 0x21, fourKAllowed))
+        assertEquals(RecordingStep.WriteFormat(9), driver.next(8, 0x21, fourKAllowed))
+        driver.choose(RecordingMode(9, 0x1B))
+        repeat(RecordingModeDriver.MAX_ATTEMPTS) {
+            assertEquals(RecordingStep.WriteFormat(9), driver.next(8, 0x21, fourKAllowed))
+        }
+        assertEquals(null, driver.next(8, 0x21, fourKAllowed))
+    }
+
+    @Test fun recordingModeDriverWaitsForTheCameraButNotForever() {
+        val driver = RecordingModeDriver()
+        driver.choose(RecordingMode(9, 0x1B))
+        repeat(RecordingModeDriver.MAX_WAITS) {
+            assertEquals(RecordingStep.Wait, driver.next(9, 0x21, fourKAllowed))
+        }
+        assertEquals(null, driver.next(9, 0x21, fourKAllowed))
+    }
+
+    @Test fun formatChoiceKeepsTheFrameRateWhenItCan() {
+        val modes = RecordingModes.options(listOf(8, 9), 8, fourKAllowed)
+        // 4K 25p 100M → HD: те же 25p с самым высоким битрейтом
+        assertEquals("HD 25p 50M", RecordingModes.closest(RecordingMode(8, 0x21), 9, modes)?.label)
+        // HD 100p → 4K: 100p в 4K нет — первый режим 4K
+        assertEquals("4K 25p 100M", RecordingModes.closest(RecordingMode(9, 0x1D), 8, modes)?.label)
+        // формат тот же — режим не меняется
+        assertEquals("4K 25p 60M", RecordingModes.closest(RecordingMode(8, 0x24), 8, modes)?.label)
+        assertEquals("HD 100p 100M", RecordingModes.closest(null, 9, modes)?.label)
+    }
+
+    @Test fun recordingModeLabelHidesParametersOfTheOtherFormat() {
+        // после смены формата камера ещё показывает параметры прежнего: «HD 25p 100M» не бывает — только формат
+        assertEquals("HD", RecordingModes.label(9, 0x21, hdAllowed))
+        assertEquals("4K 25p 100M", RecordingModes.label(8, 0x21, fourKAllowed))
+        // список параметров не пришёл — как раньше
+        assertEquals("4K 25p 100M", RecordingModes.label(8, 0x21, emptyList()))
     }
 
     @Test fun recordingModeStepsFromTheLastRequest() {

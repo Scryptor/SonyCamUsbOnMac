@@ -61,8 +61,8 @@ final class CameraController {
     @ObservationIgnored private var reviewTask: Task<Void, Never>?
     @ObservationIgnored private var temperatureTask: Task<Void, Never>?
     @ObservationIgnored private var recordingModeTask: Task<Void, Never>?
-    /// Последний запрошенный режим записи — от него считаются быстрые шаги колесом.
-    @ObservationIgnored private var recordingModeTarget: RecordingMode?
+    /// Ведёт камеру к выбранному режиму записи; от его цели считаются быстрые шаги колесом.
+    @ObservationIgnored private var recordingDriver = RecordingModeDriver()
 
     /// Последний кадр как пришёл с камеры (для API автоматизации).
     @ObservationIgnored private(set) var lastJPEG: Data?
@@ -157,7 +157,8 @@ final class CameraController {
             return WhiteBalanceTemperature.caption(WhiteBalanceTemperature.reading(whiteBalance: whiteBalance, colorTemperature: kelvin))
         case .movieRecordingSetting:
             return RecordingModes.label(format: property(.movieFileFormat)?.current.intValue,
-                                        setting: property(.movieRecordingSetting)?.current.intValue)
+                                        setting: property(.movieRecordingSetting)?.current.intValue,
+                                        allowed: allowedRecordingSettings)
         default: return ValueFormatter.label(id, property(id))
         }
     }
@@ -194,53 +195,85 @@ final class CameraController {
         return RecordingMode(format: format, setting: setting)
     }
 
+    /// Параметры записи, которые камера разрешает для текущего формата.
+    private var allowedRecordingSettings: [Int64] {
+        property(.movieRecordingSetting).map { SettingOptions.options(.movieRecordingSetting, $0).map(\.value) } ?? []
+    }
+
     /// Выбор в ленте: обычная настройка — запись значения, режим записи — формат и параметры вместе.
     func choose(_ id: SettingID, _ value: Int64) {
         if id == .movieRecordingSetting, value > 0xFF {
             setRecordingMode(RecordingMode(code: value))
+        } else if id == .movieFileFormat,
+                  let mode = RecordingModes.closest(to: recordingDriver.target ?? currentRecordingMode, format: value, in: recordingModes) {
+            // один формат без параметров камера оставила бы с параметрами прежнего — берём ближайший режим
+            setRecordingMode(mode)
         } else {
             request(id, value)
         }
     }
 
-    /// Формат и параметры записи. Параметры камера принимает только для текущего формата: если формат другой,
-    /// сначала он, и ждём, пока камера подтвердит его и откроет нужные параметры.
+    /// Формат и параметры записи. Камера отвечает «готово», но пропускает запись, пришедшую, пока она применяет прошлую,
+    /// поэтому режим доводится по шагам: по одной записи, после каждой — смотрим, что на камере. Новый выбор, пока идёт
+    /// прошлый, подхватывается на следующем шаге.
     func setRecordingMode(_ mode: RecordingMode) {
-        recordingModeTask?.cancel()
-        let plan = RecordingModes.plan(to: mode, confirmedFormat: property(.movieFileFormat)?.current.intValue,
-                                       requestedFormat: targets[SonyProp.movieFileFormat])
-        switch plan {
-        case .settingOnly:
-            guard isWritable(.movieRecordingSetting) else { return }
-            recordingModeTarget = mode
-            request(.movieRecordingSetting, mode.setting)
-            return
-        case .formatThenSetting:
-            guard isWritable(.movieFileFormat) else { return }
-            request(.movieFileFormat, mode.format)
-        case .waitForFormat:
-            break
-        }
-        recordingModeTarget = mode
+        guard isWritable(.movieRecordingSetting) || isWritable(.movieFileFormat) else { return }
+        recordingDriver.choose(mode)
         pending.insert(.movieRecordingSetting)
-        recordingModeTask = Task { [weak self] in
-            for _ in 0..<50 {
-                try? await Task.sleep(for: .milliseconds(100))
-                guard let self, !Task.isCancelled else { return }
-                // формат подтверждён, и ни одна запись формата не в пути (иначе параметры уйдут раньше неё)
-                guard self.targets[SonyProp.movieFileFormat] == nil,
-                      self.property(.movieFileFormat)?.current.intValue == mode.format,
-                      let setting = self.property(.movieRecordingSetting),
-                      SettingOptions.options(.movieRecordingSetting, setting).contains(where: { $0.value == mode.setting }),
-                      self.isWritable(.movieRecordingSetting) else { continue }
-                if setting.current.intValue == mode.setting {
-                    self.pending.remove(.movieRecordingSetting)
-                } else {
-                    self.request(.movieRecordingSetting, mode.setting)
-                }
-                return
+        guard recordingModeTask == nil else { return }
+        recordingModeTask = Task { [weak self] in await self?.driveRecordingMode() }
+    }
+
+    private func driveRecordingMode() async {
+        defer {
+            // отменили при отключении — teardown уже всё сбросил (и, может быть, начат новый сеанс)
+            if !Task.isCancelled {
+                recordingModeTask = nil
+                recordingDriver.cancel()
+                if targets[SonyProp.movieRecordingSetting] == nil { pending.remove(.movieRecordingSetting) }
             }
-            self?.pending.remove(.movieRecordingSetting)
+        }
+        while !Task.isCancelled {
+            // прошлая запись ещё ждёт подтверждения камеры
+            if targets[SonyProp.movieFileFormat] != nil || targets[SonyProp.movieRecordingSetting] != nil {
+                try? await Task.sleep(for: .milliseconds(100))
+                continue
+            }
+            guard let step = recordingDriver.next(format: property(.movieFileFormat)?.current.intValue,
+                                                   setting: property(.movieRecordingSetting)?.current.intValue,
+                                                   allowed: allowedRecordingSettings) else { return }
+            switch step {
+            case .done:
+                return
+            case .wait:
+                try? await Task.sleep(for: .milliseconds(100))
+            case let .writeFormat(format):
+                guard isWritable(.movieFileFormat) else {
+                    try? await Task.sleep(for: .milliseconds(300))
+                    continue
+                }
+                request(.movieFileFormat, format)
+                await waitForWrite(SonyProp.movieFileFormat)
+                // формат камера подтверждает раньше, чем готова принять следующую запись
+                try? await Task.sleep(for: .milliseconds(500))
+            case let .writeSetting(setting):
+                guard isWritable(.movieRecordingSetting) else {
+                    try? await Task.sleep(for: .milliseconds(300))
+                    continue
+                }
+                request(.movieRecordingSetting, setting)
+                await waitForWrite(SonyProp.movieRecordingSetting)
+            }
+            // запись параметров снимает «ждём» — пока режим не доведён, он ещё в пути
+            if recordingDriver.target != nil { pending.insert(.movieRecordingSetting) }
+        }
+    }
+
+    /// Ждёт, пока запись свойства закончится: камера подтвердила её или время подтверждения вышло.
+    private func waitForWrite(_ code: UInt16) async {
+        for _ in 0..<60 {
+            guard targets[code] != nil else { return }
+            try? await Task.sleep(for: .milliseconds(100))
         }
     }
 
@@ -286,11 +319,10 @@ final class CameraController {
     /// иначе быстрые шаги упирались бы в ожидание камеры.
     func requestStep(_ id: SettingID, offset: Int) {
         if id == .movieRecordingSetting, !recordingModes.isEmpty {
-            // от последнего запроса, пока его запись в пути: иначе быстрые шаги сливаются в один;
-            // запись закончилась (подтверждена или отклонена) — от того, что на камере
+            // от режима, к которому камера ещё идёт: иначе быстрые шаги сливаются в один; дошла или сдалась —
+            // от того, что на камере
             let current = currentRecordingMode
-            let inFlight = pending.contains(.movieRecordingSetting) || pending.contains(.movieFileFormat)
-            let base = inFlight ? (recordingModeTarget ?? current) : current
+            let base = recordingDriver.target ?? current
             let next = RecordingModes.neighbour(of: base, in: recordingModes, offset: offset)
                 ?? (base != current ? RecordingModes.neighbour(of: current, in: recordingModes, offset: offset) : nil)
             if let next { setRecordingMode(next) }
@@ -925,7 +957,8 @@ final class CameraController {
         wifiDirect = false
         wifiTransport = nil
         recordingModeTask?.cancel()
-        recordingModeTarget = nil
+        recordingModeTask = nil
+        recordingDriver.cancel()
         session = nil
         coalescer = nil
         targets = [:]

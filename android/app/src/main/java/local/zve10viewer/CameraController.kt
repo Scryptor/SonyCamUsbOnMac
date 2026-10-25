@@ -25,6 +25,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -40,7 +41,9 @@ import local.zve10viewer.settings.FileNaming
 import local.zve10viewer.settings.LumaHistogram
 import local.zve10viewer.settings.PresetCatalog
 import local.zve10viewer.settings.RecordingMode
+import local.zve10viewer.settings.RecordingModeDriver
 import local.zve10viewer.settings.RecordingModes
+import local.zve10viewer.settings.RecordingStep
 import local.zve10viewer.settings.SettingOption
 import local.zve10viewer.settings.ShootingMode
 import local.zve10viewer.settings.SlowQuick
@@ -170,8 +173,8 @@ class CameraController(private val context: Context, private val scope: Coroutin
     private var reviewJob: Job? = null
     private var temperatureJob: Job? = null
     private var recordingModeJob: Job? = null
-    /** Последний запрошенный режим записи — от него считаются быстрые шаги. */
-    private var recordingModeTarget: RecordingMode? = null
+    /** Ведёт камеру к выбранному режиму записи; от его цели считаются быстрые шаги колесом. */
+    private val recordingDriver = RecordingModeDriver()
     private var statusJob: Job? = null
     private val frameTimes = ArrayDeque<Long>()
     private var lastFrameAt = 0L
@@ -204,7 +207,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
             SettingID.whiteBalance -> ValueFormatter.whiteBalanceLabel(whiteBalance, kelvin)
             SettingID.colorTemperature -> WhiteBalanceTemperature.caption(WhiteBalanceTemperature.reading(whiteBalance, kelvin))
             SettingID.movieRecordingSetting -> RecordingModes.label(property(SettingID.movieFileFormat)?.current?.intValue,
-                property(SettingID.movieRecordingSetting)?.current?.intValue)
+                property(SettingID.movieRecordingSetting)?.current?.intValue, allowedRecordingSettings)
             else -> ValueFormatter.label(id, property(id))
         }
     }
@@ -244,50 +247,84 @@ class CameraController(private val context: Context, private val scope: Coroutin
             return RecordingMode(format, setting)
         }
 
+    /** Параметры записи, которые камера разрешает для текущего формата. */
+    private val allowedRecordingSettings: List<Long>
+        get() = property(SettingID.movieRecordingSetting)
+            ?.let { setting -> SettingOptions.options(SettingID.movieRecordingSetting, setting).map { it.value } } ?: emptyList()
+
     /** Выбор в ленте: обычная настройка — запись значения, режим записи — формат и параметры вместе. */
     fun choose(id: SettingID, value: Long) {
-        if (id == SettingID.movieRecordingSetting && value > 0xFF) setRecordingMode(RecordingMode.of(value)) else request(id, value)
+        if (id == SettingID.movieRecordingSetting && value > 0xFF) return setRecordingMode(RecordingMode.of(value))
+        if (id == SettingID.movieFileFormat) {
+            // один формат без параметров камера оставила бы с параметрами прежнего — берём ближайший режим
+            val mode = RecordingModes.closest(recordingDriver.target ?: currentRecordingMode, value, recordingModes)
+            if (mode != null) return setRecordingMode(mode)
+        }
+        request(id, value)
     }
 
     /**
-     * Формат и параметры записи. Параметры камера принимает только для текущего формата: если формат другой,
-     * сначала он, и ждём, пока камера подтвердит его и откроет нужные параметры.
+     * Формат и параметры записи. Камера отвечает «готово», но пропускает запись, пришедшую, пока она применяет прошлую,
+     * поэтому режим доводится по шагам: по одной записи, после каждой — смотрим, что на камере. Новый выбор, пока идёт
+     * прошлый, подхватывается на следующем шаге.
      */
     fun setRecordingMode(mode: RecordingMode) {
-        recordingModeJob?.cancel()
-        val plan = RecordingModes.plan(mode, property(SettingID.movieFileFormat)?.current?.intValue,
-            targets[SettingID.movieFileFormat.code])
-        when (plan) {
-            RecordingModes.Plan.settingOnly -> {
-                if (!isWritable(SettingID.movieRecordingSetting)) return
-                recordingModeTarget = mode
-                request(SettingID.movieRecordingSetting, mode.setting)
-                return
-            }
-            RecordingModes.Plan.formatThenSetting -> {
-                if (!isWritable(SettingID.movieFileFormat)) return
-                request(SettingID.movieFileFormat, mode.format)
-            }
-            RecordingModes.Plan.waitForFormat -> Unit
-        }
-        recordingModeTarget = mode
+        if (!isWritable(SettingID.movieRecordingSetting) && !isWritable(SettingID.movieFileFormat)) return
+        recordingDriver.choose(mode)
         pending = pending + SettingID.movieRecordingSetting
-        recordingModeJob = scope.launch {
-            repeat(50) {
-                delay(100)
-                val setting = property(SettingID.movieRecordingSetting)
-                // формат подтверждён, и ни одна запись формата не в пути (иначе параметры уйдут раньше неё)
-                val ready = targets[SettingID.movieFileFormat.code] == null &&
-                    property(SettingID.movieFileFormat)?.current?.intValue == mode.format && setting != null &&
-                    SettingOptions.options(SettingID.movieRecordingSetting, setting).any { it.value == mode.setting } &&
-                    isWritable(SettingID.movieRecordingSetting)
-                if (ready) {
-                    if (setting?.current?.intValue == mode.setting) pending = pending - SettingID.movieRecordingSetting
-                    else request(SettingID.movieRecordingSetting, mode.setting)
-                    return@launch
+        if (recordingModeJob?.isActive == true) return
+        recordingModeJob = scope.launch { driveRecordingMode() }
+    }
+
+    private suspend fun driveRecordingMode() {
+        try {
+            loop@ while (true) {
+                // прошлая запись ещё ждёт подтверждения камеры
+                if (targets[SettingID.movieFileFormat.code] != null || targets[SettingID.movieRecordingSetting.code] != null) {
+                    delay(100)
+                    continue@loop
                 }
+                val step = recordingDriver.next(property(SettingID.movieFileFormat)?.current?.intValue,
+                    property(SettingID.movieRecordingSetting)?.current?.intValue, allowedRecordingSettings) ?: return
+                when (step) {
+                    RecordingStep.Done -> return
+                    RecordingStep.Wait -> delay(100)
+                    is RecordingStep.WriteFormat -> {
+                        if (!isWritable(SettingID.movieFileFormat)) {
+                            delay(300)
+                            continue@loop
+                        }
+                        request(SettingID.movieFileFormat, step.format)
+                        waitForWrite(SettingID.movieFileFormat.code)
+                        // формат камера подтверждает раньше, чем готова принять следующую запись
+                        delay(500)
+                    }
+                    is RecordingStep.WriteSetting -> {
+                        if (!isWritable(SettingID.movieRecordingSetting)) {
+                            delay(300)
+                            continue@loop
+                        }
+                        request(SettingID.movieRecordingSetting, step.setting)
+                        waitForWrite(SettingID.movieRecordingSetting.code)
+                    }
+                }
+                // запись параметров снимает «ждём» — пока режим не доведён, он ещё в пути
+                if (recordingDriver.target != null) pending = pending + SettingID.movieRecordingSetting
             }
-            pending = pending - SettingID.movieRecordingSetting
+        } finally {
+            // отменили при отключении — teardown уже всё сбросил (и, может быть, начат новый сеанс)
+            if (currentCoroutineContext().isActive) {
+                recordingDriver.cancel()
+                if (targets[SettingID.movieRecordingSetting.code] == null) pending = pending - SettingID.movieRecordingSetting
+            }
+        }
+    }
+
+    /** Ждёт, пока запись свойства закончится: камера подтвердила её или время подтверждения вышло. */
+    private suspend fun waitForWrite(code: Int) {
+        repeat(60) {
+            if (targets[code] == null) return
+            delay(100)
         }
     }
 
@@ -334,11 +371,10 @@ class CameraController(private val context: Context, private val scope: Coroutin
     fun requestStep(id: SettingID, offset: Int) {
         val modes = recordingModes
         if (id == SettingID.movieRecordingSetting && modes.isNotEmpty()) {
-            // от последнего запроса, пока его запись в пути: иначе быстрые шаги сливаются в один;
-            // запись закончилась (подтверждена или отклонена) — от того, что на камере
+            // от режима, к которому камера ещё идёт: иначе быстрые шаги сливаются в один; дошла или сдалась —
+            // от того, что на камере
             val current = currentRecordingMode
-            val inFlight = SettingID.movieRecordingSetting in pending || SettingID.movieFileFormat in pending
-            val base = if (inFlight) recordingModeTarget ?: current else current
+            val base = recordingDriver.target ?: current
             val next = RecordingModes.neighbour(base, modes, offset)
                 ?: if (base != current) RecordingModes.neighbour(current, modes, offset) else null
             next?.let { setRecordingMode(it) }
@@ -1026,7 +1062,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
         transportKind = null
         wifiDirect = false
         recordingModeJob?.cancel()
-        recordingModeTarget = null
+        recordingDriver.cancel()
         session = null
         transport = null
         coalescer = null

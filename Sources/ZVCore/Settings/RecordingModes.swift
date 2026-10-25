@@ -65,23 +65,30 @@ public enum RecordingModes {
     public static func isPALSetting(_ setting: Int64) -> Bool { isPAL(setting) }
 
     /// Подпись режима; у камеры без свойства формата — подпись одних параметров, как раньше.
-    public static func label(format: Int64?, setting: Int64?) -> String {
+    /// allowed — параметры, которые камера разрешает сейчас: после смены формата она ещё показывает параметры
+    /// прежнего (в HD — код 4K), и таких параметров не бывает — тогда подписываем один формат.
+    public static func label(format: Int64?, setting: Int64?, allowed: [Int64] = []) -> String {
         guard let setting else { return "—" }
         guard let format else { return ValueFormatter.label(.movieRecordingSetting, setting) }
-        return RecordingMode(format: format, setting: setting).label
+        let mode = RecordingMode(format: format, setting: setting)
+        guard allowed.isEmpty || allowed.contains(setting) else { return String(mode.label.split(separator: " ")[0]) }
+        return mode.label
     }
 
-    /// Как перейти в режим. Параметры камера принимает только для текущего формата, поэтому смотрим и на формат,
-    /// запись которого ещё в пути: передумали, пока камера переключается, — пишем формат снова.
-    public enum Plan: Equatable, Sendable {
-        case settingOnly
-        case formatThenSetting
-        case waitForFormat
+    /// Что записать в камеру, чтобы прийти к режиму, глядя на то, что на ней сейчас. Параметры камера принимает только
+    /// для текущего формата и перечисляет только их; после смены формата она ещё показывает параметры прежнего.
+    public static func nextStep(to mode: RecordingMode, format: Int64?, setting: Int64?, allowed: [Int64]) -> RecordingStep {
+        if let format, format != mode.format { return .writeFormat(mode.format) }
+        if setting == mode.setting, allowed.isEmpty || allowed.contains(mode.setting) { return .done }
+        return allowed.contains(mode.setting) ? .writeSetting(mode.setting) : .wait
     }
 
-    public static func plan(to mode: RecordingMode, confirmedFormat: Int64?, requestedFormat: Int64?) -> Plan {
-        if (requestedFormat ?? confirmedFormat) != mode.format { return .formatThenSetting }
-        return confirmedFormat == mode.format ? .settingOnly : .waitForFormat
+    /// Режим в другом формате, ближайший к текущему: та же частота с самым высоким битрейтом, иначе первый режим формата.
+    public static func closest(to current: RecordingMode?, format: Int64, in modes: [RecordingMode]) -> RecordingMode? {
+        if let current, current.format == format, modes.contains(current) { return current }
+        let candidates = modes.filter { $0.format == format }
+        let fps = current.flatMap { specs[$0.setting]?.fps }
+        return candidates.first { specs[$0.setting]?.fps == fps } ?? candidates.first
     }
 
     /// Соседний режим; base — последний запрошенный, если он есть, иначе текущий.
@@ -99,5 +106,56 @@ public enum RecordingModes {
         if sa.fps != sb.fps { return sa.fps > sb.fps }
         if sa.mbps != sb.mbps { return sa.mbps > sb.mbps }
         return a.setting < b.setting
+    }
+}
+
+/// Шаг к выбранному режиму записи.
+public enum RecordingStep: Equatable, Sendable {
+    case done
+    case writeFormat(Int64)
+    case writeSetting(Int64)
+    /// формат тот, а нужных параметров камера ещё не открыла — ждём
+    case wait
+}
+
+/// Ведёт камеру к последнему выбранному режиму записи. Камера отвечает «готово», но молча пропускает запись формата
+/// или параметров, пришедшую, пока она применяет прошлую, — поэтому пишем по одной (следующую — когда камера
+/// подтвердила прошлую) и каждый раз смотрим, что на камере: пропущенная запись повторяется, но не бесконечно.
+public struct RecordingModeDriver: Sendable {
+    /// Сколько раз подряд повторить одну и ту же запись, прежде чем сдаться.
+    public static let maxAttempts = 3
+    /// Сколько раз подряд подождать, пока камера откроет нужные параметры (раз в 100 мс — 5 с).
+    public static let maxWaits = 50
+
+    public private(set) var target: RecordingMode?
+    private var lastStep: RecordingStep?
+    private var repeats = 0
+
+    public init() {}
+
+    /// Новый выбор: счёт повторов — заново.
+    public mutating func choose(_ mode: RecordingMode) {
+        target = mode
+        lastStep = nil
+        repeats = 0
+    }
+
+    /// Следующий шаг по тому, что на камере сейчас; nil — пришли или сдались (тогда `target` пуст).
+    public mutating func next(format: Int64?, setting: Int64?, allowed: [Int64]) -> RecordingStep? {
+        guard let target else { return nil }
+        let step = RecordingModes.nextStep(to: target, format: format, setting: setting, allowed: allowed)
+        repeats = step == lastStep ? repeats + 1 : 1
+        lastStep = step
+        let limit = step == .wait ? Self.maxWaits : Self.maxAttempts
+        guard step != .done, repeats <= limit else {
+            self.target = nil
+            return nil
+        }
+        return step
+    }
+
+    /// Камера отключилась или режим больше не нужен.
+    public mutating func cancel() {
+        target = nil
     }
 }

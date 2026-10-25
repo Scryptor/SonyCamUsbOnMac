@@ -34,7 +34,7 @@ func waitForCamera(_ discovery: CameraDiscovery, seconds: Int) async -> ICCamera
 @MainActor
 func run() async -> Int32 {
     var args = Array(CommandLine.arguments.dropFirst())
-    let usage = "usage: zv-probe [--wifi <адрес>] info | props | dump | watch <секунд> | lv <кадров> <путь.jpg> | set <код hex> <значение> | rec\n"
+    let usage = "usage: zv-probe [--wifi <адрес>] info | props | dump | watch <секунд> | lv <кадров> <путь.jpg> | set <код hex> <значение> | seq <шаги> | rec\n"
         + "       zv-probe wifi-find | wifi-pair <адрес>"
     // по Wi-Fi: поиск камеры и сопряжение (на камере в это время включено PC Remote Function → Pairing)
     if args.first == "wifi-find" {
@@ -58,7 +58,7 @@ func run() async -> Int32 {
         wifiHost = args[1]
         args.removeFirst(2)
     }
-    guard let command = args.first, ["info", "props", "dump", "watch", "lv", "set", "rec"].contains(command) else {
+    guard let command = args.first, ["info", "props", "dump", "watch", "lv", "set", "seq", "rec"].contains(command) else {
         return fail(usage)
     }
     let transport: PTPTransport
@@ -157,6 +157,57 @@ func run() async -> Int32 {
             case .confirmed: print("confirmed")
             case let .notApplied(actual): print("notApplied(\(actual.map(String.init) ?? "nil"))")
             }
+        case "seq":
+            // опыты с порядком записей: «D241=8 +300 D242=0x24 ~5000 lv50» — запись без ожидания подтверждения,
+            // пауза в мс, слежение в мс (печатает формат и параметры записи, когда они меняются), частота live view
+            let start = ContinuousClock.now
+            func stamp() -> String {
+                let d = ContinuousClock.now - start
+                return String(format: "%6.2f", Double(d.components.seconds) + Double(d.components.attoseconds) / 1e18)
+            }
+            var watched: [UInt16] = [SonyProp.movieFileFormat, SonyProp.movieRecordingSetting]
+            func show() async -> String {
+                let props = await session.properties
+                return watched.map { code in
+                    guard let p = props[code] else { return String(format: "%04X=—", code) }
+                    return String(format: "%04X=0x%llX", code, p.current.intValue ?? -1) + (p.isWritable ? "" : "(ro)")
+                        + "[" + p.settableValues.map { String(format: "%llX", $0) }.joined(separator: ",") + "]"
+                }.joined(separator: " ")
+            }
+            print("\(stamp()) \(await show())")
+            for step in args.dropFirst() {
+                if step.hasPrefix("+") {
+                    try await Task.sleep(for: .milliseconds(Int(step.dropFirst()) ?? 0))
+                    continue
+                }
+                if step.hasPrefix("lv"), let count = Int(step.dropFirst(2)), count > 0 {
+                    let started = ContinuousClock.now
+                    for _ in 0..<count { _ = try await session.nextLiveViewFrame() }
+                    let seconds = (ContinuousClock.now - started) / .seconds(1)
+                    print("\(stamp()) live view: \(String(format: "%.1f", Double(count) / seconds)) к/с")
+                    continue
+                }
+                if step.hasPrefix("~") {
+                    let end = ContinuousClock.now + .milliseconds(Int(step.dropFirst()) ?? 0)
+                    var last = ""
+                    while ContinuousClock.now < end {
+                        do { try await session.refresh() } catch { print("\(stamp()) refresh: \(error)") }
+                        let line = await show()
+                        if line != last { print("\(stamp()) \(line)"); last = line }
+                        try await Task.sleep(for: .milliseconds(100))
+                    }
+                    continue
+                }
+                let parts = step.split(separator: "=").map(String.init)
+                guard parts.count == 2, let code = UInt16(parts[0], radix: 16),
+                      let value = parts[1].hasPrefix("0x") ? Int64(parts[1].dropFirst(2), radix: 16) : Int64(parts[1]),
+                      let type = await session.properties[code]?.dataType else { return fail("непонятный шаг: \(step)") }
+                if !watched.contains(code) { watched.append(code) }
+                let sent = ContinuousClock.now
+                let reply = try await transport.send(SonyOp.setExtPropValue, [UInt32(code)], outData: PTPValue.encode(value, type: type))
+                print("\(stamp()) \(step) → ответ 0x\(String(reply.code, radix: 16, uppercase: true)) за \(ContinuousClock.now - sent)")
+            }
+            print("\(stamp()) \(await show())")
         case "rec":
             print("recording: \(try await session.toggleRecording())")
             try await Task.sleep(for: .seconds(2))

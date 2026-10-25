@@ -58,23 +58,35 @@ object RecordingModes {
     /** Система по коду `0xD242`: 25/50/100p — PAL. */
     fun isPalSetting(setting: Long): Boolean = isPal(setting)
 
-    /** Подпись режима; у камеры без свойства формата — подпись одних параметров, как раньше. */
-    fun label(format: Long?, setting: Long?): String = when {
+    /**
+     * Подпись режима; у камеры без свойства формата — подпись одних параметров, как раньше.
+     * allowed — параметры, которые камера разрешает сейчас: после смены формата она ещё показывает параметры
+     * прежнего (в HD — код 4K), и таких параметров не бывает — тогда подписываем один формат.
+     */
+    fun label(format: Long?, setting: Long?, allowed: List<Long> = emptyList()): String = when {
         setting == null -> "—"
         format == null -> ValueFormatter.label(SettingID.movieRecordingSetting, setting)
+        allowed.isNotEmpty() && setting !in allowed -> RecordingMode(format, setting).label.substringBefore(' ')
         else -> RecordingMode(format, setting).label
     }
 
     /**
-     * Как перейти в режим. Параметры камера принимает только для текущего формата, поэтому смотрим и на формат,
-     * запись которого ещё в пути: передумали, пока камера переключается, — пишем формат снова.
+     * Что записать в камеру, чтобы прийти к режиму, глядя на то, что на ней сейчас. Параметры камера принимает только
+     * для текущего формата и перечисляет только их; после смены формата она ещё показывает параметры прежнего.
      */
-    enum class Plan { settingOnly, formatThenSetting, waitForFormat }
+    fun nextStep(to: RecordingMode, format: Long?, setting: Long?, allowed: List<Long>): RecordingStep = when {
+        format != null && format != to.format -> RecordingStep.WriteFormat(to.format)
+        setting == to.setting && (allowed.isEmpty() || to.setting in allowed) -> RecordingStep.Done
+        to.setting in allowed -> RecordingStep.WriteSetting(to.setting)
+        else -> RecordingStep.Wait
+    }
 
-    fun plan(to: RecordingMode, confirmedFormat: Long?, requestedFormat: Long?): Plan = when {
-        (requestedFormat ?: confirmedFormat) != to.format -> Plan.formatThenSetting
-        confirmedFormat == to.format -> Plan.settingOnly
-        else -> Plan.waitForFormat
+    /** Режим в другом формате, ближайший к текущему: та же частота с самым высоким битрейтом, иначе первый режим формата. */
+    fun closest(current: RecordingMode?, format: Long, modes: List<RecordingMode>): RecordingMode? {
+        if (current != null && current.format == format && current in modes) return current
+        val candidates = modes.filter { it.format == format }
+        val fps = current?.let { specs[it.setting]?.first }
+        return candidates.firstOrNull { specs[it.setting]?.first == fps } ?: candidates.firstOrNull()
     }
 
     /** Соседний режим; base — последний запрошенный, если он есть, иначе текущий. */
@@ -88,4 +100,58 @@ object RecordingModes {
     /** 4K раньше HD; внутри формата — по убыванию частоты, затем битрейта. */
     private val order = compareBy<RecordingMode>({ if (it.format == FOUR_K) 0 else 1 },
         { -(specs[it.setting]?.first ?: 0) }, { -(specs[it.setting]?.second ?: 0) }, { it.setting })
+}
+
+/** Шаг к выбранному режиму записи. */
+sealed interface RecordingStep {
+    data object Done : RecordingStep
+    data class WriteFormat(val format: Long) : RecordingStep
+    data class WriteSetting(val setting: Long) : RecordingStep
+    /** формат тот, а нужных параметров камера ещё не открыла — ждём */
+    data object Wait : RecordingStep
+}
+
+/**
+ * Ведёт камеру к последнему выбранному режиму записи. Камера отвечает «готово», но молча пропускает запись формата
+ * или параметров, пришедшую, пока она применяет прошлую, — поэтому пишем по одной (следующую — когда камера
+ * подтвердила прошлую) и каждый раз смотрим, что на камере: пропущенная запись повторяется, но не бесконечно.
+ */
+class RecordingModeDriver {
+    var target: RecordingMode? = null
+        private set
+    private var lastStep: RecordingStep? = null
+    private var repeats = 0
+
+    /** Новый выбор: счёт повторов — заново. */
+    fun choose(mode: RecordingMode) {
+        target = mode
+        lastStep = null
+        repeats = 0
+    }
+
+    /** Следующий шаг по тому, что на камере сейчас; null — пришли или сдались (тогда `target` пуст). */
+    fun next(format: Long?, setting: Long?, allowed: List<Long>): RecordingStep? {
+        val target = target ?: return null
+        val step = RecordingModes.nextStep(target, format, setting, allowed)
+        repeats = if (step == lastStep) repeats + 1 else 1
+        lastStep = step
+        val limit = if (step == RecordingStep.Wait) MAX_WAITS else MAX_ATTEMPTS
+        if (step == RecordingStep.Done || repeats > limit) {
+            this.target = null
+            return null
+        }
+        return step
+    }
+
+    /** Камера отключилась или режим больше не нужен. */
+    fun cancel() {
+        target = null
+    }
+
+    companion object {
+        /** Сколько раз подряд повторить одну и ту же запись, прежде чем сдаться. */
+        const val MAX_ATTEMPTS = 3
+        /** Сколько раз подряд подождать, пока камера откроет нужные параметры (раз в 100 мс — 5 с). */
+        const val MAX_WAITS = 50
+    }
 }
