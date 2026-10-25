@@ -73,6 +73,7 @@ import local.zve10viewer.settings.CaptureMode
 import local.zve10viewer.settings.FileNaming
 import local.zve10viewer.settings.LumaHistogram
 import local.zve10viewer.settings.LumaStats
+import local.zve10viewer.settings.Preset
 import local.zve10viewer.settings.PresetCatalog
 import local.zve10viewer.settings.RecordingMode
 import local.zve10viewer.settings.RecordingModeDriver
@@ -894,18 +895,28 @@ class CameraController(private val context: Context, private val scope: Coroutin
 
     // MARK: - Пресеты
 
-    fun savePreset(name: String? = null) {
-        if (phase != Phase.ready) return
-        val title = name?.trim()?.takeIf { it.isNotEmpty() } ?: "Пресет ${presets.size + 1}"
+    /** Какой пресет сейчас стоит на камере: всё, что он применяет, равно текущему; таких несколько — первый. */
+    val activePresetIndex: Int?
+        get() = presets.indexOfFirst { PresetCatalog.matches(it, properties) }.takeIf { it >= 0 }
+
+    /** Имя, которое получит новый пресет: «Пресет N». */
+    val newPresetName: String get() = PresetCatalog.newName(presets)
+
+    /** Текущие настройки камеры — новым пресетом в конец списка. Возвращает его номер (с 0); камера не готова — null. */
+    fun savePreset(name: String? = null): Int? {
+        if (phase != Phase.ready) return null
+        val title = name?.trim()?.takeIf { it.isNotEmpty() } ?: newPresetName
         presets = presets + PresetCatalog.capture(title, properties)
         prefs.presets = presets
         showStatus("Сохранено: «$title»")
+        return presets.lastIndex
     }
 
     fun applyPreset(index: Int) {
         val preset = presets.getOrNull(index) ?: return
         val session = session ?: return
         if (phase != Phase.ready || isApplyingPreset) return
+        if (PresetCatalog.effective(preset).isEmpty()) return showStatus("«${preset.name}» ничего не меняет")
         isApplyingPreset = true
         statusJob?.cancel()
         statusMessage = "Применяю «${preset.name}»…"
@@ -929,6 +940,51 @@ class CameraController(private val context: Context, private val scope: Coroutin
     fun deletePreset(index: Int) {
         if (index !in presets.indices) return
         presets = presets.toMutableList().also { it.removeAt(index) }
+        prefs.presets = presets
+    }
+
+    /** Значение настройки в пресете — камера при этом не меняется. Включена ли настройка — не трогает. */
+    fun setPresetValue(index: Int, id: SettingID, value: Long) {
+        val preset = presets.getOrNull(index) ?: return
+        if (id !in PresetCatalog.order) return
+        replacePreset(index, preset.copy(values = preset.values + (id to value)))
+    }
+
+    /**
+     * Менять ли пресету настройку. Выключенная помнит значение; включили, а значения не было, — берётся текущее с камеры
+     * (у температуры — сохранённая камерой ручная, иначе 5600 K). Взять неоткуда — false, пресет как был.
+     */
+    fun setPresetIncluded(index: Int, id: SettingID, included: Boolean): Boolean {
+        val preset = presets.getOrNull(index) ?: return false
+        replacePreset(index, PresetCatalog.including(preset, id, included, properties) ?: return false)
+        return true
+    }
+
+    /** Переставляет пресет с места from на место to (номера с 0). */
+    fun movePreset(from: Int, to: Int) {
+        presets = PresetCatalog.moved(presets, from, to) ?: return
+        prefs.presets = presets
+    }
+
+    /** Копия пресета («Вечер — копия») — следом за ним. Возвращает её номер. */
+    fun duplicatePreset(index: Int): Int? {
+        val preset = presets.getOrNull(index) ?: return null
+        presets = presets.toMutableList().also { it.add(index + 1, preset.copy(name = PresetCatalog.copyName(preset.name))) }
+        prefs.presets = presets
+        return index + 1
+    }
+
+    /** «Взять с камеры»: всё, что камера сейчас даёт менять, — в пресет текущими значениями; выключенное остаётся выключенным. */
+    fun recapturePreset(index: Int) {
+        val preset = presets.getOrNull(index) ?: return
+        if (phase != Phase.ready) return
+        replacePreset(index, PresetCatalog.recapture(preset, properties))
+        showStatus("«${preset.name}»: значения взяты с камеры")
+    }
+
+    /** Всё сохраняется сразу: кнопки «Сохранить» у пресетов нет. */
+    private fun replacePreset(index: Int, preset: Preset) {
+        presets = presets.toMutableList().also { it[index] = preset }
         prefs.presets = presets
     }
 
