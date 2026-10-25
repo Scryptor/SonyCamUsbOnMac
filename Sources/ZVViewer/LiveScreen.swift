@@ -117,6 +117,16 @@ struct LiveScreen: View {
             }
             if showControls {
                 controls.transition(.opacity)
+            } else if screen.statusBarOn, screen.statusBarPinned {
+                // закреплённая строка состояния остаётся на своём месте; «● REC» в ней уже есть
+                VStack {
+                    HStack {
+                        Spacer()
+                        StatusPill(controller: controller, screen: screen)
+                    }
+                    Spacer()
+                }
+                .padding(16)
             } else if let started = controller.recordingStartedAt {
                 VStack {
                     HStack {
@@ -206,7 +216,9 @@ struct LiveScreen: View {
                 HStack(alignment: .top) {
                     TopBar(controller: controller, screen: screen)
                     Spacer()
-                    StatusPill(controller: controller, screen: screen)
+                    if screen.statusBarOn {
+                        StatusPill(controller: controller, screen: screen)
+                    }
                 }
                 Spacer()
                 if !screen.fnOpen, !controller.shots.isEmpty {
@@ -265,6 +277,17 @@ private struct StatusPill: View {
 
     var body: some View {
         HStack(spacing: 14) {
+            // закреплённая строка не прячется вместе с элементами
+            Button(action: screen.toggleStatusPin) {
+                Image(systemName: screen.statusBarPinned ? "pin.fill" : "pin")
+                    .rotationEffect(.degrees(45))
+                    .foregroundStyle(screen.statusBarPinned ? Color.accentColor : Color.secondary)
+                    .frame(width: 18, height: 18)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(screen.statusBarPinned ? "Открепить: строка будет прятаться вместе с элементами"
+                  : "Закрепить: строка не будет прятаться вместе с элементами")
             if let started = controller.recordingStartedAt {
                 RecBadge(startedAt: started)
             }

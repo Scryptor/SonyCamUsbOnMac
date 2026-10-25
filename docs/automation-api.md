@@ -94,7 +94,7 @@ open "/Applications/ZV-E10 Viewer.app" --args --automation
 | `prefs` | объект | настройки программы: `destination`, `folder`, `reviewEnabled`, `reviewSeconds`, `reviewSource`, `autoHide`, `autoHideSeconds`, `wifiAdaptiveQuality` |
 | `cameraDestination` | число или `null` | куда камера сохраняет снимки (`0xD222`): 1 — Mac, 16 — карта, 17 — оба |
 | `presets` | массив | `name` и `values` — словарь «настройка → значение» |
-| `ui` | объект | что на экране: `fnOpen`, `allSettingsOpen`, `selected`, `group`, `editing` (если открыта строка), `info` (если открыта подсказка из плашки: `connection`, `frames` или `slowMotion`), `histogram`, `histogramPosition` — где гистограмма (`x`, `y` — доли свободного места; `null` — на месте по умолчанию), `controlsHidden`, `manualHidden`, `debug` — открыта ли панель отладки, `debugTab` — её вкладка, `gallery` — открытая галерея (`index` снимка в `shots`, `title`) или `null`, `zoom` — цифровое увеличение (`factor`, `centerX`, `centerY` — точка кадра в центре экрана, доли) |
+| `ui` | объект | что на экране: `fnOpen`, `allSettingsOpen`, `selected`, `group`, `editing` (если открыта строка), `info` (если открыта подсказка из плашки: `connection`, `frames` или `slowMotion`), `histogram`, `histogramPosition` — где гистограмма (`x`, `y` — доли свободного места; `null` — на месте по умолчанию), `controlsHidden`, `manualHidden`, `debug` — открыта ли панель отладки, `debugTab` — её вкладка, `gallery` — открытая галерея (`index` снимка в `shots`, `title`) или `null`, `zoom` — цифровое увеличение (`factor`, `centerX`, `centerY` — точка кадра в центре экрана, доли), `statusBar` — строка состояния (`on`, `pinned`) |
 | `settings` | массив | все 24 настройки, см. ниже |
 
 Элемент `settings`:
@@ -132,6 +132,8 @@ open "/Applications/ZV-E10 Viewer.app" --args --automation
 | `openAllSettings` | `group` — необязательно | открыть «Все настройки», при указанной группе — на ней |
 | `editRow` | `setting` — необязательно | открыть ленту значений у строки в «Все настройки»; без параметра — закрыть |
 | `toggleHistogram` | — | включить или выключить гистограмму |
+| `toggleStatusBar` | — | показать или спрятать строку состояния (как кнопка вверху слева) |
+| `toggleStatusPin` | — | закрепить или открепить её: закреплённая не прячется вместе с элементами |
 | `toggleControls` | — | как клавиша H: спрятать или показать элементы |
 | `dismissReview` | — | закрыть просмотр снимка |
 | `openShot`, `openGallery` | `index` (у `openGallery` необязательно, по умолчанию 0) | открыть галерею на снимке из ленты (0 — самый новый) |

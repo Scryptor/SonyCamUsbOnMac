@@ -12,6 +12,10 @@ final class ScreenState {
     var group: SettingGroup = .exposure
     var editing: SettingID?
     private(set) var histogramOn: Bool
+    /// Строка состояния справа сверху: включена ли (по умолчанию да) и закреплена ли — закреплённая не прячется
+    /// вместе с элементами. Включённая, но не закреплённая видна и прячется вместе с ними.
+    private(set) var statusBarOn: Bool
+    private(set) var statusBarPinned: Bool
     /// Скрыто клавишей H — возвращается только ей же.
     private(set) var manualHidden = false
     /// Скрыто само после 3 с без движения мыши — возвращается при любом движении.
@@ -116,6 +120,8 @@ final class ScreenState {
 
     init() {
         histogramOn = defaults.bool(forKey: "histogramOn")
+        statusBarOn = defaults.object(forKey: "statusBarOn") as? Bool ?? true
+        statusBarPinned = defaults.bool(forKey: "statusBarPinned")
         histogramPlacement = defaults.data(forKey: "histogramPlacement").flatMap { try? JSONDecoder().decode(FloatingPlacement.self, from: $0) }
     }
 
@@ -145,6 +151,17 @@ final class ScreenState {
         allSettingsOpen = false
         editing = nil
         pillInfo = nil
+    }
+
+    func toggleStatusBar() {
+        statusBarOn.toggle()
+        defaults.set(statusBarOn, forKey: "statusBarOn")
+        if !statusBarOn, pillInfo != nil { pillInfo = nil }
+    }
+
+    func toggleStatusPin() {
+        statusBarPinned.toggle()
+        defaults.set(statusBarPinned, forKey: "statusBarPinned")
     }
 
     func toggleHistogram() {

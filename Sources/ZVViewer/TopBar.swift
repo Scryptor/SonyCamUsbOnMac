@@ -21,6 +21,16 @@ struct TopBar: View {
                 .buttonStyle(.plain)
                 .help("Гистограмма")
 
+                Button(action: screen.toggleStatusBar) {
+                    Label("Строка состояния", systemImage: "rectangle.topthird.inset.filled")
+                        .labelStyle(.iconOnly)
+                        .frame(width: 30, height: 26)
+                        .background(screen.statusBarOn ? Color.accentColor : Color.white.opacity(0.08),
+                                    in: RoundedRectangle(cornerRadius: 7))
+                }
+                .buttonStyle(.plain)
+                .help(screen.statusBarOn ? "Спрятать строку состояния" : "Показать строку состояния")
+
                 ForEach(Array(controller.presets.enumerated()), id: \.offset) { index, preset in
                     Button { controller.applyPreset(index) } label: {
                         Text(index < 9 ? "\(index + 1) · \(preset.name)" : preset.name)

@@ -214,6 +214,10 @@ final class AutomationServer {
             screen.zoom = factor < ViewZoom.snapBelow ? .identity : ViewZoom(factor: min(factor, ViewZoom.maxFactor), center: center)
         case .resetZoom:
             screen.zoom = .identity
+        case .toggleStatusBar:
+            screen.toggleStatusBar()
+        case .toggleStatusPin:
+            screen.toggleStatusPin()
         }
         return nil
     }
@@ -330,6 +334,7 @@ final class AutomationServer {
             ui["gallery"] = NSNull()
         }
         ui["zoom"] = ["factor": screen.zoom.factor, "centerX": screen.zoom.center.x, "centerY": screen.zoom.center.y]
+        ui["statusBar"] = ["on": screen.statusBarOn, "pinned": screen.statusBarPinned]
         var result: [String: Any] = [
             "phase": controller.phase.rawValue,
             "model": controller.deviceInfo?.model ?? NSNull(),
