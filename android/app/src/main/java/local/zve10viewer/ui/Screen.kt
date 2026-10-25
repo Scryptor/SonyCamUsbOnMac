@@ -45,12 +45,19 @@ import kotlin.math.roundToInt
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.unit.toSize
+import local.zve10viewer.view.ViewZoom
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -263,6 +270,11 @@ private fun SettingsOverlay(controller: CameraController, onClose: () -> Unit, o
 @Composable
 private fun LiveScreen(controller: CameraController, screen: ScreenState) {
     var hint by remember { mutableStateOf(false) }
+    // отклик кнопок: волна, шторка, полёт стоп-кадра, «мотание», вибрация — по событиям контроллера
+    val scope = rememberCoroutineScope()
+    val view = LocalView.current
+    val feedback = remember { FeedbackState(scope, Haptics(view) { controller.prefs.hapticsEnabled }) }
+    LaunchedEffect(Unit) { controller.feedback.collect { feedback.handle(it) } }
     // подсказка о S&Q пропадает вместе с режимом (например, MODE на камере) — закрываем и её флаг
     LaunchedEffect(controller.shootingMode) {
         if (controller.shootingMode != ShootingMode.slowQuick && screen.pillInfo == PillInfo.slowMotion) screen.pillInfo = null
@@ -290,6 +302,7 @@ private fun LiveScreen(controller: CameraController, screen: ScreenState) {
     val showControls = !screen.controlsHidden || screen.overlayOpen
     Box(
         Modifier.fillMaxSize()
+            .onSizeChanged { feedback.screenSize = it.toSize() }
             // любое касание — «активность», элементы не прячутся; само касание не перехватываем
             .pointerInput(Unit) {
                 awaitPointerEventScope {
@@ -301,7 +314,7 @@ private fun LiveScreen(controller: CameraController, screen: ScreenState) {
                 }
             },
     ) {
-        Video(controller, Modifier.fillMaxSize().pointerInput(Unit) {
+        Video(controller, feedback, Modifier.fillMaxSize().pointerInput(Unit) {
             detectTapGestures {
                 when {
                     screen.overlayOpen -> screen.closeOverlays()
@@ -317,7 +330,7 @@ private fun LiveScreen(controller: CameraController, screen: ScreenState) {
             }
         })
         AnimatedVisibility(showControls, enter = fadeIn(), exit = fadeOut()) {
-            Controls(controller, screen)
+            Controls(controller, screen, feedback)
         }
         if (!showControls) {
             controller.recordingStartedAt?.let { started ->
@@ -340,12 +353,16 @@ private fun LiveScreen(controller: CameraController, screen: ScreenState) {
                 modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 28.dp)
                     .background(Panel, RoundedCornerShape(10.dp)).padding(horizontal = 14.dp, vertical = 8.dp))
         }
+        // шторка и вспышка — поверх всего, и поверх просмотра снимка; выше — только летящий кадр
+        FlashLayer(feedback)
+        GrabFlightLayer(feedback)
     }
 }
 
 @Composable
-private fun Video(controller: CameraController, modifier: Modifier) {
-    Box(modifier, contentAlignment = Alignment.Center) {
+private fun Video(controller: CameraController, feedback: FeedbackState, modifier: Modifier) {
+    var viewSize by remember { mutableStateOf(Size.Zero) }
+    Box(modifier.onSizeChanged { viewSize = it.toSize() }, contentAlignment = Alignment.Center) {
         val frame = controller.frame
         if (frame != null) {
             val notice = controller.frameNotice
@@ -353,6 +370,10 @@ private fun Video(controller: CameraController, modifier: Modifier) {
             val dimmed = notice == FrameNotice.interrupted || notice == FrameNotice.reconnecting
             Image(frame, null, contentScale = ContentScale.Fit,
                 modifier = Modifier.fillMaxSize().alpha(if (dimmed) 0.55f else 1f))
+            // где картинка на экране: отсюда улетает стоп-кадр, по её краю — рамка записи
+            val picture = ViewZoom.identity.imageRect(viewSize, Size(frame.width.toFloat(), frame.height.toFloat()))
+            SideEffect { feedback.frameRect = picture }
+            TallyBorder(controller.isRecording, { picture })
             when (notice) {
                 // кадр не тускнеет: картинка, скорее всего, сейчас пойдёт дальше
                 FrameNotice.weakSignal -> Text("Слабый сигнал Wi-Fi", color = Color.White, fontSize = 16.sp,
@@ -401,7 +422,7 @@ private fun LinkNotice(controller: CameraController, notice: FrameNotice) {
 }
 
 @Composable
-private fun Controls(controller: CameraController, screen: ScreenState) {
+private fun Controls(controller: CameraController, screen: ScreenState, feedback: FeedbackState) {
     Box(Modifier.fillMaxSize().padding(18.dp)) {
         Column(Modifier.align(Alignment.TopStart)) {
             TopBar(controller, screen)
@@ -415,12 +436,12 @@ private fun Controls(controller: CameraController, screen: ScreenState) {
             StatusPill(controller, screen)
             screen.pillInfo?.let { PillInfoCard(controller, it) }
         }
-        RightColumn(controller, Modifier.align(Alignment.CenterEnd).padding(end = 4.dp))
+        RightColumn(controller, feedback, Modifier.align(Alignment.CenterEnd).padding(end = 4.dp))
         if (!screen.fnOpen) {
             Column(Modifier.align(Alignment.BottomStart).padding(bottom = 76.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 val bins = controller.histogram
                 if (controller.histogramOn && bins != null) HistogramView(bins, controller.histogramStats)
-                if (controller.shots.isNotEmpty()) ShotsStrip(controller)
+                if (controller.shots.isNotEmpty()) ShotsStrip(controller, feedback)
             }
         }
         Box(Modifier.align(Alignment.BottomCenter).padding(end = if (screen.fnOpen) 110.dp else 0.dp)) {
@@ -767,6 +788,10 @@ private fun SettingsPanel(controller: CameraController, modifier: Modifier, onDe
     var wifiEnabled by remember { mutableStateOf(prefs.wifiEnabled) }
     var adaptiveQuality by remember { mutableStateOf(controller.adaptiveQuality) }
     var wifiCamera by remember { mutableStateOf(prefs.wifiCameraName?.let { name -> prefs.wifiHost?.let { "$name · $it" } ?: name }) }
+    // переключатель вибрации — только если у планшета есть мотор
+    val context = LocalContext.current
+    val hasVibrator = remember { Haptics.deviceHasVibrator(context) }
+    var haptics by remember { mutableStateOf(prefs.hapticsEnabled) }
     Column(
         modifier.background(Color(0xF22C2C2E), RoundedCornerShape(18.dp)).padding(24.dp)
             .verticalScroll(rememberScrollState()).pointerInput(Unit) { detectTapGestures { } },
@@ -799,6 +824,12 @@ private fun SettingsPanel(controller: CameraController, modifier: Modifier, onDe
         Slider(autoHideSeconds.toFloat(), { autoHideSeconds = it.roundToInt(); prefs.autoHideSeconds = autoHideSeconds },
             valueRange = 1f..30f, steps = 28, enabled = autoHide)
         Text("Касание видео прячет и возвращает элементы.", color = Secondary, fontSize = 13.sp)
+        if (hasVibrator) {
+            Spacer(Modifier.height(8.dp))
+            Toggle("Вибрация при съёмке", haptics) { haptics = it; prefs.hapticsEnabled = it }
+            Text("Спуск, запись и стоп-кадр отвечают и вибрацией — если она включена в настройках системы.",
+                color = Secondary, fontSize = 13.sp)
+        }
         Spacer(Modifier.height(8.dp))
         Text("Wi-Fi", color = Secondary, fontSize = 15.sp)
         Toggle("Подключаться по Wi-Fi, когда камеры нет на кабеле", wifiEnabled) { wifiEnabled = it; prefs.wifiEnabled = it }

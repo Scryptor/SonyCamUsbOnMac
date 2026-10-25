@@ -1,7 +1,12 @@
 package local.zve10viewer.ui
 
 import android.annotation.SuppressLint
+import android.content.Context
+import android.os.Build
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.view.HapticFeedbackConstants
+import android.view.View
 
 /** События, на которые планшет отвечает вибрацией (если у него есть мотор и она включена). */
 enum class HapticEvent {
@@ -37,5 +42,23 @@ fun hapticConstant(event: HapticEvent, sdk: Int): Int {
         HapticEvent.failed -> if (modern) HapticFeedbackConstants.REJECT else HapticFeedbackConstants.LONG_PRESS
         HapticEvent.zoomLimit -> HapticFeedbackConstants.CLOCK_TICK
         HapticEvent.dragStart -> if (modern) HapticFeedbackConstants.GESTURE_START else HapticFeedbackConstants.LONG_PRESS
+    }
+}
+
+/** Вибрация через `View.performHapticFeedback`: без своего разрешения, с учётом «Виброотклика» в настройках системы. */
+class Haptics(private val view: View, private val enabled: () -> Boolean) {
+    fun perform(event: HapticEvent) {
+        if (enabled()) view.performHapticFeedback(hapticConstant(event, Build.VERSION.SDK_INT))
+    }
+
+    companion object {
+        /** Есть ли у устройства вибромотор: без него переключателя в ⚙ нет (у Redmi Pad Pro его нет). */
+        fun deviceHasVibrator(context: Context): Boolean = runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                context.getSystemService(VibratorManager::class.java)?.defaultVibrator?.hasVibrator() == true
+            } else {
+                @Suppress("DEPRECATION") context.getSystemService(Vibrator::class.java)?.hasVibrator() == true
+            }
+        }.getOrDefault(false)
     }
 }

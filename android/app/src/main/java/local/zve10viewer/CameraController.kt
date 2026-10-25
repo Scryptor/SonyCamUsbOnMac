@@ -67,6 +67,7 @@ import local.zve10viewer.session.CapturePhase
 import local.zve10viewer.session.LiveViewQuality
 import local.zve10viewer.session.LiveViewQualityPolicy
 import local.zve10viewer.session.LiveViewSample
+import local.zve10viewer.session.RecordingToggle
 import local.zve10viewer.session.SessionException
 import local.zve10viewer.settings.CaptureMode
 import local.zve10viewer.settings.FileNaming
@@ -226,6 +227,10 @@ class CameraController(private val context: Context, private val scope: Coroutin
     /** Когда началась запись (для таймера «● REC»). */
     var recordingStartedAt by mutableStateOf<Long?>(null)
         private set
+    /** Чего ждём от камеры после нажатия записи: запуска или остановки; null — ничего. */
+    var recordingRequest by mutableStateOf<RecordingToggle.Request?>(null)
+        private set
+    private var recordingToggle = RecordingToggle()
     var review by mutableStateOf<Review?>(null)
         private set
     /** Снимки и стоп-кадры этой сессии, новые сначала. */
@@ -562,10 +567,43 @@ class CameraController(private val context: Context, private val scope: Coroutin
         request(id, target)
     }
 
+    /**
+     * Запись: нажатие ждёт подтверждения камеры — свойства MovieRecordingState или ответа вызова — до 6 с; кнопка
+     * тем временем показывает «Запуск записи…» / «Остановка…». Второе нажатие, пока ждём, не считается.
+     */
     fun toggleRecording() {
         val session = session ?: return
         if (phase != Phase.ready) return
-        scope.launch { runCatching { session.toggleRecording() } }
+        val toggle = recordingToggle
+        if (!toggle.press(isRecording, System.currentTimeMillis())) return
+        recordingRequest = toggle.request
+        feedback(FeedbackEvent.Accepted(FeedbackTarget.record))
+        scope.launch {
+            val recording = try {
+                session.toggleRecording()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "запись: камера не приняла нажатие", e)
+                null
+            }
+            // сеанс сменился, пока ждали, — это нажатие уже ни к чему не относится
+            if (toggle === recordingToggle) recordingOutcome(toggle.completed(recording))
+        }
+    }
+
+    /** Чем кончился запрос записи: событие для экрана, при отказе — сообщение. */
+    private fun recordingOutcome(outcome: RecordingToggle.Outcome?) {
+        recordingRequest = recordingToggle.request
+        when (outcome) {
+            null -> Unit
+            RecordingToggle.Outcome.Started -> feedback(FeedbackEvent.RecordingStarted)
+            RecordingToggle.Outcome.Stopped -> feedback(FeedbackEvent.RecordingStopped)
+            is RecordingToggle.Outcome.Failed -> {
+                feedback(FeedbackEvent.Failed(FeedbackTarget.record))
+                showStatus(if (outcome.request == RecordingToggle.Request.starting) "Камера не начала запись" else "Камера не остановила запись")
+            }
+        }
     }
 
     /** Переключает камеру между фото и видео, сохраняя букву режима (M ↔ видео M и т.п.). */
@@ -854,6 +892,8 @@ class CameraController(private val context: Context, private val scope: Coroutin
                 tickTabletBattery()
                 tickQuality()
                 tickSummary()
+                // камера так и не ответила на нажатие записи — отказ через 6 с
+                recordingOutcome(recordingToggle.tick(System.currentTimeMillis()))
                 delay(500)
             }
         }
@@ -1528,6 +1568,8 @@ class CameraController(private val context: Context, private val scope: Coroutin
         val recording = snapshot[SonyProp.MOVIE_RECORDING_STATE]?.current?.intValue == 1L
         if (recording && recordingStartedAt == null) recordingStartedAt = System.currentTimeMillis()
         if (!recording) recordingStartedAt = null
+        // подтверждение нажатия записи — по свойству; запись с кнопки самой камеры исходом не считается
+        if (snapshot.containsKey(SonyProp.MOVIE_RECORDING_STATE)) recordingOutcome(recordingToggle.observe(recording))
         for ((code, target) in targets.toMap()) {
             if (snapshot[code]?.current?.intValue == target) clearTarget(code)
         }
@@ -1833,6 +1875,8 @@ class CameraController(private val context: Context, private val scope: Coroutin
         frameGapMs = 0
         frameNotice = FrameNotice.none
         recordingStartedAt = null
+        recordingToggle = RecordingToggle()
+        recordingRequest = null
         isApplyingPreset = false
         isCapturing = false
         capturePhase = null

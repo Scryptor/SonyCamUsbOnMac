@@ -63,6 +63,11 @@ class Prefs(context: Context) {
         get() = prefs.getBoolean("histogramOn", false)
         set(value) = prefs.edit().putBoolean("histogramOn", value).apply()
 
+    /** Вибрация при съёмке — если у планшета есть мотор. */
+    var hapticsEnabled: Boolean
+        get() = prefs.getBoolean("hapticsEnabled", true)
+        set(value) = prefs.edit().putBoolean("hapticsEnabled", value).apply()
+
     /** Подключаться к камере по Wi-Fi, когда её нет на кабеле. */
     var wifiEnabled: Boolean
         get() = prefs.getBoolean("wifiEnabled", true)
