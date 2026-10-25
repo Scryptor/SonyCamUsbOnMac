@@ -97,7 +97,7 @@ open "/Applications/Sony Cam Viewer.app" --args --automation
 | `cameraDestination` | число или `null` | куда камера сохраняет снимки (`0xD222`): 1 — Mac, 16 — карта, 17 — оба |
 | `cameras` | массив | список камер, как в подсказке строки состояния: `id` (у знакомой — её отпечаток, иначе `usb:…` / `wifi:адрес`), `name`, `model`, `link` — `usb`, `wifi` или `null` (не видна), `host` и `port` (по Wi-Fi), `state` — `current`, `available`, `needsPairing`, `offline`, `stateLabel` — подпись («свободна», «сопрягаю…»), `detail` — как подключена, `paired`, `known` |
 | `currentCamera` | строка или `null` | id камеры на связи (после того как она назвала себя) |
-| `strip` | массив | лента камер, пусто — на связи одна: главная первой, дальше камеры ленты по порядку — `id`, `name`, `main`, `connected`, `recording`, `battery`, `fps`, `linked` (связана с главной), у камер ленты ещё `port` и `values` — что на камере сейчас: `iso`, `shutter`, `aperture`, `whiteBalance`, `colorTemperature`, `exposureProgram`. В `cameras` у камеры ленты `state` — `side` |
+| `strip` | массив | лента камер, пусто — на связи одна: плитки сверху вниз, порядок постоянный (выбор главной его не меняет) — `id`, `name`, `main`, `connected`, `recording`, `battery`, `fps`, `linked` (связана с главной), `port` (у главной — если она по Wi-Fi), у камер ленты ещё `values` — что на камере сейчас: `iso`, `shutter`, `aperture`, `whiteBalance`, `colorTemperature`, `exposureProgram`. В `cameras` у камеры ленты `state` — `side` |
 | `cameraName` | строка | имя камеры в строке состояния: своё, иначе модель |
 | `pairing` | bool | идёт сопряжение |
 | `presetMode` | строка | чьи пресеты показаны: `photo` или `video` (S&Q — тоже `video`); без камеры — режим, в котором она была |
@@ -186,6 +186,7 @@ open "/Applications/Sony Cam Viewer.app" --args --automation
 | `addToStrip` | `id` | «В ленту»: держать сопряжённую камеру по Wi-Fi на связи рядом с главной; 409 — не сопряжена или без адреса |
 | `removeFromStrip` | `id` | «Убрать из ленты»: подключение закрывается, сама программа к ней больше не подключается, связь снимается |
 | `linkCamera` | `id`, `linked` | цепочка на плитке: связанная камера ленты повторяет за главной настройки, «Применить» пресета и запись |
+| `moveInStrip` | `id`, `onto` | как перетащить плитку `id` на плитку `onto`: встаёт на её место (вниз — после неё, вверх — перед ней), порядок запоминается; обе должны быть в ленте |
 | `cancelPairing` | — | отменить сопряжение |
 | `forgetWiFi` | — | «Забыть сопряжение»: новый GUID — все камеры становятся несопряжёнными (в списке остаются, с именами), чтобы снова работать по Wi-Fi, нужно сопрячь заново |
 

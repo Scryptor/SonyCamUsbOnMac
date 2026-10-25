@@ -1,31 +1,104 @@
 import SwiftUI
 import ZVCore
 
-/// Лента камер слева под верхней панелью: главная и камеры в ленте — живые плитки. Щелчок по плитке — она главная;
-/// правый клик — «Сделать главной», «Убрать из ленты»; цепочка — связать с главной (группа). Видна, когда камер на связи
-/// две и больше.
+/// Лента камер слева под верхней панелью: главная и камеры в ленте — живые плитки. Порядок постоянный: щелчок по
+/// плитке делает камеру главной на её месте, переставляют плитки перетаскиванием. Правый клик — «Сделать главной»,
+/// «Убрать из ленты»; цепочка — связать с главной (группа). Видна, когда камер на связи две и больше.
 struct CameraStrip: View {
     let controller: CameraController
+    /// Плитку тащат: какую, с какого места начали и насколько сдвинули мышь.
+    @State private var dragging: String?
+    @State private var dragStart = 0
+    @State private var dragTranslation: CGFloat = 0
+
+    /// Шаг плиток: высота плитки и промежуток.
+    private static let slot = CameraTile.size.height + 8
 
     var body: some View {
+        let tiles = controller.stripTiles
         VStack(alignment: .leading, spacing: 8) {
+            ForEach(tiles, id: \.self) { id in
+                tile(id)
+                    // пока плитку ведут, на её месте — бледный след: туда она встанет
+                    .opacity(dragging == id ? 0.25 : 1)
+                    .gesture(id == controller.currentCameraID ? AnyGesture(reorder(id).map { _ in })
+                             : AnyGesture(reorder(id).exclusively(before: TapGesture().onEnded { controller.selectCamera(id) }).map { _ in }))
+                    .modifier(SideMenu(controller: controller, id: id))
+            }
+        }
+        .animation(.easeInOut(duration: 0.18), value: tiles)
+        .coordinateSpace(name: Self.space)
+        // сама плитка — над лентой, за мышью; соседние раздвигаются под ней
+        .overlay(alignment: .topLeading) {
+            if let dragging {
+                tile(dragging)
+                    .scaleEffect(1.04)
+                    .shadow(color: .black.opacity(0.5), radius: 10, y: 4)
+                    .offset(y: min(max(CGFloat(dragStart) * Self.slot + dragTranslation, 0), CGFloat(tiles.count - 1) * Self.slot))
+                    .allowsHitTesting(false)
+            }
+        }
+    }
+
+    private static let space = "cameraStrip"
+
+    /// Перетаскивание: плитка встаёт на место той, над чьей серединой её провели; щелчок без движения — не оно.
+    private func reorder(_ id: String) -> some Gesture {
+        DragGesture(minimumDistance: 6, coordinateSpace: .named(Self.space))
+            .onChanged { value in
+                let tiles = controller.stripTiles
+                guard let index = tiles.firstIndex(of: id) else { return }
+                if dragging != id {
+                    dragging = id
+                    dragStart = index
+                }
+                dragTranslation = value.translation.height
+                let target = min(max(dragStart + Int((value.translation.height / Self.slot).rounded()), 0), tiles.count - 1)
+                if target != index { controller.moveInStrip(id, onto: tiles[target]) }
+            }
+            .onEnded { _ in
+                // плитка доезжает до своего места и только потом пропадает над лентой
+                let index = controller.stripTiles.firstIndex(of: id) ?? dragStart
+                withAnimation(.easeOut(duration: 0.15)) { dragTranslation = CGFloat(index - dragStart) * Self.slot }
+                Task {
+                    try? await Task.sleep(for: .milliseconds(150))
+                    if dragging == id { dragging = nil }
+                }
+            }
+    }
+
+    @ViewBuilder private func tile(_ id: String) -> some View {
+        if id == controller.currentCameraID {
             CameraTile(name: controller.currentCameraName, frame: controller.frame, main: true,
                        connected: controller.phase == .ready, recording: controller.isRecording,
                        battery: controller.property(.battery)?.current.intValue,
                        link: controller.sideCameras.contains { controller.roster.camera($0.id)?.linked == true } ? .leads : .none)
-            ForEach(controller.sideCameras) { side in
-                let linked = controller.roster.camera(side.id)?.linked == true
-                CameraTile(name: controller.roster.camera(side.id)?.name ?? "Камера", frame: side.frame, main: false,
-                           connected: side.connected, recording: side.recording, battery: side.battery,
-                           link: linked ? .linked : .unlinked, onLink: { controller.linkCamera(side.id, !linked) })
-                    .onTapGesture { controller.selectCamera(side.id) }
-                    .help(side.connected ? "Сделать главной" : "Нет связи — программа стучится к камере снова")
-                    .contextMenu {
-                        Button("Сделать главной") { controller.selectCamera(side.id) }
-                            .disabled(!side.connected)
-                        Button("Убрать из ленты") { controller.removeFromStrip(side.id) }
-                    }
-            }
+        } else if let side = controller.sideCameras.first(where: { $0.id == id }) {
+            let linked = controller.roster.camera(side.id)?.linked == true
+            CameraTile(name: controller.roster.camera(side.id)?.name ?? "Камера", frame: side.frame, main: false,
+                       connected: side.connected, recording: side.recording, battery: side.battery,
+                       link: linked ? .linked : .unlinked, onLink: { controller.linkCamera(side.id, !linked) })
+        }
+    }
+}
+
+/// У камеры ленты — подсказка и меню по правому клику; у главной их нет.
+private struct SideMenu: ViewModifier {
+    let controller: CameraController
+    let id: String
+
+    func body(content: Content) -> some View {
+        if id != controller.currentCameraID, let side = controller.sideCameras.first(where: { $0.id == id }) {
+            content
+                .help(side.connected ? "Сделать главной; перетащите, чтобы поменять место"
+                      : "Нет связи — программа стучится к камере снова")
+                .contextMenu {
+                    Button("Сделать главной") { controller.selectCamera(id) }
+                        .disabled(!side.connected)
+                    Button("Убрать из ленты") { controller.removeFromStrip(id) }
+                }
+        } else {
+            content.help("Главная; перетащите, чтобы поменять место")
         }
     }
 }

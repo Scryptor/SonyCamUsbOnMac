@@ -314,7 +314,9 @@ class CameraController(private val context: Context, private val scope: Coroutin
     private var wifiSightings by mutableStateOf<Map<WiFiAddress, CameraSighting>>(emptyMap())
     /** С какой камерой сеанс (подключение, тихое восстановление) и какая это камера из знакомых. */
     private var currentLink by mutableStateOf<CameraLink?>(null)
-    private var currentCameraId by mutableStateOf<String?>(null)
+    /** id главной в книге камер; null — сеанса нет или DeviceInfo ещё не пришёл. По нему лента ставит плитку главной на место. */
+    var currentCameraId by mutableStateOf<String?>(null)
+        private set
     /**
      * Камера, которую выбрали в списке (или «Сопрячь» у неё): подключаемся к ней, а не как обычно, — по Wi-Fi даже когда на
      * кабеле есть другая. Подключились или попытка не удалась — выбора больше нет, дальше как обычно.
@@ -1368,6 +1370,20 @@ class CameraController(private val context: Context, private val scope: Coroutin
         journal("«${cameraBook.find(id)?.name ?: id}» — убрана из ленты")
     }
 
+    /** Плитку ленты id перетащили на место плитки onto: порядок ленты — в книге камер, запоминается сразу. */
+    fun moveInStrip(id: String, onto: String) {
+        val book = cameraBook.moved(id, onto)
+        if (book == cameraBook) return
+        updateBook(book)
+        val after = book.cameras.indexOfFirst { it.id == id } > book.cameras.indexOfFirst { it.id == onto }
+        journal("«${book.find(id)?.name ?: id}» — в ленте ${if (after) "после" else "перед"} «${book.find(onto)?.name ?: onto}»")
+    }
+
+    /** Кто станет главной, когда главной нет: верхняя камера ленты на связи. */
+    private fun successor(): SideCamera? =
+        CameraStrip.successor(cameraBook, sideCameras.filter { it.connected }.map { it.id })
+            ?.let { id -> sideCameras.firstOrNull { it.id == id } }
+
     // MARK: - Группа камер
 
     /** Связанные камеры ленты на связи: повторяют за главной настройки, пресеты и запись. */
@@ -1966,7 +1982,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
         val chosen = (choice as? CameraLink.WiFi)?.address
         if (!wifiWanted || wifiBusy) return
         if (chosen == null && !isPairing) {
-            sideCameras.firstOrNull { it.connected }?.let { return promote(it) }
+            successor()?.let { return promote(it) }
         }
         // выбранную в списке камеру, как и сопряжение, пауза после обрыва не держит
         if (chosen == null && !wifiPolicy.mayAttempt(prefs.wifiEnabled, isPairing, System.currentTimeMillis())) return
@@ -2169,13 +2185,13 @@ class CameraController(private val context: Context, private val scope: Coroutin
 
     /**
      * Сеанс по Wi-Fi оборвался: повтор с растущей паузой; камеру на кабеле, если она есть, подхватит опрос USB. В ленте
-     * есть камера на связи — она главная сразу; пропавшая, если была в ленте, остаётся там «без связи».
+     * есть камеры на связи — верхняя из них главная сразу; пропавшая, если была в ленте, остаётся там «без связи».
      */
     private fun wifiLost() {
         val lostId = currentCameraId
         val lastFrame = frame
         teardown()
-        val successor = sideCameras.firstOrNull { it.connected }
+        val successor = successor()
         if (lostId != null && cameraBook.find(lostId)?.inStrip == true && successor != null) {
             val name = cameraBook.find(lostId)?.name ?: "Камера"
             (sideCameras.firstOrNull { it.id == lostId } ?: newSide(lostId, name)).showLast(lastFrame)

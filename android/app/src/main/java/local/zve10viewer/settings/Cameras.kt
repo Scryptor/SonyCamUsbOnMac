@@ -215,6 +215,26 @@ data class CameraBook(val cameras: List<KnownCamera> = emptyList(), val preferre
     }
 
     /**
+     * Плитки ленты сверху вниз: те же id в порядке знакомых камер — выбор главной их не переставляет. id без записи — в
+     * конце, в том порядке, в каком пришли.
+     */
+    fun stripOrder(ids: List<String>): List<String> =
+        ids.sortedBy { id -> cameras.indexOfFirst { it.id == id }.takeIf { it >= 0 } ?: Int.MAX_VALUE }
+
+    /**
+     * Плитку id перетащили на плитку onto: запись id встаёт на место onto — тащили вниз — сразу за ней, вверх — перед ней.
+     * Для плиток ленты это и есть «встала на место той, на которую навели», даже когда между ними в книге камеры не из
+     * ленты. Неизвестный id или тот же самый — книга та же; предпочтённая не меняется.
+     */
+    fun moved(id: String, onto: String): CameraBook {
+        val from = cameras.indexOfFirst { it.id == id }
+        val to = cameras.indexOfFirst { it.id == onto }
+        if (from < 0 || to < 0 || from == to) return this
+        // вниз — без неё onto на одну выше, и место to как раз за onto; вверх — место to и есть перед onto
+        return copy(cameras = cameras.toMutableList().apply { add(to, removeAt(from)) })
+    }
+
+    /**
      * Камера по этому адресу ответила «не знаю программу» (Init Fail 1): больше не стучимся. Своей записи нет — значит,
      * стучались из-за прежней памяти: её сопряжение и снимается, как снимали прежние версии.
      */
@@ -344,6 +364,7 @@ data class CameraBook(val cameras: List<KnownCamera> = emptyList(), val preferre
             return CameraBook(listOf(legacy), preferred)
         }
 
+        /** Порядок записей — порядок плиток ленты: перетаскивание переставляет записи, сами записи прежние. */
         fun toJson(cameras: List<KnownCamera>): String = JSONArray().apply {
             cameras.forEach { camera ->
                 val item = JSONObject().put("id", camera.id).put("aliases", JSONArray(camera.aliases)).put("name", camera.name)
@@ -415,6 +436,9 @@ object CameraStrip {
             .take(room)
             .toList()
     }
+
+    /** Главная пропала: главной становится верхняя камера ленты на связи (connected — их id), а не та, что подключилась раньше. */
+    fun successor(book: CameraBook, connected: List<String>): String? = book.stripOrder(connected).firstOrNull()
 }
 
 /**

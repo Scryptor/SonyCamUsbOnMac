@@ -271,6 +271,37 @@ private func usb(_ key: String, serial: String? = nil) -> CameraSighting {
     #expect(roster.camera(b)?.linked == true)
 }
 
+@Test func stripKeepsTheOrderOfKnownCamerasWhicheverIsMain() {
+    var roster = CameraRoster()
+    let a = roster.connected(serial: "A", model: "ZV-E10", link: .wifi(CameraEndpoint(host: "10.0.0.5")), now: now)
+    let b = roster.connected(serial: "B", model: "ZV-E10", link: .wifi(CameraEndpoint(host: "10.0.0.6")), now: now)
+    let c = roster.connected(serial: "C", model: "ZV-E10", link: .wifi(CameraEndpoint(host: "10.0.0.7")), now: now)
+    #expect(roster.stripOrder([c, a, b]) == [a, b, c])            // главная первой не встаёт
+    #expect(roster.stripOrder([b, "x", a, "y"]) == [a, b, "x", "y"])  // без записи — в конце, как пришли
+    roster.connected(serial: "C", model: "ZV-E10", link: .wifi(CameraEndpoint(host: "10.0.0.8")), now: now + 60)
+    #expect(roster.stripOrder([c, b, a]) == [a, b, c])            // подключилась снова — место прежнее
+}
+
+@Test func draggedTileTakesTheSlotOfTheOneItIsDroppedOn() throws {
+    var roster = CameraRoster()
+    let a = roster.connected(serial: "A", model: "ZV-E10", link: .wifi(CameraEndpoint(host: "10.0.0.5")), now: now)
+    let p = roster.connected(serial: "P", model: "ZV-E10", link: .wifi(CameraEndpoint(host: "10.0.0.9")), now: now)
+    let b = roster.connected(serial: "B", model: "ZV-E10", link: .wifi(CameraEndpoint(host: "10.0.0.6")), now: now)
+    let q = roster.connected(serial: "Q", model: "ZV-E10", link: .wifi(CameraEndpoint(host: "10.0.0.10")), now: now)
+    let c = roster.connected(serial: "C", model: "ZV-E10", link: .wifi(CameraEndpoint(host: "10.0.0.7")), now: now)
+    roster.move(c, onto: a)                                       // вверх — перед ней
+    #expect(roster.stripOrder([a, b, c]) == [c, a, b])
+    roster.move(c, onto: b)                                       // вниз — после неё, через камеры не из ленты
+    #expect(roster.stripOrder([a, b, c]) == [a, b, c])
+    #expect(roster.stripOrder([p, q]) == [p, q])
+    roster.move(a, onto: "x")
+    roster.move(a, onto: a)
+    #expect(roster.stripOrder([c, b, a]) == [a, b, c])
+    roster.move(b, onto: a)
+    let loaded = CameraRoster.load(cameras: try #require(roster.encoded()), preferred: nil, legacyName: nil, legacyHost: nil)
+    #expect(loaded.stripOrder([a, b, c]) == [b, a, c])            // порядок — в самой записи
+}
+
 @Test func groupFailuresMakeOneStatusLine() {
     var failures = GroupFailures()
     #expect(failures.text == nil)

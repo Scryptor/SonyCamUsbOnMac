@@ -411,6 +411,28 @@ public struct CameraRoster: Equatable, Sendable {
         known[index].linked = linked
     }
 
+    /// Плитки ленты по порядку: эти id — в порядке знакомых камер, так что выбор главной места не меняет; без записи —
+    /// в конце, как пришли.
+    public func stripOrder(_ ids: [String]) -> [String] {
+        let position = Dictionary(known.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { first, _ in first })
+        return ids.enumerated().sorted { a, b in
+            switch (position[a.element], position[b.element]) {
+            case let (x?, y?): return x < y
+            case (_?, nil): return true
+            case (nil, _?): return false
+            case (nil, nil): return a.offset < b.offset
+            }
+        }.map(\.element)
+    }
+
+    /// Плитку `id` перетащили на плитку `target`: запись встаёт на её место — вниз после неё, вверх перед ней.
+    public mutating func move(_ id: String, onto target: String) {
+        guard id != target, let from = known.firstIndex(where: { $0.id == id }),
+              let to = known.firstIndex(where: { $0.id == target }) else { return }
+        // на прежний индекс `target`: вниз — это сразу после неё (она сдвинулась на место вынутой), вверх — перед ней
+        known.insert(known.remove(at: from), at: to)
+    }
+
     /// Главной стала камера ленты `main`. Связанная — прежняя главная (если она в ленте) тоже связана: группа остаётся
     /// вместе. Несвязанная — связи не меняются.
     public mutating func switchedTo(_ main: String, from previous: String?) {

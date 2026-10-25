@@ -1303,6 +1303,24 @@ final class CameraController {
         storeRoster()
     }
 
+    // MARK: - Порядок плиток
+
+    /// Плитки ленты сверху вниз — главная и камеры ленты в порядке знакомых камер: выбор главной места не меняет.
+    var stripTiles: [String] {
+        roster.stripOrder((currentCameraID.map { [$0] } ?? []) + sideCameras.map(\.id))
+    }
+
+    /// Верхняя камера ленты на связи: она становится главной, когда главной нет.
+    private var topConnectedSide: SideCamera? {
+        roster.stripOrder(sideCameras.map(\.id)).lazy.compactMap { id in self.sideCameras.first { $0.id == id && $0.connected } }.first
+    }
+
+    /// Плитку перетащили на другую: встаёт на её место, порядок запоминается.
+    func moveInStrip(_ id: String, onto target: String) {
+        roster.move(id, onto: target)
+        storeRoster()
+    }
+
     /// На связанной не прижилось — в строку состояния раз на серию: «Не удалось на «C»: ISO 51200».
     private func groupFailed(_ side: SideCamera, _ what: String) {
         groupFailures.add(camera: roster.camera(side.id)?.name ?? "камера", what: what)
@@ -1575,8 +1593,8 @@ final class CameraController {
         }
         // выбранная в списке камера или сопряжение с одной — только она
         guard wifiWanted, pairingTarget == nil, chosen == nil else { return }
-        // последняя не ответила, а в ленте есть камеры на связи — главной становится первая
-        if !isPairing, let side = sideCameras.first(where: \.connected) { return promote(side) }
+        // последняя не ответила, а в ленте есть камеры на связи — главной становится верхняя
+        if !isPairing, let side = topConnectedSide { return promote(side) }
         if isPairing, wifiStatus == nil { wifiStatus = "Ищу камеру в сети…" }
         let responses = await WiFiDiscovery.search()
         noteSightings(responses)
@@ -1771,8 +1789,8 @@ final class CameraController {
         if reconnectingSince != nil { note("восстановить сеанс не вышло — жду камеру как обычно") }
         let lost = currentCameraID.flatMap(roster.camera)
         teardown()
-        // в ленте есть камеры на связи — главной становится первая; пропавшая, если она в ленте, — плиткой «нет связи»
-        if let side = sideCameras.first(where: \.connected) {
+        // в ленте есть камеры на связи — главной становится верхняя; пропавшая, если она в ленте, — плиткой «нет связи»
+        if let side = topConnectedSide {
             if let lost, lost.inStrip, let endpoint = lost.endpoint { _ = sideCamera(lost.id, endpoint) }
             promote(side, after: lost?.id)
             return

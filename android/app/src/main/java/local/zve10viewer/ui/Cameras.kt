@@ -1,12 +1,22 @@
 package local.zve10viewer.ui
 
+import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
+import androidx.compose.foundation.indication
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,8 +39,12 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -45,9 +59,15 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerInputChange
+import androidx.compose.ui.input.pointer.PointerInputScope
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.onLongClick
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
@@ -58,7 +78,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import local.zve10viewer.CameraController
 import local.zve10viewer.settings.CameraEntry
 import local.zve10viewer.settings.CameraState
@@ -188,48 +212,254 @@ private fun RenameCameraDialog(name: String, onSave: (String) -> Unit, onDismiss
     )
 }
 
+/** Промежуток между плитками ленты. */
+private val StripSpacing = 8.dp
+
 /**
- * Лента камер — колонка слева под верхней панелью: главная (выделена) и камеры ленты. Плитка — превью, имя, «● REC» во
- * время записи, заряд, если 20 % и меньше, «нет связи» поверх последнего кадра. Касание камеры ленты — она главная;
- * долгое нажатие — «Сделать главной», «Убрать из ленты». Цепочка справа внизу — связать камеру с главной: горит —
- * связана; у главной цепочка (без кнопки) — когда хоть одна связана.
+ * Лента камер — колонка слева под верхней панелью: главная (выделена) и камеры ленты, в порядке знакомых камер. Плитка —
+ * превью, имя, «● REC» во время записи, заряд, если 20 % и меньше, «нет связи» поверх последнего кадра. Касание камеры
+ * ленты — она главная, на своём месте: плитки не переставляются. Долгое нажатие поднимает плитку (у камеры ленты — ещё и
+ * меню «Сделать главной», «Убрать из ленты»); повели пальцем — плитка едет за ним, соседние раздвигаются, отпустили — она
+ * на новом месте. Цепочка справа внизу — связать камеру с главной: горит — связана; у главной цепочка (без кнопки) —
+ * когда хоть одна связана.
  */
 @Composable
 fun CameraStrip(controller: CameraController, modifier: Modifier = Modifier) {
-    Column(modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    val scope = rememberCoroutineScope()
+    val drag = remember { StripDrag(scope, { stripTiles(controller) }, controller::moveInStrip) }
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(StripSpacing)) {
         val battery = controller.property(SettingID.battery)?.current?.intValue?.toInt()?.takeIf { it in 0..100 }
         val book = controller.cameraBook
-        StripTile(controller.frame, controller.cameraName, main = true, recording = controller.recordingStartedAt != null,
-            battery = battery, connected = controller.phase == CameraController.Phase.ready,
-            linked = controller.sideCameras.any { book.find(it.id)?.linked == true })
-        controller.sideCameras.forEach { side ->
-            val linked = book.find(side.id)?.linked == true
-            StripTile(side.frame, book.find(side.id)?.name ?: side.name, main = false, recording = side.recording,
-                battery = side.battery, connected = side.connected, linked = linked,
-                onMain = { controller.makeMain(side.id) }, onRemove = { controller.removeFromStrip(side.id) },
-                onLink = { controller.setLinked(side.id, !linked) })
+        val main = controller.currentCameraId
+        val sides = controller.sideCameras.associateBy { it.id }
+        stripTiles(controller).forEach { id ->
+            // у каждой камеры своя плитка: переставили — она едет на новое место вместе с жестом и меню
+            key(id) {
+                val side = id?.takeIf { it != main }?.let(sides::get)
+                if (side == null) {
+                    StripTile(id, drag, controller.frame, controller.cameraName, main = true,
+                        recording = controller.recordingStartedAt != null, battery = battery,
+                        connected = controller.phase == CameraController.Phase.ready,
+                        linked = controller.sideCameras.any { book.find(it.id)?.linked == true })
+                } else {
+                    val linked = book.find(side.id)?.linked == true
+                    StripTile(id, drag, side.frame, book.find(side.id)?.name ?: side.name, main = false, recording = side.recording,
+                        battery = side.battery, connected = side.connected, linked = linked,
+                        onMain = { controller.makeMain(side.id) }, onRemove = { controller.removeFromStrip(side.id) },
+                        onLink = { controller.setLinked(side.id, !linked) })
+                }
+            }
         }
     }
 }
 
-/** linked — у камеры ленты: связана с главной; у главной — ведёт группу. */
-@OptIn(ExperimentalFoundationApi::class)
+/**
+ * Плитки ленты сверху вниз: главная и камеры ленты — в порядке знакомых камер. null — главная, чей id ещё не известен
+ * (подключается, DeviceInfo не пришёл): она первой.
+ */
+private fun stripTiles(controller: CameraController): List<String?> {
+    val sides = controller.sideCameras.map { it.id }
+    val main = controller.currentCameraId ?: return listOf(null) + controller.cameraBook.stripOrder(sides)
+    return controller.cameraBook.stripOrder((listOf(main) + sides).distinct())
+}
+
+/**
+ * Перетаскивание в ленте. Поднятая плитка едет за пальцем; её середина прошла середину соседней — они сразу меняются
+ * местами в книге камер (move), а сдвиг плитки уменьшается на одно место: она остаётся под пальцем, соседняя плавно
+ * съезжает на освободившееся место. Отпустили — плитка плавно встаёт на своё. tiles — плитки сверху вниз сейчас. Без
+ * экрана — чтобы проверять тестами.
+ */
+internal class StripDrag(
+    private val scope: CoroutineScope,
+    private val tiles: () -> List<String?>,
+    private val move: (String, String) -> Unit,
+) {
+    /** Какую плитку держат пальцем; null — никакую. */
+    var lifted by mutableStateOf<String?>(null)
+        private set
+    /** Плитка поверх соседних: поднятая, а отпущенная — пока едет на место. */
+    var onTop by mutableStateOf<String?>(null)
+        private set
+    /** Насколько плитка видна ниже своего места в ленте (выше — меньше нуля), пикс. */
+    private val shifts = mutableStateMapOf<String, Float>()
+    private val slides = HashMap<String, Job>()
+    /** Шаг ленты: высота плитки и промежуток, пикс. */
+    private var pitch = 0f
+    /** Где палец относительно места поднятой плитки — без ограничения краями ленты. */
+    private var finger = 0f
+
+    fun shift(id: String?): Float = id?.let { shifts[it] } ?: 0f
+
+    fun lift(id: String, pitch: Float) {
+        slides.remove(id)?.cancel()
+        this.pitch = pitch
+        finger = shift(id)
+        lifted = id
+        onTop = id
+    }
+
+    fun drag(id: String, dy: Float) {
+        if (lifted != id || pitch <= 0f) return
+        finger += dy
+        while (true) {
+            val order = tiles()
+            val index = order.indexOf(id)
+            val step = if (finger > pitch) 1 else if (finger < -pitch) -1 else 0
+            if (index < 0 || step == 0) break
+            // главную без id (null) не двигаем; переставить не вышло — плитка просто над соседней
+            val other = order.getOrNull(index + step) ?: break
+            move(id, other)
+            if (tiles().indexOf(id) != index + step) break
+            finger -= step * pitch
+            slide(other, step * pitch)
+        }
+        val order = tiles()
+        val index = order.indexOf(id)
+        if (index < 0) return
+        // за край ленты плитка не уходит; палец вернётся — поедет снова, когда дойдёт до неё
+        shifts[id] = finger.coerceIn(-index * pitch, (order.size - 1 - index) * pitch)
+    }
+
+    fun drop(id: String) {
+        if (lifted == id) lifted = null
+        slide(id, 0f) { if (onTop == id) onTop = null }
+    }
+
+    /** Место плитки сдвинулось на by, а видна она пока там, где была: оттуда — плавно на место. */
+    private fun slide(id: String, by: Float, done: () -> Unit = {}) {
+        slides.remove(id)?.cancel()
+        val from = shift(id) + by
+        if (from == 0f) {
+            shifts.remove(id)
+            done()
+            return
+        }
+        shifts[id] = from
+        slides[id] = scope.launch {
+            animate(from, 0f, animationSpec = tween(200)) { value, _ -> shifts[id] = value }
+            shifts.remove(id)
+            done()
+        }
+    }
+}
+
+/**
+ * Жесты плитки ленты. Касание — onTap. Долгое нажатие — onLift; повели пальцем дальше touch slop — onDragStart, потом
+ * onDrag: на сколько палец сдвинулся по вертикали (первый раз — от места долгого нажатия); отпустили или жест прервали —
+ * onDrop. Касание, которое забрала вложенная кнопка (цепочка), — не наше. press — нажатие для отклика на плитке.
+ */
+private suspend fun PointerInputScope.stripTileGestures(
+    press: MutableInteractionSource,
+    onTap: () -> Unit,
+    onLift: () -> Unit,
+    onDragStart: () -> Unit,
+    onDrag: (Float) -> Unit,
+    onDrop: () -> Unit,
+) {
+    val slop = viewConfiguration.touchSlop
+    awaitEachGesture {
+        val down = awaitFirstDown()
+        val pressed = PressInteraction.Press(down.position)
+        press.tryEmit(pressed)
+        var up: PointerInputChange? = null
+        // раньше срока палец отпустили (up) или жест прервали — увели за край плитки, забрал другой: не долгое нажатие
+        val held = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) { up = waitForUpOrCancellation() } == null
+        val tap = up
+        if (!held) {
+            press.tryEmit(if (tap != null) PressInteraction.Release(pressed) else PressInteraction.Cancel(pressed))
+            if (tap != null) {
+                tap.consume()
+                onTap()
+            }
+            return@awaitEachGesture
+        }
+        press.tryEmit(PressInteraction.Release(pressed))
+        onLift()
+        var moved = Offset.Zero
+        var dragging = false
+        try {
+            while (true) {
+                val event = awaitPointerEvent()
+                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                // плитка поднята — палец её: ни кнопкам под ним, ни видео
+                event.changes.forEach { it.consume() }
+                if (!change.pressed) break
+                val step = change.position - change.previousPosition
+                if (dragging) {
+                    onDrag(step.y)
+                } else {
+                    moved += step
+                    if (moved.getDistance() > slop) {
+                        dragging = true
+                        onDragStart()
+                        onDrag(moved.y)
+                    }
+                }
+            }
+        } finally {
+            onDrop()
+        }
+    }
+}
+
+/**
+ * id — камера в книге: по нему плитку перетаскивают; null — главная ещё подключается, её не тащат. linked — у камеры
+ * ленты: связана с главной; у главной — ведёт группу.
+ */
 @Composable
-private fun StripTile(frame: ImageBitmap?, name: String, main: Boolean, recording: Boolean, battery: Int?, connected: Boolean,
-                      linked: Boolean, onMain: () -> Unit = {}, onRemove: () -> Unit = {}, onLink: () -> Unit = {}) {
+private fun StripTile(id: String?, drag: StripDrag, frame: ImageBitmap?, name: String, main: Boolean, recording: Boolean,
+                      battery: Int?, connected: Boolean, linked: Boolean, onMain: () -> Unit = {}, onRemove: () -> Unit = {},
+                      onLink: () -> Unit = {}) {
     var menu by remember { mutableStateOf(false) }
+    val press = remember { MutableInteractionSource() }
+    // жест у плитки один на всё время в ленте: главная она сейчас или нет — узнаёт по ходу
+    val isMain by rememberUpdatedState(main)
+    val makeMain by rememberUpdatedState(onMain)
+    val lift by animateFloatAsState(if (id != null && drag.lifted == id) 1f else 0f, tween(150), label = "lift")
     val description = when {
         !main -> "$name — в ленте"
         linked -> "$name — главная, ведёт группу"
         else -> "$name — главная"
     }
-    Box {
+    Box(
+        Modifier.zIndex(if (id != null && drag.onTop == id) 1f else 0f).then(
+            // жест — снаружи слоя плитки: её сдвиг и увеличение не искажают, сколько прошёл палец
+            if (id == null) Modifier else Modifier.pointerInput(Unit) {
+                stripTileGestures(press,
+                    // у главной касание ничего не делает: она уже на большом экране
+                    onTap = { if (!isMain) makeMain() },
+                    onLift = {
+                        drag.lift(id, size.height + StripSpacing.toPx())
+                        // у главной меню нет — её только перетаскивают
+                        if (!isMain) menu = true
+                    },
+                    onDragStart = { menu = false },
+                    onDrag = { drag.drag(id, it) },
+                    onDrop = { drag.drop(id) },
+                )
+            }),
+    ) {
         Box(
-            Modifier.size(width = 200.dp, height = 112.dp).clip(RoundedCornerShape(10.dp)).background(Color.Black)
+            Modifier
+                .graphicsLayer {
+                    translationY = drag.shift(id)
+                    scaleX = 1f + 0.05f * lift
+                    scaleY = 1f + 0.05f * lift
+                    shadowElevation = 16.dp.toPx() * lift
+                    shape = RoundedCornerShape(10.dp)
+                }
+                .size(width = 200.dp, height = 112.dp).clip(RoundedCornerShape(10.dp)).background(Color.Black)
                 .border(if (main) 3.dp else 1.dp, if (main) Accent else PanelLight, RoundedCornerShape(10.dp))
-                // у главной — ни касания, ни меню: она уже на большом экране
-                .combinedClickable(enabled = !main, onClick = onMain, onLongClick = { menu = true })
-                .semantics { contentDescription = description },
+                // отклик на касание — у камеры ленты: у главной касание ничего не делает
+                .then(if (main) Modifier else Modifier.indication(press, LocalIndication.current))
+                // для TalkBack плитка — одна, с именем внутри, как была с combinedClickable
+                .semantics(mergeDescendants = true) {
+                    contentDescription = description
+                    if (!main) {
+                        onClick { onMain(); true }
+                        onLongClick { menu = true; true }
+                    }
+                },
         ) {
             frame?.let {
                 Image(it, contentDescription = null, contentScale = ContentScale.Crop,
