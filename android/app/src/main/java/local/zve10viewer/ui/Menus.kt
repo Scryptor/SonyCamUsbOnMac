@@ -9,6 +9,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -175,7 +176,17 @@ fun ValueStrip(controller: CameraController, id: SettingID) {
             val state = rememberLazyListState()
             val currentIndex = options.indexOfFirst { it.value == current }
             LaunchedEffect(id, currentIndex) {
-                if (currentIndex >= 0) state.animateScrollToItem(maxOf(0, currentIndex - 3))
+                if (currentIndex < 0) return@LaunchedEffect
+                state.animateScrollToItem(maxOf(0, currentIndex - 3))
+                // длинные подписи (у баланса белого лента ещё и уже — рядом тонкая настройка): выбранное могло уйти за
+                // правый край — доводим, чтобы было видно целиком
+                val info = state.layoutInfo
+                val item = info.visibleItemsInfo.firstOrNull { it.index == currentIndex }
+                when {
+                    item == null -> state.animateScrollToItem(currentIndex)
+                    item.offset + item.size > info.viewportEndOffset ->
+                        state.animateScrollBy((item.offset + item.size - info.viewportEndOffset).toFloat())
+                }
             }
             LazyRow(Modifier.weight(1f), state = state, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 itemsIndexed(options) { _, option ->

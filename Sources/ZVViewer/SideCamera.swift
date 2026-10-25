@@ -220,14 +220,19 @@ final class SideCamera: Identifiable {
                       properties: properties, recordingStartedAt: recordingStartedAt)
     }
 
-    /// Закрыть сеанс: убрали из ленты, забыли камеру, программа закрывается. Сбросом — камера освободится сразу.
+    /// Закрыть сеанс: убрали из ленты, забыли камеру, программа закрывается. Камеру оставляем на высоком качестве
+    /// превью — в ленте оно было низким, — потом сброс: камера освободится сразу.
     func close() {
         stopTasks()
         connected = false
         let transport = transport
-        session = nil
+        let session = session
+        self.session = nil
         self.transport = nil
-        Task { await transport?.closeAbortively() }
+        Task {
+            try? await session?.setQuietly(SonyProp.liveViewImageQuality, to: LiveViewQuality.high.rawValue, type: PTPType.uint8)
+            await transport?.closeAbortively()
+        }
     }
 
     private func stopTasks() {

@@ -196,7 +196,7 @@ final class CameraController {
     private(set) var transportKind: TransportKind?
     /// Связь по Wi-Fi напрямую: камера сама раздаёт сеть (режим Wi-Fi Direct).
     private(set) var wifiDirect = false
-    /// Идёт сопряжение по Wi-Fi (кнопка «Сопрячь с камерой»).
+    /// Идёт сопряжение по Wi-Fi («Сопрячь новую камеру…» или «Сопрячь» у камеры в списке).
     private(set) var isPairing = false
     /// Что сейчас с Wi-Fi: «ищу камеру», «камера найдена, нужно сопряжение» и т.п.
     private(set) var wifiStatus: String?
@@ -1144,8 +1144,8 @@ final class CameraController {
     /// Как называть камеру, с которой сеанс: своё имя, иначе модель.
     var currentCameraName: String { roster.camera(currentCameraID)?.name ?? deviceInfo?.model ?? "Камера" }
 
-    /// Выбрали камеру в списке: закрыть сеанс с текущей и подключиться к ней. Пока идёт запись — нельзя: камера
-    /// осталась бы писать без программы.
+    /// Выбрали камеру в списке: текущая по Wi-Fi уходит в ленту, по кабелю — отключается, и подключаемся к выбранной.
+    /// Во время записи — только с главной по Wi-Fi (`canSwitchCamera`): с кабелем камера осталась бы писать без программы.
     func selectCamera(_ id: String) {
         guard let entry = cameras.first(where: { $0.id == id }), entry.state != .current else { return }
         // главная по кабелю закрылась бы посреди записи; по Wi-Fi уйдёт в ленту и продолжит писать
