@@ -128,12 +128,16 @@ try:
         time.sleep(0.2)
     check("с выключенным просмотром снимок без паузы", not seen_review and len(s["shots"]) > n)
 
-    # 6. Открыть снимок из ленты
+    # 6. Открыть снимок из ленты — в галерее, листать, закрыть
     act(action="openShot", index=0)
-    s, ok = wait(lambda s: s["review"] is not None, timeout=5)
-    check("снимок из ленты открывается до закрытия", ok and not s["review"]["timed"])
+    s, ok = wait(lambda s: s["ui"]["gallery"] is not None, timeout=5)
+    check("снимок из ленты открывается в галерее", ok and s["ui"]["gallery"]["index"] == 0)
     shot("p03-open-shot")
-    act(action="dismissReview")
+    act(action="galleryStep", offset=1)
+    s = state()
+    check("галерея листается", s["ui"]["gallery"] is not None and s["ui"]["gallery"]["index"] == min(1, len(s["shots"]) - 1))
+    act(action="closeGallery")
+    check("галерея закрывается", state()["ui"]["gallery"] is None)
 
     # 7. Меню Fn в фоторежиме
     act(action="openFn")
