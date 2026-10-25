@@ -1,5 +1,4 @@
 import Foundation
-import ImageIO
 import Testing
 @testable import ZVCore
 
@@ -154,27 +153,4 @@ import Testing
     let presets = try JSONDecoder().decode([Preset].self, from: Data(future.utf8))
     #expect(presets.map(\.name) == ["Новый", "Второй"])
     #expect(presets[0].values == [.iso: 400])
-}
-
-@Test func previewIsASmallJPEGOfTheFrame() throws {
-    let jpeg = try #require(LiveViewFrame.jpeg(from: Fixture.data("lv_frame_raw")))
-    let preview = try #require(PresetPreview.thumbnail(jpeg: jpeg))
-    let source = try #require(CGImageSourceCreateWithData(preview as CFData, nil))
-    let props = try #require(CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any])
-    #expect(props[kCGImagePropertyPixelWidth] as? Int == PresetPreview.width)
-    #expect(props[kCGImagePropertyPixelHeight] as? Int == PresetPreview.width * 9 / 16)
-    #expect(preview.count < 40_000)
-    #expect(PresetPreview.thumbnail(jpeg: Data([1, 2, 3])) == nil)
-}
-
-@Test func previewRoundTripsThroughJSON() throws {
-    let preset = Preset(name: "Кадр", values: [.iso: 400], preview: Data([0xFF, 0xD8, 0xFF]), previewOutdated: true)
-    let data = try JSONEncoder().encode(preset)
-    #expect(try JSONDecoder().decode(Preset.self, from: data) == preset)
-    #expect(String(decoding: data, as: UTF8.self).contains(#""previewOutdated":true"#))
-    // без кадра полей нет — запись та же, что у прежних версий
-    let plain = String(decoding: try JSONEncoder().encode(Preset(name: "П", values: [.iso: 400])), as: UTF8.self)
-    #expect(!plain.contains("preview"))
-    let old = try JSONDecoder().decode(Preset.self, from: Data(#"{"name":"Старый","values":{"iso":400}}"#.utf8))
-    #expect(old.preview == nil && !old.previewOutdated)
 }

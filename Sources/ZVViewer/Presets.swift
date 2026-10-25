@@ -96,7 +96,7 @@ private struct PresetMenu: View {
     }
 }
 
-/// Строка пресета в списках: номер (он же клавиша 1–9), кадр, имя, что он ставит; галочка — стоит на камере.
+/// Строка пресета в списках: номер (он же клавиша 1–9), имя, что он ставит; галочка — стоит на камере.
 struct PresetLine: View {
     let number: Int
     let preset: Preset
@@ -108,7 +108,6 @@ struct PresetLine: View {
                 .font(.callout.monospacedDigit())
                 .foregroundStyle(.secondary)
                 .frame(width: 18, alignment: .trailing)
-            PresetThumb(preview: preset.preview, width: 56)
             VStack(alignment: .leading, spacing: 2) {
                 Text(preset.name).lineLimit(1)
                 Text(PresetCatalog.summary(preset))
@@ -236,12 +235,6 @@ private struct PresetEditor: View {
 
     private static let groups: [SettingGroup] = [.exposure, .color, .focus]
 
-    private static func previewCaption(_ preset: Preset) -> String {
-        if preset.preview == nil { return "Кадра нет — «Взять с камеры» снимет его вместе со значениями" }
-        if preset.previewOutdated { return "Кадр до правок: значения с тех пор меняли" }
-        return "Кадр — когда значения взяли с камеры"
-    }
-
     var body: some View {
         // пресет удалили — окно, пока убирает редактор, может ещё раз спросить его по старому номеру
         if controller.presets.indices.contains(index) {
@@ -258,21 +251,12 @@ private struct PresetEditor: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
-            HStack(alignment: .top, spacing: 14) {
-                PresetThumb(preview: preset.preview, width: 176)
-                VStack(alignment: .leading, spacing: 8) {
-                    TextField("Название", text: $name)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.title3)
-                        .focused($nameFocused)
-                        // пустое имя не сохраняется: пока поле пустое, у пресета прежнее
-                        .onChange(of: name) { _, value in controller.renamePreset(index, to: value) }
-                    Text(Self.previewCaption(preset))
-                        .font(.callout)
-                        .foregroundStyle(preset.previewOutdated ? Color.orange : Color.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
+            TextField("Название", text: $name)
+                .textFieldStyle(.roundedBorder)
+                .font(.title3)
+                .focused($nameFocused)
+                // пустое имя не сохраняется: пока поле пустое, у пресета прежнее
+                .onChange(of: name) { _, value in controller.renamePreset(index, to: value) }
             HStack(spacing: 8) {
                 Button("Применить") { controller.applyPreset(index) }
                     .buttonStyle(.borderedProminent)
@@ -353,90 +337,6 @@ private struct PresetSettingRow: View {
             }
         }
         .opacity(blocked ? 0.55 : 1)
-    }
-}
-
-/// Кадр пресета; у пресета без кадра — пустая плашка с камерой.
-struct PresetThumb: View {
-    let preview: Data?
-    let width: CGFloat
-
-    var body: some View {
-        Group {
-            if let image = preview.flatMap(Self.image) {
-                Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
-            } else {
-                Image(systemName: "camera")
-                    .font(width > 100 ? .title2 : .caption)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(Color.primary.opacity(0.08))
-            }
-        }
-        .frame(width: width, height: (width * 9 / 16).rounded())
-        .clipShape(RoundedRectangle(cornerRadius: width > 100 ? 8 : 4))
-    }
-
-    /// Кадры декодируются один раз: списки перерисовываются с каждым свойством камеры.
-    private static let cache = NSCache<NSData, NSImage>()
-
-    private static func image(_ data: Data) -> NSImage? {
-        if let image = cache.object(forKey: data as NSData) { return image }
-        guard let image = NSImage(data: data) else { return nil }
-        cache.setObject(image, forKey: data as NSData)
-        return image
-    }
-}
-
-/// «Новый пресет»: кадр, который сохранится с пресетом, имя — подставлено «Пресет N», можно сразу печатать своё, —
-/// и что в пресет войдёт. Кадр берётся, когда окошко открылось: сохраняется ровно то, что показали.
-struct NewPresetSheet: View {
-    let controller: CameraController
-    let screen: ScreenState
-    @State private var name = ""
-    @State private var preview: Data?
-    @State private var saved = false
-    @FocusState private var focused: Bool
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Новый пресет").font(.headline)
-            HStack(alignment: .top, spacing: 14) {
-                PresetThumb(preview: preview, width: 192)
-                VStack(alignment: .leading, spacing: 8) {
-                    // Return — кнопка «Сохранить» (она по умолчанию), без своего onSubmit: иначе сохранилось бы дважды
-                    TextField("Название", text: $name)
-                        .textFieldStyle(.roundedBorder)
-                        .focused($focused)
-                    Text(PresetCatalog.summary(PresetCatalog.capture(name: name, from: controller.properties)))
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            HStack {
-                Spacer()
-                Button("Отмена", role: .cancel) { screen.presetNaming = false }
-                    .keyboardShortcut(.cancelAction)
-                Button("Сохранить", action: save)
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(controller.phase != .ready)
-            }
-        }
-        .padding(20)
-        .frame(width: 500)
-        .onAppear {
-            name = controller.nextPresetName
-            preview = controller.presetPreviewNow()
-            focused = true
-        }
-    }
-
-    private func save() {
-        guard !saved else { return }
-        saved = true
-        controller.savePreset(name: name, preview: preview)
-        screen.presetNaming = false
     }
 }
 

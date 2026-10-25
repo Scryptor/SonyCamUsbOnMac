@@ -6,22 +6,15 @@ public struct Preset: Codable, Equatable, Sendable {
     public var values: [SettingID: Int64]
     /// Настройки, которые пресет не меняет: значение он помнит, но не применяет — включили обратно, и оно на месте.
     public var skip: Set<SettingID>
-    /// Кадр пресета (`PresetPreview`): JPEG, снятый вместе со значениями; у пресетов до кадров его нет.
-    public var preview: Data?
-    /// Значения правили после кадра — он показывает, как было до правок.
-    public var previewOutdated: Bool
 
-    public init(name: String, values: [SettingID: Int64], skip: Set<SettingID> = [], preview: Data? = nil,
-                previewOutdated: Bool = false) {
+    public init(name: String, values: [SettingID: Int64], skip: Set<SettingID> = []) {
         self.name = name
         self.values = values
         self.skip = skip
-        self.preview = preview
-        self.previewOutdated = previewOutdated
     }
 
     private enum CodingKeys: String, CodingKey {
-        case name, values, skip, preview, previewOutdated
+        case name, values, skip
     }
 
     public init(from decoder: Decoder) throws {
@@ -32,8 +25,6 @@ public struct Preset: Codable, Equatable, Sendable {
             .compactMap { key, value in SettingID(rawValue: key).map { ($0, value) } })
         // у пресетов до окна пресетов поля нет; незнакомую настройку из будущей версии пропускаем
         skip = Set((try c.decodeIfPresent([String].self, forKey: .skip) ?? []).compactMap(SettingID.init(rawValue:)))
-        preview = try c.decodeIfPresent(Data.self, forKey: .preview)
-        previewOutdated = try c.decodeIfPresent(Bool.self, forKey: .previewOutdated) ?? false
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -41,8 +32,6 @@ public struct Preset: Codable, Equatable, Sendable {
         try c.encode(name, forKey: .name)
         try c.encode(values, forKey: .values)
         if !skip.isEmpty { try c.encode(skip.map(\.rawValue).sorted(), forKey: .skip) }
-        try c.encodeIfPresent(preview, forKey: .preview)
-        if previewOutdated { try c.encode(true, forKey: .previewOutdated) }
     }
 }
 

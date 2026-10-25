@@ -101,11 +101,6 @@ final class AutomationServer {
             let title = request.query["window"] == "presets" ? "Пресеты" : "ZV-E10 Viewer"
             guard let png = screenshot(title: title) else { return Self.json(409, ["error": "no window"]) }
             return HTTPResponse.encode(status: 200, contentType: "image/png", body: png)
-        case ("GET", "/preset-preview"):
-            // кадр пресета: ?index=N
-            guard let index = request.query["index"].flatMap(Int.init), controller.presets.indices.contains(index),
-                  let jpeg = controller.presets[index].preview else { return Self.json(409, ["error": "no preview"]) }
-            return HTTPResponse.encode(status: 200, contentType: "image/jpeg", body: jpeg)
         case ("GET", "/frame"):
             guard let jpeg = controller.lastJPEG else { return Self.json(409, ["error": "no frame"]) }
             return HTTPResponse.encode(status: 200, contentType: "image/jpeg", body: jpeg)
@@ -446,8 +441,6 @@ final class AutomationServer {
                  "values": Dictionary(uniqueKeysWithValues: preset.values.map { ($0.key.rawValue, $0.value) }),
                  "skip": preset.skip.map(\.rawValue).sorted(),
                  "summary": PresetCatalog.summary(preset),
-                 "preview": preset.preview != nil,
-                 "previewOutdated": preset.previewOutdated,
                  "active": PresetCatalog.matches(preset, controller.properties)] as [String: Any]
             },
             "activePreset": controller.activePresetIndex ?? NSNull(),

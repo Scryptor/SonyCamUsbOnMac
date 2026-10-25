@@ -683,18 +683,12 @@ final class CameraController {
     /// Какой пресет сейчас стоит на камере: первый, у которого всё, что он ставит, совпадает; nil — никакой.
     var activePresetIndex: Int? { presets.firstIndex { PresetCatalog.matches($0, properties) } }
 
-    /// Кадр для пресета — уменьшенный последний кадр live view; кадра нет — nil.
-    func presetPreviewNow() -> Data? { lastJPEG.flatMap { PresetPreview.thumbnail(jpeg: $0) } }
-
-    /// Сохраняет текущие настройки камеры новым пресетом; возвращает его номер. Кадр — тот, что показали в окошке
-    /// «Новый пресет», а без окошка — текущий.
+    /// Сохраняет текущие настройки камеры новым пресетом; возвращает его номер.
     @discardableResult
-    func savePreset(name: String? = nil, preview: Data? = nil) -> Int? {
+    func savePreset(name: String? = nil) -> Int? {
         guard phase == .ready else { return nil }
         let title = name?.trimmingCharacters(in: .whitespaces).isEmpty == false ? name! : nextPresetName
-        var preset = PresetCatalog.capture(name: title, from: properties)
-        preset.preview = preview ?? presetPreviewNow()
-        presets.append(preset)
+        presets.append(PresetCatalog.capture(name: title, from: properties))
         storePresets()
         showStatus("Сохранено: «\(title)»")
         return presets.count - 1
@@ -735,10 +729,8 @@ final class CameraController {
 
     /// Значение настройки в пресете — камера при этом не меняется.
     func setPresetValue(_ index: Int, _ id: SettingID, _ value: Int64) {
-        guard presets.indices.contains(index), PresetCatalog.order.contains(id), presets[index].values[id] != value else { return }
+        guard presets.indices.contains(index), PresetCatalog.order.contains(id) else { return }
         presets[index].values[id] = value
-        // кадр снят с прежним значением
-        if presets[index].preview != nil { presets[index].previewOutdated = true }
         storePresets()
     }
 
@@ -751,13 +743,6 @@ final class CameraController {
     /// Включить или выключить настройку в пресете. Выключенная помнит значение; включают без значения — текущее с камеры.
     func setPresetIncluded(_ index: Int, _ id: SettingID, _ included: Bool) {
         guard presets.indices.contains(index), PresetCatalog.order.contains(id) else { return }
-        let before = PresetCatalog.effective(presets[index])
-        defer {
-            if presets[index].preview != nil, PresetCatalog.effective(presets[index]) != before {
-                presets[index].previewOutdated = true
-                storePresets()
-            }
-        }
         if included {
             if presets[index].values[id] == nil {
                 guard let value = presetDefault(id) else { return }
@@ -798,15 +783,7 @@ final class CameraController {
     /// «Взять с камеры»: всё, что камера сейчас даёт менять, — в пресет её текущими значениями.
     func recapturePreset(_ index: Int) {
         guard presets.indices.contains(index), phase == .ready else { return }
-        var fresh = PresetCatalog.recapture(presets[index], from: properties)
-        // и кадр — текущий: он снова про эти значения
-        if let preview = presetPreviewNow() {
-            fresh.preview = preview
-            fresh.previewOutdated = false
-        } else if fresh.preview != nil {
-            fresh.previewOutdated = true
-        }
-        presets[index] = fresh
+        presets[index] = PresetCatalog.recapture(presets[index], from: properties)
         storePresets()
         showStatus("«\(presets[index].name)»: значения взяты с камеры")
     }
