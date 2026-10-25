@@ -11,7 +11,8 @@ private struct Link {
 /// Имитация камеры и канала: кадры идут, пока позволяет канал (не чаще 25 к/с); решение политики камера
 /// исполняет через 0,3 с. Возвращает моменты и направления переключений.
 private func simulate(_ policy: inout LiveViewQualityPolicy, from start: Date, seconds: TimeInterval,
-                      link: (TimeInterval) -> Link, stallAt: Set<Int> = [], outage: Range<TimeInterval>? = nil)
+                      link: (TimeInterval) -> Link, stallAt: Set<Int> = [], outage: Range<TimeInterval>? = nil,
+                      sharp: Bool = false)
     -> [(t: TimeInterval, to: LiveViewQuality)] {
     var switches: [(TimeInterval, LiveViewQuality)] = []
     var cameraLevel = policy.level
@@ -33,7 +34,7 @@ private func simulate(_ policy: inout LiveViewQualityPolicy, from start: Date, s
         policy.noteRTT(l.rtt, at: now)
         policy.record(bytes: bytes, seconds: fetch, level: cameraLevel, at: now)
         let inOutage = outage.map { $0.contains(t) } ?? false
-        if let target = policy.decide(now: now, outage: inOutage) {
+        if let target = policy.decide(now: now, outage: inOutage, sharp: sharp) {
             switches.append((t, target))
             pending = (target, t + 0.3)
         }
@@ -115,4 +116,24 @@ private let weak = Link(bytesPerSecond: 0.5e6)
     #expect(policy.level == .low)
     let wait = policy.secondsUntilUpAttempt(now: start.addingTimeInterval(8)) ?? -1
     #expect(wait > 9 && wait <= 15)
+}
+
+/// Картинка увеличена: чёткость важнее плавности — высокое держим до 6 к/с, а не до 12.
+@Test func qualityZoomedViewKeepsHighDownToSixFPS() {
+    let eight = Link(bytesPerSecond: 0.62e6)
+    var plain = LiveViewQualityPolicy(now: start)
+    #expect(simulate(&plain, from: start, seconds: 30, link: { _ in eight }).map(\.to) == [.low])
+    var sharp = LiveViewQualityPolicy(now: start)
+    #expect(simulate(&sharp, from: start, seconds: 30, link: { _ in eight }, sharp: true).isEmpty)
+    var hopeless = LiveViewQualityPolicy(now: start)
+    #expect(simulate(&hopeless, from: start, seconds: 30, link: { _ in Link(bytesPerSecond: 0.33e6) }, sharp: true).map(\.to) == [.low])
+}
+
+/// …и возвращаем высокое с 10 к/с, а не с 18.
+@Test func qualityZoomedViewReturnsToHighFromTenFPS() {
+    let link: (TimeInterval) -> Link = { $0 < 10 ? Link(bytesPerSecond: 0.33e6) : Link(bytesPerSecond: 0.85e6) }
+    var plain = LiveViewQualityPolicy(now: start)
+    #expect(simulate(&plain, from: start, seconds: 60, link: link).map(\.to) == [.low])
+    var sharp = LiveViewQualityPolicy(now: start)
+    #expect(simulate(&sharp, from: start, seconds: 60, link: link, sharp: true).map(\.to) == [.low, .high])
 }

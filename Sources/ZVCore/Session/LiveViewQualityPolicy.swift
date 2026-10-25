@@ -26,6 +26,9 @@ public struct LiveViewQualityPolicy: Sendable {
         public var downFPS: Double = 12
         /// Не ниже этой частоты на высоком (прогноз) — возвращаем.
         public var upFPS: Double = 18
+        /// То же, пока картинка увеличена: чёткость важнее плавности, высокое держим до последнего.
+        public var sharpDownFPS: Double = 6
+        public var sharpUpFPS: Double = 10
         public var downWindow: TimeInterval = 5
         public var upWindow: TimeInterval = 10
         /// Столько кадров нужно в окне, чтобы судить о канале.
@@ -120,7 +123,8 @@ public struct LiveViewQualityPolicy: Sendable {
     }
 
     /// Какое качество нужно сейчас; nil — оставить как есть. outage — связь пропала: о канале ничего не известно.
-    public mutating func decide(now: Date, outage: Bool) -> LiveViewQuality? {
+    /// sharp — картинка увеличена на экране: пороги частоты ниже (6 и 10 к/с вместо 12 и 18).
+    public mutating func decide(now: Date, outage: Bool, sharp: Bool = false) -> LiveViewQuality? {
         if let wanted = requested {
             guard now.timeIntervalSince(wanted.at) > tuning.switchTimeout else { return nil }
             requested = nil
@@ -128,8 +132,8 @@ public struct LiveViewQualityPolicy: Sendable {
         guard !outage else { return nil }
         let target: LiveViewQuality?
         switch level {
-        case .high: target = shouldGoDown(now: now) ? .low : nil
-        case .low: target = shouldGoUp(now: now) ? .high : nil
+        case .high: target = shouldGoDown(now: now, below: sharp ? tuning.sharpDownFPS : tuning.downFPS) ? .low : nil
+        case .low: target = shouldGoUp(now: now, from: sharp ? tuning.sharpUpFPS : tuning.upFPS) ? .high : nil
         }
         guard let target else {
             if level == .high, let up = lastUpAt, now.timeIntervalSince(up) >= tuning.stableAfter {
@@ -149,20 +153,20 @@ public struct LiveViewQualityPolicy: Sendable {
         return target
     }
 
-    private func shouldGoDown(now: Date) -> Bool {
+    private func shouldGoDown(now: Date, below downFPS: Double) -> Bool {
         guard now.timeIntervalSince(levelSince) >= tuning.downWindow else { return false }
         let stalls = samples.filter { now.timeIntervalSince($0.at) <= tuning.stallWindow && $0.seconds > tuning.stallSeconds }
         if stalls.count >= tuning.stallsToDown { return true }
         let fast = samples.filter { now.timeIntervalSince($0.at) <= tuning.downWindow && $0.seconds <= tuning.stallSeconds }
         guard fast.count >= tuning.minDownSamples, let fps = predictedHighFPS(now: now, window: tuning.downWindow) else { return false }
-        return fps < tuning.downFPS
+        return fps < downFPS
     }
 
-    private func shouldGoUp(now: Date) -> Bool {
+    private func shouldGoUp(now: Date, from upFPS: Double) -> Bool {
         guard now >= holdUntil, now.timeIntervalSince(levelSince) >= tuning.upWindow else { return false }
         let recent = samples.filter { now.timeIntervalSince($0.at) <= tuning.upWindow }
         guard recent.count >= tuning.minUpSamples, !recent.contains(where: { $0.seconds > tuning.stallSeconds }),
               let fps = predictedHighFPS(now: now, window: tuning.upWindow) else { return false }
-        return fps >= tuning.upFPS
+        return fps >= upFPS
     }
 }
