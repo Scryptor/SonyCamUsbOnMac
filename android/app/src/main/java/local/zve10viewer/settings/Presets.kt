@@ -52,6 +52,18 @@ object PresetCatalog {
         return Preset(name, values)
     }
 
+    /**
+     * В каком порядке возвращать после просмотра: зависимые — раньше своей основы. Температуру камера даёт менять только
+     * в «Цвет. темп.», экспокоррекцию — только при ISO AUTO: пока баланс белого и ISO — от пресета, они ещё меняются.
+     * Иначе ручная температура и экспокоррекция камеры так и остались бы от пресета.
+     */
+    val restoreOrder: List<SettingID> = listOf(SettingID.colorTemperature, SettingID.exposureComp) +
+        order.filter { it != SettingID.colorTemperature && it != SettingID.exposureComp }
+
+    /** Что вернуть после быстрого просмотра: текущие значения камеры всего, что пресет поменяет. */
+    fun restoreValues(preset: Preset, properties: Map<Int, SonyProperty>): Map<SettingID, Long> =
+        effective(preset).keys.mapNotNull { id -> properties[id.code]?.current?.intValue?.let { id to it } }.toMap()
+
     /** Группы окна пресетов — как во «Всех настройках», только настройки каталога: экспозиция, цвет, фокус. */
     val groups: List<Pair<String, List<SettingID>>> = listOf(SettingGroup.exposure, SettingGroup.color, SettingGroup.focus)
         .map { group -> group.title to group.settings.filter { it in order } }
@@ -185,8 +197,12 @@ object PresetCatalog {
     private fun known(name: String): SettingID? = runCatching { SettingID.valueOf(name) }.getOrNull()
 }
 
-/** Применяет пресет по одной настройке, в порядке каталога: только то, что применится (effective). Совпадающие значения не пишутся. */
-suspend fun CameraSession.apply(preset: Preset): PresetResult {
+/**
+ * Применяет пресет по одной настройке, в порядке каталога: только то, что применится (effective). Совпадающие значения
+ * не пишутся. keepGoing — писать ли дальше: отпустили «Посмотреть» — начатая запись доходит до подтверждения, следующие
+ * не начинаются. Не отмена корутины: она оборвала бы обмен с камерой посреди записи.
+ */
+suspend fun CameraSession.apply(preset: Preset, keepGoing: () -> Boolean = { true }): PresetResult {
     val applied = ArrayList<SettingID>()
     val skipped = ArrayList<SettingID>()
     val values = PresetCatalog.effective(preset)
@@ -197,24 +213,48 @@ suspend fun CameraSession.apply(preset: Preset): PresetResult {
         // работает только с ISO AUTO: если базовая настройка не применилась, зависимые не трогаем
         val base = PresetCatalog.dependency[id]
         val baseFailed = base != null && values[base] != null && base !in applied
-        if (!connected || baseFailed) {
+        if (!connected || baseFailed || !keepGoing()) {
             skipped += id
             continue
         }
-        if (properties.value[id.code]?.current?.intValue == value) {
-            applied += id
-            continue
-        }
-        try {
-            if (set(id.code, value) == SetResult.Confirmed) applied += id else skipped += id
-        } catch (e: TransportException) {
-            if (e.disconnected) connected = false
-            skipped += id
-        } catch (e: Exception) {
-            skipped += id
-        }
+        connected = writePresetValue(id, value, applied, skipped)
     }
     return PresetResult(applied, skipped)
+}
+
+/** Возвращает камере значения после быстрого просмотра — по одному, в PresetCatalog.restoreOrder; совпадающие не пишутся. */
+suspend fun CameraSession.restore(values: Map<SettingID, Long>): PresetResult {
+    val applied = ArrayList<SettingID>()
+    val skipped = ArrayList<SettingID>()
+    var connected = true
+    for (id in PresetCatalog.restoreOrder) {
+        val value = values[id] ?: continue
+        if (!connected) {
+            skipped += id
+            continue
+        }
+        connected = writePresetValue(id, value, applied, skipped)
+    }
+    return PresetResult(applied, skipped)
+}
+
+/** Одна настройка пресета: совпадает — не пишем. Возвращает, осталась ли связь. */
+private suspend fun CameraSession.writePresetValue(id: SettingID, value: Long, applied: MutableList<SettingID>,
+                                                   skipped: MutableList<SettingID>): Boolean {
+    if (properties.value[id.code]?.current?.intValue == value) {
+        applied += id
+        return true
+    }
+    return try {
+        if (set(id.code, value) == SetResult.Confirmed) applied += id else skipped += id
+        true
+    } catch (e: TransportException) {
+        skipped += id
+        !e.disconnected
+    } catch (e: Exception) {
+        skipped += id
+        true
+    }
 }
 
 /**

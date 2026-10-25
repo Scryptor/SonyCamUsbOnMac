@@ -151,6 +151,8 @@ class ScreenState {
     var presetMenuOpen by mutableStateOf(false)
     /** Окошко «Новый пресет» — имя и что войдёт. */
     var newPresetOpen by mutableStateOf(false)
+    /** «Посмотреть» держат: окно пресетов прозрачно — не мешает смотреть на картинку. */
+    var presetPeeking by mutableStateOf(false)
     /** Окно пресетов и какой пресет в нём выбран (номер с 0). Переживает обрыв связи: на экране ожидания оно то же. */
     var presetsOpen by mutableStateOf(false)
     var presetsSelected by mutableIntStateOf(0)
@@ -493,6 +495,14 @@ private fun LiveScreen(controller: CameraController, screen: ScreenState) {
             }, onPresets = { screen.openPresets(controller.activePresetIndex ?: 0) })
         }
         if (screen.presetsOpen) PresetsOverlay(controller, screen)
+        // быстрый просмотр пресета: окно прозрачно, над картинкой — что сейчас на камере
+        controller.previewingPreset?.let { index ->
+            Text(if (controller.previewReturning) "Возвращаю как было…"
+                else "Просмотр «${controller.presets.getOrNull(index)?.name.orEmpty()}» — отпустите кнопку, вернётся как было",
+                color = Color.White, fontSize = 17.sp,
+                modifier = Modifier.align(Alignment.TopCenter).padding(top = 84.dp).background(Panel, RoundedCornerShape(20.dp))
+                    .padding(horizontal = 18.dp, vertical = 10.dp))
+        }
         // касания в окошке — в своём окне, экран их не видит: закрыли — считаем касанием, элементы не исчезают сразу
         if (screen.newPresetOpen) NewPresetDialog(controller) {
             screen.newPresetOpen = false

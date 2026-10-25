@@ -41,6 +41,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
@@ -219,7 +220,9 @@ fun PresetsOverlay(controller: CameraController, screen: ScreenState) {
     var focusName by remember { mutableStateOf(false) }
     BackHandler { screen.presetsOpen = false }
     Box(
-        Modifier.fillMaxSize().background(Color(0x99000000)).pointerInput(Unit) { detectTapGestures { screen.presetsOpen = false } },
+        // пока держат «Посмотреть» — окна не видно, но палец оно не отпускает
+        Modifier.fillMaxSize().alpha(if (screen.presetPeeking) 0f else 1f).background(Color(0x99000000))
+            .pointerInput(Unit) { detectTapGestures { screen.presetsOpen = false } },
         contentAlignment = Alignment.Center,
     ) {
         // непрозрачная: под окном на экране ожидания — крупный белый текст, он просвечивал бы сквозь значения
@@ -321,6 +324,7 @@ private fun PresetEditor(controller: CameraController, screen: ScreenState, inde
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             val free = online && !controller.isApplyingPreset
             WindowButton("Применить", enabled = free, accent = true) { controller.applyPreset(index) }
+            PeekButton(controller, screen, index, enabled = free)
             WindowButton("Взять с камеры", enabled = free) { controller.recapturePreset(index) }
             // копия встаёт следом и сразу выбрана
             WindowButton("Дублировать") { controller.duplicatePreset(index)?.let { screen.presetsSelected = it } }
@@ -488,6 +492,36 @@ private fun ValueChooser(id: SettingID, value: Long?, options: List<SettingOptio
             scroll.scrollTo(with(density) { (maxOf(0, at - 2) * 48).dp.roundToPx() })
         }
     }
+}
+
+/**
+ * «Посмотреть»: пока палец на кнопке, окно пресетов прозрачно, а пресет стоит на камере; отпустили — камера как была.
+ * Нажатие не перезапускается, когда кнопка гаснет (пресет пишется — «Применить» и она неактивны): иначе отпускание
+ * потерялось бы и камера осталась на пресете. По той же причине конец просмотра — в finally.
+ */
+@Composable
+private fun PeekButton(controller: CameraController, screen: ScreenState, index: Int, enabled: Boolean) {
+    val canPeek by rememberUpdatedState(enabled)
+    val preset by rememberUpdatedState(index)
+    val held = screen.presetPeeking
+    Text("Посмотреть", color = if (enabled || held) Color.White else Secondary, fontSize = 16.sp, textAlign = TextAlign.Center,
+        maxLines = 1,
+        modifier = Modifier.clip(RoundedCornerShape(10.dp)).background(if (held) Accent else PanelLight)
+            .semantics { contentDescription = "Посмотреть: держите, пока смотрите" }
+            .pointerInput(Unit) {
+                detectTapGestures(onPress = {
+                    if (!canPeek) return@detectTapGestures
+                    screen.presetPeeking = true
+                    controller.beginPresetPreview(preset)
+                    try {
+                        tryAwaitRelease()
+                    } finally {
+                        screen.presetPeeking = false
+                        controller.endPresetPreview()
+                    }
+                })
+            }
+            .padding(horizontal = 16.dp, vertical = 11.dp))
 }
 
 /** Кнопка окна пресетов: Accent — главное действие, красная надпись — удаление. */

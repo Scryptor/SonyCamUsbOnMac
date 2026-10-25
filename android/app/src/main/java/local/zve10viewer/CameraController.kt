@@ -88,6 +88,7 @@ import local.zve10viewer.settings.ValueFormatter
 import local.zve10viewer.settings.WhiteBalanceTemperature
 import local.zve10viewer.settings.WriteCoalescer
 import local.zve10viewer.settings.apply
+import local.zve10viewer.settings.restore
 import local.zve10viewer.sony.DeviceInfo
 import local.zve10viewer.sony.Sony
 import local.zve10viewer.sony.SonyOp
@@ -224,6 +225,16 @@ class CameraController(private val context: Context, private val scope: Coroutin
     var presets by mutableStateOf(prefs.presets)
         private set
     var isApplyingPreset by mutableStateOf(false)
+    /** Быстрый просмотр: пока держат «Посмотреть», этот пресет стоит на камере; отпустили — камера возвращается как была. */
+    var previewingPreset by mutableStateOf<Int?>(null)
+        private set
+    /** Кнопку отпустили — камера возвращается как была. */
+    var previewReturning by mutableStateOf(false)
+        private set
+    private var previewJob: Job? = null
+    /** «Хватит» для пресета, который ещё пишется: читает его корутина записи. */
+    @Volatile private var previewStopped = false
+    private var previewRestore: Map<SettingID, Long> = emptyMap()
         private set
     var isCapturing by mutableStateOf(false)
         private set
@@ -941,6 +952,51 @@ class CameraController(private val context: Context, private val scope: Coroutin
         if (index !in presets.indices) return
         presets = presets.toMutableList().also { it.removeAt(index) }
         prefs.presets = presets
+    }
+
+    /** Начать быстрый просмотр: запомнить, как камера настроена сейчас, и поставить пресет. Отпустили кнопку — endPresetPreview. */
+    fun beginPresetPreview(index: Int) {
+        val preset = presets.getOrNull(index) ?: return
+        val session = session ?: return
+        if (phase != Phase.ready || isApplyingPreset) return
+        if (PresetCatalog.effective(preset).isEmpty()) return showStatus("«${preset.name}» ничего не меняет")
+        previewRestore = PresetCatalog.restoreValues(preset, properties)
+        previewingPreset = index
+        isApplyingPreset = true
+        // что идёт просмотр, говорит плашка над картинкой — строка под панелью её не повторяет
+        statusJob?.cancel()
+        statusMessage = null
+        previewStopped = false
+        previewJob = scope.launch { session.apply(preset) { !previewStopped } }
+    }
+
+    /** Кнопку отпустили: недописанное не пишем, всё, что пресет поменял, возвращаем как было. */
+    fun endPresetPreview() {
+        if (previewingPreset == null || previewReturning) return
+        previewReturning = true
+        statusMessage = "Возвращаю как было…"
+        previewStopped = true
+        val applying = previewJob
+        val values = previewRestore
+        val session = session
+        scope.launch {
+            applying?.join()
+            val result = session?.restore(values)
+            if (!previewReturning) return@launch
+            endPreviewWithoutCamera()
+            isApplyingPreset = false
+            val skipped = result?.skipped.orEmpty()
+            showStatus(if (skipped.isEmpty()) "Вернул как было" else "Вернул как было, кроме: " + skipped.joinToString(", ") { it.title })
+        }
+    }
+
+    /** Просмотр кончился — или связь пропала, и вернуть уже не с чем. */
+    private fun endPreviewWithoutCamera() {
+        previewStopped = true
+        previewJob = null
+        previewRestore = emptyMap()
+        previewingPreset = null
+        previewReturning = false
     }
 
     /** Значение настройки в пресете — камера при этом не меняется. Включена ли настройка — не трогает. */
@@ -2009,6 +2065,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
         recordingRequest = null
         recordingCall = null
         isApplyingPreset = false
+        endPreviewWithoutCamera()
         isCapturing = false
         capturePhase = null
         dismissReview()

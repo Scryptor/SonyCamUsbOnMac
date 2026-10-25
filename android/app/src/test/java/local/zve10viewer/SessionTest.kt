@@ -28,6 +28,7 @@ import local.zve10viewer.settings.PresetCatalog
 import local.zve10viewer.settings.SettingID
 import local.zve10viewer.settings.WriteCoalescer
 import local.zve10viewer.settings.apply
+import local.zve10viewer.settings.restore
 import local.zve10viewer.sony.PropertyRange
 import local.zve10viewer.sony.SonyOp
 import local.zve10viewer.sony.SonyProp
@@ -97,6 +98,37 @@ class SessionTest {
         assertEquals(emptyList<SettingID>(), result.skipped)
         val written = camera.sent.drop(before).filter { it.first == SonyOp.SET_EXT_PROP_VALUE }.map { it.second[0].toInt() }
         assertEquals(listOf(SonyProp.WHITE_BALANCE, SonyProp.AB_SHIFT), written)
+        session.close()
+    }
+
+    @Test fun restorePutsDependentSettingsBackBeforeTheirBase() = runTest {
+        // просмотр поставил «Цвет. темп.» 3200 K и ISO AUTO с +0.7; возвращаем AWB, 7400 K, ISO 200 и ±0
+        val camera = FakeCamera().apply {
+            props.first { it.code == SonyProp.WHITE_BALANCE }.current = 0x8012
+            props.first { it.code == SonyProp.ISO }.current = 0xFFFFFF
+            props += FakeCamera.Prop(SonyProp.COLOR_TEMP, PtpType.UINT16, 3200, range = PropertyRange(2500, 9900, 100))
+            props += FakeCamera.Prop(SonyProp.EXPOSURE_COMP, PtpType.INT16, 700, listOf(0, 700))
+        }
+        val session = ready(camera, this)
+        val before = camera.sent.size
+        val result = session.restore(mapOf(SettingID.whiteBalance to 2L, SettingID.colorTemperature to 7400L, SettingID.iso to 200L,
+            SettingID.exposureComp to 0L))
+        assertEquals(emptyList<SettingID>(), result.skipped)
+        val written = camera.sent.drop(before).filter { it.first == SonyOp.SET_EXT_PROP_VALUE }.map { it.second[0].toInt() }
+        // температура — пока камера ещё в «Цвет. темп.», экспокоррекция — пока ещё ISO AUTO
+        assertEquals(listOf(SonyProp.COLOR_TEMP, SonyProp.EXPOSURE_COMP, SonyProp.WHITE_BALANCE, SonyProp.ISO), written)
+        session.close()
+    }
+
+    @Test fun applyStopsWhenTheLookIsOver() = runTest {
+        val camera = FakeCamera()
+        val session = ready(camera, this)
+        val before = camera.sent.size
+        // кнопку отпустили до того, как пресет дописался: остальное он уже не пишет
+        val result = session.apply(Preset("P", mapOf(SettingID.iso to 400L, SettingID.focusMode to 2L))) { false }
+        assertEquals(emptyList<SettingID>(), result.applied)
+        assertEquals(listOf(SettingID.iso, SettingID.focusMode), result.skipped)
+        assertTrue(camera.sent.drop(before).none { it.first == SonyOp.SET_EXT_PROP_VALUE })
         session.close()
     }
 

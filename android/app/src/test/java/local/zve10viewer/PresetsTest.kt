@@ -215,6 +215,12 @@ class PresetsTest {
             SettingID.dro), PresetCatalog.groups[0].second)
     }
 
+    @Test fun lookRestoresTheCameraValuesOfWhatThePresetChanges() {
+        val camera = SonyPropertyParser.parse(PresetsTest::class.java.getResource("/fixtures/props_settled.bin")!!.readBytes())
+        val preset = Preset("P", mapOf(SettingID.iso to 6400L, SettingID.aperture to 560L, SettingID.dro to 1L), skip = setOf(SettingID.dro))
+        assertEquals(mapOf(SettingID.iso to 200L, SettingID.aperture to 280L), PresetCatalog.restoreValues(preset, camera))
+    }
+
     @Test fun freshPresetFromTheRealCameraIsOnTheCamera() {
         val camera = SonyPropertyParser.parse(PresetsTest::class.java.getResource("/fixtures/props_settled.bin")!!.readBytes())
         val preset = PresetCatalog.capture("Пресет 1", camera)

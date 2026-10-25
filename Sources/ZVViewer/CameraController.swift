@@ -743,8 +743,9 @@ final class CameraController {
         previewRestore = PresetCatalog.restoreValues(preset, from: properties)
         previewingPreset = index
         isApplyingPreset = true
+        // что идёт просмотр, говорит плашка над картинкой — строка под панелью её не повторяет
         statusTask?.cancel()
-        statusMessage = "Просмотр «\(preset.name)»"
+        statusMessage = nil
         let stop = PresetStop()
         previewStop = stop
         previewApply = Task { _ = await session.apply(preset, while: { !stop.isStopped }) }
