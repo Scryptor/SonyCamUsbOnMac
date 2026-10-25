@@ -180,7 +180,12 @@ fun GalleryOverlay(controller: CameraController, screen: ScreenState) {
     val openId = screen.galleryShot ?: return
     val density = LocalDensity.current
     val scope = rememberCoroutineScope()
-    val pager = rememberPagerState(initialPage = shots.indexOfFirst { it.id == openId }.coerceAtLeast(0)) { controller.shots.size }
+    // страницы — от старых к новым, а пейджер развёрнут (reverseLayout): новые слева, влево — к более старым, как в
+    // ленте. Новый снимок встаёт последней страницей, и номера открытых страниц не сдвигаются — открытый снимок ни на
+    // кадр не сменяется другим
+    val pager = rememberPagerState(initialPage = (shots.size - 1 - shots.indexOfFirst { it.id == openId }).coerceIn(0, maxOf(0, shots.size - 1))) {
+        controller.shots.size
+    }
     val images = remember { GalleryImages(controller.saver) }
     var view by remember { mutableStateOf(IntSize.Zero) }
     var chrome by remember { mutableStateOf(true) }
@@ -195,18 +200,22 @@ fun GalleryOverlay(controller: CameraController, screen: ScreenState) {
         screen.galleryShot = null
     }
 
+    /** Снимок на странице page (страницы — от старых к новым) и место страницы снимка с местом index в ленте. */
+    fun shotAt(page: Int): Shot? = currentShots.getOrNull(currentShots.size - 1 - page)
+    fun pageOf(index: Int): Int = currentShots.size - 1 - index
+
     DisposableEffect(Unit) { onDispose { images.clear() } }
     BackHandler { close() }
 
-    // новый снимок встал в начало ленты — остаёмся на открытом снимке
+    // на всякий случай: открытый снимок не на своей странице — возвращаемся к нему
     LaunchedEffect(shots) {
         val index = shots.indexOfFirst { it.id == screen.galleryShot }
-        if (index >= 0 && index != pager.currentPage) pager.scrollToPage(index)
+        if (index >= 0 && pageOf(index) != pager.currentPage) pager.scrollToPage(pageOf(index))
     }
     // перелистнули — запоминаем открытый снимок; увеличение — только у него
     LaunchedEffect(pager) {
         snapshotFlow { pager.settledPage }.collect { page ->
-            val id = currentShots.getOrNull(page)?.id ?: return@collect
+            val id = shotAt(page)?.id ?: return@collect
             if (id != screen.galleryShot) {
                 screen.galleryShot = id
                 zoomJob?.cancel()
@@ -214,11 +223,13 @@ fun GalleryOverlay(controller: CameraController, screen: ScreenState) {
             }
         }
     }
+    /** Место текущего снимка в ленте: 0 — самый новый. */
+    val currentIndex = shots.size - 1 - pager.currentPage
     // лента галереи — к текущему снимку, по центру
-    LaunchedEffect(pager.currentPage, view) {
+    LaunchedEffect(currentIndex, view) {
         val itemWidth = with(density) { 72.dp.toPx() }
         val viewport = strip.layoutInfo.viewportSize.width
-        strip.animateScrollToItem(pager.currentPage, -((viewport - itemWidth) / 2).roundToInt().coerceAtLeast(0))
+        strip.animateScrollToItem(currentIndex.coerceAtLeast(0), -((viewport - itemWidth) / 2).roundToInt().coerceAtLeast(0))
     }
 
     val zoomed = zoom.isZoomed
@@ -234,10 +245,11 @@ fun GalleryOverlay(controller: CameraController, screen: ScreenState) {
             },
             beyondBoundsPageCount = 1,
             userScrollEnabled = !zoomed && dismiss.value == 0f,
-            key = { index -> currentShots.getOrNull(index)?.id ?: index },
-        ) { index ->
-            val shot = currentShots.getOrNull(index) ?: return@HorizontalPager
-            val current = index == pager.currentPage
+            reverseLayout = true,
+            key = { page -> shotAt(page)?.id ?: -page - 1L },
+        ) { page ->
+            val shot = shotAt(page) ?: return@HorizontalPager
+            val current = page == pager.currentPage
             GalleryPage(
                 shot, images, view, current,
                 zoom = if (current) zoom else ViewZoom.identity,
@@ -265,11 +277,11 @@ fun GalleryOverlay(controller: CameraController, screen: ScreenState) {
                 },
             )
         }
-        val shot = shots.getOrNull(pager.currentPage)
+        val shot = shots.getOrNull(currentIndex)
         AnimatedVisibility(chrome && dismiss.value == 0f && shot != null, enter = fadeIn(), exit = fadeOut()) {
             if (shot == null) return@AnimatedVisibility
             Box(Modifier.fillMaxSize()) {
-                GalleryTopBar(controller, shot, pager.currentPage, shots.size, onClose = { close() }, Modifier.align(Alignment.TopCenter))
+                GalleryTopBar(controller, shot, currentIndex, shots.size, onClose = { close() }, Modifier.align(Alignment.TopCenter))
                 Column(
                     Modifier.align(Alignment.BottomCenter).fillMaxWidth()
                         .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xD9000000))))
@@ -279,13 +291,13 @@ fun GalleryOverlay(controller: CameraController, screen: ScreenState) {
                     Text(galleryCaption(shot), color = Color.White, fontSize = 16.sp, style = TextStyle(fontFeatureSettings = "tnum"))
                     LazyRow(state = strip, contentPadding = PaddingValues(horizontal = 18.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         itemsIndexed(shots, key = { _, item -> item.id }) { index, item ->
-                            val selected = index == pager.currentPage
+                            val selected = index == currentIndex
                             Box(Modifier.size(64.dp).clip(RoundedCornerShape(8.dp)).background(PanelLight)
                                 .border(if (selected) 2.dp else 0.dp, if (selected) Color.White else Color.Transparent, RoundedCornerShape(8.dp))
                                 .clickable {
                                     zoomJob?.cancel()
                                     zoom = ViewZoom.identity
-                                    scope.launch { pager.animateScrollToPage(index) }
+                                    scope.launch { pager.animateScrollToPage(pageOf(index)) }
                                 }) {
                                 item.thumbnail?.let { Image(it, item.title, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize()) }
                             }
@@ -297,11 +309,11 @@ fun GalleryOverlay(controller: CameraController, screen: ScreenState) {
     }
 }
 
-/** Подпись под снимком: имя файла, что это, сколько весит и когда снят. */
+/** Подпись под снимком: имя файла, что это, сколько весит (меньше мегабайта — в КБ) и когда снят. */
 private fun galleryCaption(shot: Shot): String = listOf(
     shot.title,
     shotKind(shot.isFrameGrab, shot.files.map { it.name }, shot.pixelSize),
-    "%.1f МБ".format(shot.bytes / 1_048_576.0),
+    if (shot.bytes < 1_048_576) "${(shot.bytes + 1023) / 1024} КБ" else "%.1f МБ".format(shot.bytes / 1_048_576.0),
     SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(shot.takenAt)),
 ).joinToString(" · ")
 
@@ -358,17 +370,22 @@ private fun GalleryPage(
     val full = shot.pixelSize?.let { Size(it.width.toFloat(), it.height.toFloat()) }
         ?: image?.let { Size(it.width.toFloat(), it.height.toFloat()) } ?: Size(16f, 9f)
     val tile = rememberTile(shot, images, bitmap, view, current, zoom, full)
+    // жесты живут дольше одной перерисовки: размеры и обработчики — всегда последние, а не с первого показа
     val latestZoom by rememberUpdatedState(zoom)
+    val latestView by rememberUpdatedState(view)
+    val latestFull by rememberUpdatedState(full)
+    val latestTap by rememberUpdatedState(onTap)
+    val latestSettle by rememberUpdatedState(onSettle)
 
     Box(
         Modifier.fillMaxSize()
             .pointerInput(shot.id) {
                 detectTapGestures(
-                    onTap = { onTap() },
+                    onTap = { latestTap() },
                     onDoubleTap = { point ->
                         val z = latestZoom
-                        onSettle(if (z.isZoomed) ViewZoom.identity
-                        else ViewZoom.identity.zoomed(2.5, point, view.toSize(), full, elastic = false))
+                        latestSettle(if (z.isZoomed) ViewZoom.identity
+                        else ViewZoom.identity.zoomed(2.5, point, latestView.toSize(), latestFull, elastic = false))
                     },
                 )
             }
@@ -457,6 +474,8 @@ private fun rememberTile(shot: Shot, images: GalleryImages, base: Bitmap?, view:
         } ?: return@LaunchedEffect
         tile = Tile(Rect(px.left / full.width, px.top / full.height, px.right / full.width, px.bottom / full.height),
             decoded.asImageBitmap())
+        android.util.Log.d("ZVGallery", "участок ${px.width()}×${px.height()} из ${full.width.toInt()}×${full.height.toInt()}, " +
+            "прореживание $sample → ${decoded.width}×${decoded.height}, на экране ${"%.2f".format(display)} точки на точку снимка")
     }
     return tile
 }
