@@ -22,6 +22,11 @@ extension CameraSession {
         let full = [UInt32(SonyProp.shutterFullPress)]
         let press = PTPValue.encode(2, type: PTPType.uint16)
         let release = PTPValue.encode(1, type: PTPType.uint16)
+        // в памяти камеры уже лежит не забранное (тайм-аут длинной выдержки, оборванная загрузка, формат сменили
+        // перед снимком) — забираем и его: иначе ранний выход оставлял бы в камере новый снимок, и все следующие
+        // сдвигались бы на один
+        let leftover = max(0, Int(properties[SonyProp.objectInMemory]?.current.intValue ?? 0) - 0x8000)
+        let wanted = expected.map { $0 + leftover }
 
         try await call(SonyOp.controlDevice, half, outData: press)
         onPhase(.focusing)
@@ -49,14 +54,14 @@ extension CameraSession {
             try await refresh()
             guard (properties[SonyProp.objectInMemory]?.current.intValue ?? 0) > 0x8000 else {
                 // все ожидаемые файлы забраны, и в памяти камеры пусто — готово, следующего не ждём
-                if let expected, files.count >= expected { break }
+                if let wanted, files.count >= wanted { break }
                 try await Task.sleep(for: timing.pollInterval)
                 continue
             }
             let info = try ObjectInfo(data: try await call(SonyOp.getObjectInfo, [Sony.capturedObjectHandle]).data)
             // защита от повторной выдачи того же файла, пока счётчик в камере не обновился
             if files.contains(where: { $0.filename == info.filename }) { break }
-            onPhase(.downloading(file: files.count + 1, files: max(expected ?? 1, files.count + 1), received: 0,
+            onPhase(.downloading(file: files.count + 1, files: max(wanted ?? 1, files.count + 1), received: 0,
                                  expected: Int(info.compressedSize)))
             let data = try await call(SonyOp.getObject, [Sony.capturedObjectHandle]).data
             files.append(CapturedObject(filename: info.filename, data: data))

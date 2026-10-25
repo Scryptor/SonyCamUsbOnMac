@@ -105,3 +105,10 @@ private func close(_ a: CGFloat, _ b: CGFloat, _ eps: CGFloat = 1e-9) -> Bool { 
     #expect(zoom.imageRect(view: view, frame: frame).minX == 0)
     #expect(close(zoom.imageRect(view: view, frame: frame).maxY, view.height))
 }
+
+@Test func zoomElasticKicksInExactlyAtTheLimit() {
+    // 8 / 1,1008 × 1,1008 даёт 7,999999999999999 — сопротивление всё равно должно сработать
+    let start = ViewZoom(factor: 1.1008, center: CGPoint(x: 0.5, y: 0.5))
+    let zoom = start.zoomed(by: 8 / 1.1008 * 1.05, around: CGPoint(x: 640, y: 400), view: view, frame: frame, elastic: true)
+    #expect(abs(zoom.factor - 8 * pow(1.05, 0.3)) < 1e-6)
+}

@@ -38,6 +38,10 @@ final class FakeCamera: PTPTransport, @unchecked Sendable {
     private var _busyOnNextPress: UInt16?
     private var _capturedFiles: [(String, Data)] = []
     private var memory: [(String, Data)] = []
+    /// Снятое, но ещё не появившееся в памяти: камера обрабатывает снимок столько перечитываний свойств.
+    private var processing: [(String, Data)] = []
+    private var processingReads = 0
+    private var _captureDelayReads = 0
 
     init(props: [Prop], deviceInfo: Data? = nil) {
         self.props = props
@@ -63,6 +67,22 @@ final class FakeCamera: PTPTransport, @unchecked Sendable {
         get { locked { _capturedFiles } }
         set { locked { _capturedFiles = newValue } }
     }
+    /// Файлы, оставшиеся в памяти камеры от прошлого снимка (не забранные).
+    func putInMemory(_ files: [(String, Data)]) {
+        locked {
+            memory += files
+            setMemoryCount()
+        }
+    }
+
+    var objectsInMemory: Int { locked { memory.count } }
+
+    /// Сколько перечитываний свойств после спуска снимок «обрабатывается», прежде чем появится в памяти.
+    var captureDelayReads: Int {
+        get { locked { _captureDelayReads } }
+        set { locked { _captureDelayReads = newValue } }
+    }
+
     var disconnectOnNext: UInt16? {
         get { locked { _disconnectOnNext } }
         set { locked { _disconnectOnNext = newValue } }
@@ -121,7 +141,12 @@ final class FakeCamera: PTPTransport, @unchecked Sendable {
                 }
                 // отпускание спуска — снимок готов в памяти камеры
                 if params.first == UInt32(SonyProp.shutterFullPress), outData == Data([0x01, 0x00]), !_capturedFiles.isEmpty {
-                    memory = _capturedFiles
+                    if _captureDelayReads > 0 {
+                        processing = _capturedFiles
+                        processingReads = _captureDelayReads
+                    } else {
+                        memory += _capturedFiles
+                    }
                     _capturedFiles = []
                     setMemoryCount()
                 }
@@ -132,6 +157,15 @@ final class FakeCamera: PTPTransport, @unchecked Sendable {
                 }
                 return PTPReply(code: PTPResponseCode.invalidObjectHandle)
             case SonyOp.getAllExtPropInfo:
+                if !processing.isEmpty {
+                    if processingReads > 0 {
+                        processingReads -= 1
+                    } else {
+                        memory += processing
+                        processing = []
+                        setMemoryCount()
+                    }
+                }
                 return PTPReply(code: ok, data: encodedProps())
             case SonyOp.getObject:
                 if params.first == Sony.capturedObjectHandle {

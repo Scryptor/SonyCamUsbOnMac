@@ -205,6 +205,8 @@ struct FloatingHistogram: View {
     @State private var panel = CGSize(width: 280, height: 150)
     @State private var dragStart: CGPoint?
     @State private var dragOrigin: CGPoint?
+    /// Курсор-рука поставлен наведением: снять его, если панель убрали под курсором.
+    @State private var cursorPushed = false
 
     var body: some View {
         let origin = dragOrigin ?? restingOrigin
@@ -233,11 +235,21 @@ struct FloatingHistogram: View {
                             dragOrigin = nil
                         }
                         dragStart = nil
-                        NSCursor.openHand.set()
+                        if cursorPushed { NSCursor.openHand.set() } else { NSCursor.arrow.set() }
                     }
             )
             .onHover { inside in
-                if inside { NSCursor.openHand.push() } else { NSCursor.pop() }
+                if inside, !cursorPushed {
+                    NSCursor.openHand.push()
+                    cursorPushed = true
+                } else if !inside, cursorPushed {
+                    NSCursor.pop()
+                    cursorPushed = false
+                }
+            }
+            .onDisappear {
+                if cursorPushed { NSCursor.pop() }
+                cursorPushed = false
             }
             .position(x: origin.x + panel.width / 2, y: origin.y + panel.height / 2)
     }

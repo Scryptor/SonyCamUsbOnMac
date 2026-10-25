@@ -36,13 +36,24 @@ struct GalleryOverlay: View {
         .animation(.easeInOut(duration: 0.2), value: model.chrome)
         .onAppear {
             model.prepare(shots, around: index)
-            model.startScroll(page: step)
+            model.startScroll(page: step) { event in
+                // своё окно, не панель отладки и не лента внизу: там прокрутка — их собственная
+                guard event.window?.title == LiveScreen.windowTitle, !screen.debugOpen else { return false }
+                return !(model.chrome && event.locationInWindow.y < 120)
+            }
         }
-        .onDisappear { model.stopScroll() }
+        .onDisappear {
+            model.stopScroll()
+            screen.galleryZoomed = false
+        }
         .onChange(of: screen.galleryShot) { _, _ in
             model.zoom = .identity
+            model.pinchBase = nil
+            model.dragBase = nil
             model.prepare(shots, around: index)
         }
+        // стрелки на клавиатуре листают, только пока снимок не увеличен
+        .onChange(of: model.zoom.isZoomed) { _, zoomed in screen.galleryZoomed = zoomed }
         .onChange(of: shots.count) { _, _ in
             // снимок, открытый в галерее, пропал — закрываем
             if index == nil { screen.galleryShot = nil }
@@ -86,13 +97,17 @@ struct GalleryOverlay: View {
         .simultaneousGesture(
             MagnifyGesture()
                 .onChanged { value in
+                    if model.pinchStart != value.startLocation {
+                        model.pinchStart = value.startLocation
+                        model.pinchBase = model.zoom
+                    }
                     let base = model.pinchBase ?? model.zoom
-                    model.pinchBase = base
                     model.zoom = base.zoomed(by: value.magnification, around: value.startLocation, view: size, frame: frame,
                                              elastic: true)
                 }
                 .onEnded { _ in
                     model.pinchBase = nil
+                    model.pinchStart = nil
                     withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { model.zoom = model.zoom.settled(view: size, frame: frame) }
                 }
         )
@@ -100,11 +115,17 @@ struct GalleryOverlay: View {
             DragGesture(minimumDistance: 2)
                 .onChanged { value in
                     guard model.zoom.isZoomed else { return }
+                    if model.dragStart != value.startLocation {
+                        model.dragStart = value.startLocation
+                        model.dragBase = model.zoom
+                    }
                     let base = model.dragBase ?? model.zoom
-                    model.dragBase = base
                     model.zoom = base.panned(by: value.translation, view: size, frame: frame)
                 }
-                .onEnded { _ in model.dragBase = nil }
+                .onEnded { _ in
+                    model.dragBase = nil
+                    model.dragStart = nil
+                }
         )
         .onChange(of: model.zoom) { _, zoom in
             model.imageSize = frame
@@ -254,13 +275,19 @@ final class GalleryModel {
     var chrome = true
     var pinchBase: ViewZoom?
     var dragBase: ViewZoom?
+    /// С какой точки начался жест: другая — значит, это уже новый жест.
+    var pinchStart: CGPoint?
+    var dragStart: CGPoint?
     /// Для прокрутки двумя пальцами: где и какого размера снимок на экране.
     var viewSize = CGSize.zero
     var imageSize = CGSize(width: 3, height: 2)
     private var display: [UUID: CGImage] = [:]
     private var full: (id: UUID, image: CGImage)?
-    @ObservationIgnored private var loading: Set<UUID> = []
-    @ObservationIgnored private var loadingFull: UUID?
+    @ObservationIgnored private var loading: [UUID: Task<Void, Never>] = [:]
+    @ObservationIgnored private var loadingFull: (id: UUID, task: Task<Void, Never>)?
+    /// Какие снимки сейчас нужны (текущий и соседние) и какой открыт.
+    @ObservationIgnored private var wanted: Set<UUID> = []
+    @ObservationIgnored private var current: UUID?
     @ObservationIgnored private var scrollToken: Any?
     @ObservationIgnored private var swipe: CGFloat = 0
     @ObservationIgnored private var swiped = false
@@ -277,39 +304,52 @@ final class GalleryModel {
     func prepare(_ shots: [CameraController.Shot], around index: Int?) {
         guard let index, shots.indices.contains(index) else { return }
         let near = shots[max(0, index - 1)...min(shots.count - 1, index + 1)]
-        let wanted = Set(near.map(\.id))
+        wanted = Set(near.map(\.id))
+        current = shots[index].id
         display = display.filter { wanted.contains($0.key) }
-        if let full, full.id != shots[index].id { self.full = nil }
-        for shot in near where display[shot.id] == nil && !loading.contains(shot.id) {
-            loading.insert(shot.id)
+        // ушли со снимков — их картинки уже не нужны
+        for (id, task) in loading where !wanted.contains(id) {
+            task.cancel()
+            loading[id] = nil
+        }
+        if let full, full.id != current { self.full = nil }
+        if let loadingFull, loadingFull.id != current {
+            loadingFull.task.cancel()
+            self.loadingFull = nil
+        }
+        // открытый — первым, соседи — потом
+        for shot in near.sorted(by: { a, _ in a.id == current }) where display[shot.id] == nil && loading[shot.id] == nil {
             let urls = shot.urls
             let id = shot.id
-            Task {
-                let image = await Self.decode(urls, maxPixels: Self.displayPixels)
-                loading.remove(id)
-                if let image { display[id] = image }
+            let priority: TaskPriority = id == current ? .userInitiated : .utility
+            loading[id] = Task {
+                let image = await Self.decode(urls, maxPixels: Self.displayPixels, priority: priority)
+                guard !Task.isCancelled else { return }
+                loading[id] = nil
+                if let image, wanted.contains(id) { display[id] = image }
             }
         }
     }
 
     func loadFull(_ shot: CameraController.Shot) {
-        guard full?.id != shot.id, loadingFull != shot.id else { return }
-        loadingFull = shot.id
+        guard full?.id != shot.id, loadingFull?.id != shot.id, shot.id == current else { return }
         let urls = shot.urls
         let id = shot.id
-        Task {
-            let image = await Self.decode(urls, maxPixels: nil)
-            if loadingFull == id { loadingFull = nil }
-            if let image, image.width > display[id]?.width ?? 0 { full = (id, image) }
-        }
+        loadingFull = (id, Task {
+            let image = await Self.decode(urls, maxPixels: nil, priority: .userInitiated)
+            guard !Task.isCancelled else { return }
+            if loadingFull?.id == id { loadingFull = nil }
+            if let image, id == current, image.width > display[id]?.width ?? 0 { full = (id, image) }
+        })
     }
 
     /// Смахивание двумя пальцами по трекпаду — соседний снимок (один за жест); при увеличении прокрутка двигает
     /// снимок. Колесо мыши — листает.
-    func startScroll(page: @escaping (Int) -> Void) {
+    /// accepts — наше ли это событие; чужое (другое окно, панель отладки, лента) проходит дальше нетронутым.
+    func startScroll(page: @escaping (Int) -> Void, accepts: @escaping (NSEvent) -> Bool) {
         stopScroll()
         scrollToken = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
-            guard let self else { return event }
+            guard let self, accepts(event) else { return event }
             if self.zoom.isZoomed {
                 self.zoom = self.zoom.panned(by: CGSize(width: event.scrollingDeltaX, height: event.scrollingDeltaY),
                                              view: self.viewSize, frame: self.imageSize)
@@ -344,8 +384,8 @@ final class GalleryModel {
     }
 
     /// JPEG раньше RAW: быстрее. maxPixels nil — полный размер, с поворотом по EXIF.
-    nonisolated static func decode(_ urls: [URL], maxPixels: Int?) async -> CGImage? {
-        await Task.detached(priority: .userInitiated) {
+    nonisolated static func decode(_ urls: [URL], maxPixels: Int?, priority: TaskPriority) async -> CGImage? {
+        await Task.detached(priority: priority) {
             func isJPEG(_ url: URL) -> Bool { ["jpg", "jpeg"].contains(url.pathExtension.lowercased()) }
             for url in urls.sorted(by: { isJPEG($0) && !isJPEG($1) }) {
                 guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { continue }

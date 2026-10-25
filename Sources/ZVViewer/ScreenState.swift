@@ -60,6 +60,8 @@ final class ScreenState {
 
     /// Открытая галерея: какой снимок на экране; nil — закрыта. По id, а не по номеру: новый снимок её не сбивает.
     var galleryShot: UUID?
+    /// Снимок в галерее увеличен: стрелки не листают.
+    var galleryZoomed = false
 
     /// Цифровое увеличение live view — только на экране, камера о нём не знает.
     var zoom: ViewZoom = .identity

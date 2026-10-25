@@ -13,7 +13,12 @@ struct ZoomableVideo: View {
     let dimmed: Bool
     @State private var pinchBase: ViewZoom?
     @State private var panBase: ViewZoom?
+    /// С какой точки начался жест: прерванный жест не доходит до onEnded, и новый узнаётся по другой точке.
+    @State private var pinchStart: CGPoint?
+    @State private var panStart: CGPoint?
     @State private var sharp = ZoomPatch()
+    /// До этого момента идёт анимация увеличения: заплатка встала бы сразу в конечное место — прячем её.
+    @State private var animatingUntil = Date.distantPast
 
     private var frameSize: CGSize { CGSize(width: frame.width, height: frame.height) }
 
@@ -40,8 +45,15 @@ struct ZoomableVideo: View {
         .onChange(of: ObjectIdentifier(frame)) { _, _ in refreshPatch() }
         .onChange(of: size) { _, _ in refreshPatch() }
         .onChange(of: screen.zoom) { _, _ in
-            // во время жеста заплатка едет с картинкой, пересчёт — с новым кадром или по окончании жеста
-            if pinchBase == nil, panBase == nil { refreshPatch() }
+            // во время жеста заплатка едет с картинкой, пересчёт — с новым кадром или по окончании жеста;
+            // ⌘=, ⌘−, ✕ и пружина после щипка анимируют картинку — заплатку прячем, пока анимация не кончится
+            guard pinchBase == nil, panBase == nil else { return }
+            animatingUntil = Date().addingTimeInterval(0.4)
+            sharp.hide()
+            Task {
+                try? await Task.sleep(for: .milliseconds(420))
+                refreshPatch()
+            }
         }
         .frame(width: size.width, height: size.height)
             .clipped()
@@ -49,13 +61,17 @@ struct ZoomableVideo: View {
             .gesture(
                 MagnifyGesture()
                     .onChanged { value in
+                        if pinchStart != value.startLocation {
+                            pinchStart = value.startLocation
+                            pinchBase = screen.zoom
+                        }
                         let base = pinchBase ?? screen.zoom
-                        pinchBase = base
                         screen.zoom = base.zoomed(by: value.magnification, around: value.startLocation, view: size,
                                                   frame: frameSize, elastic: true)
                     }
                     .onEnded { _ in
                         pinchBase = nil
+                        pinchStart = nil
                         withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
                             screen.zoom = screen.zoom.settled(view: size, frame: frameSize)
                         }
@@ -65,18 +81,23 @@ struct ZoomableVideo: View {
                 DragGesture(minimumDistance: 3)
                     .onChanged { value in
                         guard screen.zoom.isZoomed else { return }
+                        if panStart != value.startLocation {
+                            panStart = value.startLocation
+                            panBase = screen.zoom
+                        }
                         let base = panBase ?? screen.zoom
-                        panBase = base
                         screen.zoom = base.panned(by: value.translation, view: size, frame: frameSize)
                     }
                     .onEnded { _ in
                         panBase = nil
+                        panStart = nil
                         refreshPatch()
                     }
             )
     }
 
     private func refreshPatch() {
+        guard Date() >= animatingUntil else { return }
         sharp.update(frame: frame, zoom: screen.zoom, view: size)
     }
 }
@@ -98,6 +119,12 @@ final class ZoomPatch {
     @ObservationIgnored private var pending: (frame: CGImage, region: CGRect, size: CGSize)?
     private nonisolated static let context = CIContext(options: [.cacheIntermediates: false])
     private static let enabled = ProcessInfo.processInfo.environment["ZV_ZOOM_PATCH"] != "0"
+
+    /// Убрать заплатку до следующего пересчёта.
+    func hide() {
+        patch = nil
+        pending = nil
+    }
 
     func update(frame: CGImage, zoom: ViewZoom, view: CGSize) {
         guard zoom.isZoomed, Self.enabled else {
@@ -160,6 +187,7 @@ final class ZoomScroll {
         stop()
         token = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
             guard let self, screen.zoom.isZoomed, screen.galleryShot == nil, !screen.fnOpen, !screen.allSettingsOpen,
+                  !screen.debugOpen, controller.review == nil, event.window?.title == LiveScreen.windowTitle,
                   event.hasPreciseScrollingDeltas, let frame = controller.frame else { return event }
             screen.zoom = screen.zoom.panned(by: CGSize(width: event.scrollingDeltaX, height: event.scrollingDeltaY),
                                              view: self.viewSize, frame: CGSize(width: frame.width, height: frame.height))

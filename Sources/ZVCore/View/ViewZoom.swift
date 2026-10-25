@@ -114,11 +114,12 @@ public struct ViewZoom: Equatable, Sendable, Codable {
         var f = factor, rest = k
         if rest > 1, f < maxFactor {
             let inside = min(rest, maxFactor / f)
-            f *= inside
+            // дошли до предела — ровно предел: 7,999999999999999 пропустил бы сопротивление
+            f = inside == maxFactor / f ? maxFactor : f * inside
             rest /= inside
         } else if rest < 1, f > 1 {
             let inside = max(rest, 1 / f)
-            f *= inside
+            f = inside == 1 / f ? 1 : f * inside
             rest /= inside
         }
         f *= (rest > 1 && f >= maxFactor) || (rest < 1 && f <= 1) ? pow(rest, 0.3) : rest

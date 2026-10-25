@@ -79,6 +79,10 @@ final class CameraController {
     @ObservationIgnored private var reviewTask: Task<Void, Never>?
     /// Во сколько раз увеличена картинка на экране — от этого зависит, когда снижать качество превью.
     @ObservationIgnored var viewZoomFactor = 1.0
+    /// Вызов кнопки записи ещё не вернулся.
+    @ObservationIgnored private var recordCallInFlight = false
+    /// Есть ли кадр: меняется, только когда кадры появились или пропали (меню «Вид» не перестраивается 25 раз в секунду).
+    private(set) var hasFrame = false
     /// Опрос доли загрузки снимка, 10 раз в секунду.
     @ObservationIgnored private var progressTask: Task<Void, Never>?
     @ObservationIgnored private var temperatureTask: Task<Void, Never>?
@@ -413,11 +417,20 @@ final class CameraController {
     }
 
     func toggleRecording() {
-        guard phase == .ready, let session, recordingToggle.press(recording: isRecording, at: Date()) else { return }
+        guard phase == .ready, let session else { return }
+        // прошлое нажатие ещё не дошло (провал связи): второе дошло бы следом и остановило бы запись
+        guard !recordCallInFlight else {
+            emit(.failed(.record))
+            showStatus("Камера ещё не ответила на прошлое нажатие")
+            return
+        }
+        guard recordingToggle.press(recording: isRecording, at: Date()) else { return }
+        recordCallInFlight = true
         emit(.accepted(.record))
         Task { [weak self] in
             let recording = try? await session.toggleRecording()
             guard let self else { return }
+            self.recordCallInFlight = false
             if let recording { self.isRecording = recording }
             self.finishRecordingRequest(self.recordingToggle.completed(recording: recording))
         }
@@ -556,8 +569,13 @@ final class CameraController {
                 showReview(Review(image: frame, title: "Снимок", detail: "", urls: [], source: "Кадр с камеры",
                                   endsAt: nil, capture: capture), timed: true)
             }
-        case .downloading:
-            guard let progress, progressTask == nil else { return }
+        case let .downloading(file, files, received, _):
+            // по USB доли не видно (ImageCaptureCore её не даёт) — без размера дуга крутится, подпись «Загрузка…»
+            guard let progress else {
+                capturePhase = .downloading(file: file, files: files, received: received, expected: nil)
+                return
+            }
+            guard progressTask == nil else { return }
             progressTask = Task { [weak self] in
                 while !Task.isCancelled {
                     try? await Task.sleep(for: .milliseconds(100))
@@ -1263,6 +1281,7 @@ final class CameraController {
 
     private func show(_ image: CGImage, sample: LiveViewSample, levels: [Int]) {
         frame = image
+        if !hasFrame { hasFrame = true }
         lastJPEG = sample.jpeg
         let now = Date()
         // первый кадр нового сеанса после обрыва — сеанс восстановлен
@@ -1418,6 +1437,8 @@ final class CameraController {
         targets = [:]
         pending = []
         frame = nil
+        hasFrame = false
+        recordCallInFlight = false
         lastJPEG = nil
         lastFrameAt = nil
         frameTimes = []

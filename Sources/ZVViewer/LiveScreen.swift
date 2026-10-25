@@ -13,6 +13,8 @@ struct LiveScreen: View {
     private var showControls: Bool { !screen.controlsHidden || screen.fnOpen || screen.allSettingsOpen || screen.pillInfo != nil }
     /// Система координат экрана: в ней тащат гистограмму и мини-карту.
     static let space = "live"
+    /// Заголовок главного окна: события прокрутки других окон (настройки, выбор папки) — не наши.
+    static let windowTitle = "ZV-E10 Viewer"
 
     var body: some View {
         GeometryReader { geometry in
@@ -34,10 +36,13 @@ struct LiveScreen: View {
         .onDisappear {
             screen.pillInfo = nil
             screen.zoom = .identity
+            screen.flyingShot = nil
+            // onChange уже не придёт: экран убирают
+            controller.viewZoomFactor = 1
             zoomScroll.stop()
         }
         .onAppear { zoomScroll.start(screen: screen, controller: controller) }
-        .onChange(of: screen.zoom.factor) { _, factor in controller.viewZoomFactor = factor }
+        .onChange(of: screen.zoom.factor, initial: true) { _, factor in controller.viewZoomFactor = factor }
         .task {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(500))
@@ -53,17 +58,19 @@ struct LiveScreen: View {
         .onAppear { focused = true }
         // буквенные клавиши — в обеих раскладках: f/а, h/р, s/ы на одних и тех же клавишах
         .onKeyPress(characters: CharacterSet(charactersIn: "fFаА")) { _ in
+            guard screen.galleryShot == nil else { return .ignored }
             screen.toggleFn()
             screen.noteActivity()
             return .handled
         }
         .onKeyPress(characters: CharacterSet(charactersIn: "hHрР")) { _ in
+            guard screen.galleryShot == nil else { return .ignored }
             screen.toggleControls()
             flashHiddenHint()
             return .handled
         }
         .onKeyPress(characters: CharacterSet(charactersIn: "sSыЫ")) { _ in
-            guard controller.mode == .video else { return .ignored }
+            guard controller.mode == .video, screen.galleryShot == nil else { return .ignored }
             controller.grabFrame()
             return .handled
         }
@@ -81,7 +88,8 @@ struct LiveScreen: View {
             return .handled
         }
         .onKeyPress(characters: CharacterSet(charactersIn: "123456789")) { press in
-            guard let digit = Int(press.characters), controller.presets.indices.contains(digit - 1) else { return .ignored }
+            guard screen.galleryShot == nil, let digit = Int(press.characters),
+                  controller.presets.indices.contains(digit - 1) else { return .ignored }
             controller.applyPreset(digit - 1)
             return .handled
         }
@@ -248,6 +256,8 @@ struct LiveScreen: View {
     /// Галерея: соседний снимок; +1 — старше.
     private func galleryStep(_ offset: Int) -> KeyPress.Result {
         guard let id = screen.galleryShot, let index = controller.shots.firstIndex(where: { $0.id == id }) else { return .ignored }
+        // увеличенный снимок стрелки не листают — как и смахивание
+        guard !screen.galleryZoomed else { return .handled }
         screen.galleryShot = controller.shots[min(max(index + offset, 0), controller.shots.count - 1)].id
         return .handled
     }

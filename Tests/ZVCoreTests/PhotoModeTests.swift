@@ -149,3 +149,17 @@ private final class PhaseLog: @unchecked Sendable {
     let files = try await s.capturePhoto(download: true, files: 1)
     #expect(files.map(\.filename) == ["DSC00005.ARW", "DSC00005.JPG"])
 }
+
+@Test func captureTakesALeftoverObjectToo() async throws {
+    // прошлый снимок не забрали (тайм-аут длинной выдержки, оборванная загрузка) — он и новый скачиваются оба,
+    // а не новый остаётся в камере, сдвигая все следующие снимки на один
+    let cam = photoCamera()
+    cam.putInMemory([("DSC00006.JPG", Data([0xFF, 0xD8, 6]))])
+    cam.capturedFiles = [("DSC00007.JPG", Data([0xFF, 0xD8, 7]))]
+    // новый снимок камера обрабатывает дольше, чем качается старый
+    cam.captureDelayReads = 3
+    let s = try await readySession(cam)
+    let files = try await s.capturePhoto(download: true, files: 1)
+    #expect(files.map(\.filename) == ["DSC00006.JPG", "DSC00007.JPG"])
+    #expect(cam.objectsInMemory == 0)
+}
