@@ -199,10 +199,9 @@ struct FloatingHistogram: View {
     var body: some View {
         let origin = dragOrigin ?? restingOrigin
         HistogramView(bins: controller.histogram, stats: controller.histogramStats)
-            .background(GeometryReader { geometry in
-                Color.clear.preference(key: PanelSizeKey.self, value: geometry.size)
-            })
-            .onPreferenceChange(PanelSizeKey.self) { panel = $0 }
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
+                if size.width > 0, size.height > 0 { panel = size }
+            }
             .scaleEffect(dragOrigin == nil ? 1 : 1.03)
             .shadow(color: .black.opacity(dragOrigin == nil ? 0 : 0.45), radius: 14, y: 4)
             .gesture(
@@ -238,9 +237,4 @@ struct FloatingHistogram: View {
         if let placement = screen.histogramPlacement { return placement.origin(panel: panel, view: view) }
         return CGPoint(x: FloatingPlacement.margin, y: max(FloatingPlacement.margin, view.height - panel.height - 134))
     }
-}
-
-private struct PanelSizeKey: PreferenceKey {
-    static let defaultValue = CGSize.zero
-    static func reduce(value: inout CGSize, nextValue: () -> CGSize) { value = nextValue() }
 }
