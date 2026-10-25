@@ -149,7 +149,7 @@ struct LiveScreen: View {
                 if !screen.fnOpen {
                     VStack(alignment: .leading, spacing: 8) {
                         if screen.histogramOn && !controller.histogram.isEmpty {
-                            HistogramView(bins: controller.histogram)
+                            HistogramView(bins: controller.histogram, stats: controller.histogramStats)
                         }
                         if !controller.shots.isEmpty {
                             ShotsStrip(controller: controller)

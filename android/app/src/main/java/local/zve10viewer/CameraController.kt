@@ -39,6 +39,7 @@ import local.zve10viewer.session.SessionException
 import local.zve10viewer.settings.CaptureMode
 import local.zve10viewer.settings.FileNaming
 import local.zve10viewer.settings.LumaHistogram
+import local.zve10viewer.settings.LumaStats
 import local.zve10viewer.settings.PresetCatalog
 import local.zve10viewer.settings.RecordingMode
 import local.zve10viewer.settings.RecordingModeDriver
@@ -111,6 +112,9 @@ class CameraController(private val context: Context, private val scope: Coroutin
         private set
     /** Гистограмма яркости последнего кадра (64 столбца), пока она включена. */
     var histogram by mutableStateOf<IntArray?>(null)
+        private set
+    /** Доли теней, полутонов и светов, провалы, пересвет и средняя яркость по тому же кадру. */
+    var histogramStats by mutableStateOf<LumaStats?>(null)
         private set
     var histogramOn by mutableStateOf(prefs.histogramOn)
         private set
@@ -285,7 +289,12 @@ class CameraController(private val context: Context, private val scope: Coroutin
                     continue@loop
                 }
                 val step = recordingDriver.next(property(SettingID.movieFileFormat)?.current?.intValue,
-                    property(SettingID.movieRecordingSetting)?.current?.intValue, allowedRecordingSettings) ?: return
+                    property(SettingID.movieRecordingSetting)?.current?.intValue, allowedRecordingSettings)
+                Log.d(TAG, "режим записи: формат ${property(SettingID.movieFileFormat)?.current?.intValue}, " +
+                    "параметры ${property(SettingID.movieRecordingSetting)?.current?.intValue?.toString(16)}, " +
+                    "можно ${allowedRecordingSettings.map { it.toString(16) }}, " +
+                    "пишется ${isWritable(SettingID.movieRecordingSetting)} → $step")
+                step ?: return
                 when (step) {
                     RecordingStep.Done -> return
                     RecordingStep.Wait -> delay(100)
@@ -418,7 +427,10 @@ class CameraController(private val context: Context, private val scope: Coroutin
     fun toggleHistogram() {
         histogramOn = !histogramOn
         prefs.histogramOn = histogramOn
-        if (!histogramOn) histogram = null
+        if (!histogramOn) {
+            histogram = null
+            histogramStats = null
+        }
     }
 
     /** Пользователь поменял «куда сохранять» — переносим это в камеру (PC Remote → Still Img. Save Dest.). */
@@ -702,7 +714,8 @@ class CameraController(private val context: Context, private val scope: Coroutin
         this.transport = transport
         this.session = session
         coalescer = WriteCoalescer(scope) { code, value ->
-            runCatching { session.set(code, value) }
+            val result = runCatching { session.set(code, value) }
+            Log.d(TAG, "запись 0x${code.toString(16)} = ${value.toString(16)}: ${result.getOrNull() ?: result.exceptionOrNull()}")
             // ждём только последнее запрошенное значение; промежуточные пропускаем
             if (targets[code] == value) clearTarget(code)
         }
@@ -961,8 +974,8 @@ class CameraController(private val context: Context, private val scope: Coroutin
         jobs += scope.launch(Dispatchers.Default) {
             for (jpeg in frames) {
                 val bitmap = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size) ?: continue
-                val bins = if (histogramOn) histogramOf(bitmap) else null
-                withContext(Dispatchers.Main) { show(bitmap.asImageBitmap(), jpeg, bins) }
+                val levels = if (histogramOn) histogramLevels(bitmap) else null
+                withContext(Dispatchers.Main) { show(bitmap.asImageBitmap(), jpeg, levels) }
             }
         }
     }
@@ -1000,11 +1013,16 @@ class CameraController(private val context: Context, private val scope: Coroutin
         frameLog.clear()
     }
 
-    private fun show(bitmap: ImageBitmap, jpeg: ByteArray, bins: IntArray?) {
+    private fun show(bitmap: ImageBitmap, jpeg: ByteArray, levels: IntArray?) {
         measure(jpeg)
         frame = bitmap
         lastJpeg = jpeg
-        if (bins != null) histogram = bins
+        if (levels != null) {
+            // в видео белое в live view — 234, в фото — 255: шкала гистограммы — до белого
+            val white = LumaStats.whiteLevel(levels, video = mode != CaptureMode.photo)
+            histogram = LumaHistogram.binsOf(levels, whiteLevel = white)
+            histogramStats = LumaStats.of(levels, white)
+        }
         val now = System.currentTimeMillis()
         if (lastFrameAt != 0L) frameGaps.addLast(now to now - lastFrameAt)
         lastFrameAt = now
@@ -1074,6 +1092,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
         frame = null
         lastJpeg = null
         histogram = null
+        histogramStats = null
         frameTimes.clear()
         frameGaps.clear()
         lastFrameAt = 0L
@@ -1092,12 +1111,15 @@ class CameraController(private val context: Context, private val scope: Coroutin
         private const val TAG = "ZVController"
         private const val ACTION_USB_PERMISSION = "local.zve10viewer.USB_PERMISSION"
 
-        /** Гистограмма по уменьшенной копии кадра (128×72 достаточно для графика). */
-        private fun histogramOf(bitmap: Bitmap): IntArray {
-            val small = Bitmap.createScaledBitmap(bitmap, 128, 72, false)
-            val pixels = IntArray(128 * 72)
-            small.getPixels(pixels, 0, 128, 0, 0, 128, 72)
-            return LumaHistogram.bins(pixels)
+        /**
+         * Уровни яркости по уменьшенной копии кадра. 256×144 без сглаживания: при усреднении мелкие пересвеченные места
+         * растворились бы в соседях и пересвет было бы не видно.
+         */
+        private fun histogramLevels(bitmap: Bitmap): IntArray {
+            val small = Bitmap.createScaledBitmap(bitmap, 256, 144, false)
+            val pixels = IntArray(256 * 144)
+            small.getPixels(pixels, 0, 256, 0, 0, 256, 144)
+            return LumaHistogram.levels(pixels)
         }
     }
 }

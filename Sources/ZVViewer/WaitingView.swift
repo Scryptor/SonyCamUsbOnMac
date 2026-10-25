@@ -35,6 +35,17 @@ struct WaitingView: View {
                 Text(kind == .searching ? "3. Подключите камеру к Mac кабелем USB-C" : "Переподключите кабель")
             }
             .foregroundStyle(.secondary)
+            if kind == .searching, controller.cableAccessHint {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Камера на кабеле видна, но macOS пока не даёт программе доступ к ней").fontWeight(.semibold)
+                    Text("Нажмите «Разрешить» в окне про доступ к файлам на съемном томе — после установки "
+                        + "или обновления программы macOS спрашивает об этом снова.")
+                    Text("Окна нет — Системные настройки → Конфиденциальность и безопасность → Файлы и папки → "
+                        + "ZV-E10 Viewer → Съемные тома. Доступ уже есть — переподключите кабель.")
+                }
+                .foregroundStyle(.orange)
+                .padding(.top, 6)
+            }
         }
         .frame(maxWidth: 520, alignment: .leading)
     }

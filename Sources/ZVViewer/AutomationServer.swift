@@ -11,6 +11,9 @@ final class AutomationServer {
     private let screen: ScreenState
     private let token = (0..<4).map { _ in String(format: "%08x", UInt32.random(in: .min ... .max)) }.joined()
     private var listener: NWListener?
+    /// Пока тесты гоняют программу, macOS не должна её усыплять (App Nap), когда окно закрыто другими:
+    /// иначе таймеры растягиваются и live view падает до 6–12 к/с.
+    private var activity: NSObjectProtocol?
 
     static var isRequested: Bool {
         CommandLine.arguments.contains("--automation") || ProcessInfo.processInfo.environment["ZV_AUTOMATION"] == "1"
@@ -32,6 +35,8 @@ final class AutomationServer {
         }
         listener.start(queue: .main)
         self.listener = listener
+        activity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep,
+                                                         reason: "API автоматизации")
         try writeInfo(port: port)
     }
 
@@ -262,6 +267,11 @@ final class AutomationServer {
             "shootingMode": controller.shootingMode.rawValue,
             "slowMotion": controller.slowMotion.map { ["captureFps": $0.capture ?? NSNull(), "recordFps": $0.record ?? NSNull()] as [String: Any] } ?? NSNull(),
             "histogramBins": controller.histogram.count,
+            "cableAccessHint": controller.cableAccessHint,
+            "histogramStats": controller.histogramStats.map { stats -> [String: Any] in
+                ["shadows": stats.shadows, "midtones": stats.midtones, "highlights": stats.highlights,
+                 "clippedShadows": stats.clippedShadows, "clippedHighlights": stats.clippedHighlights, "mean": stats.mean]
+            } ?? NSNull(),
             "applyingPreset": controller.isApplyingPreset,
             "status": controller.statusMessage ?? NSNull(),
             "mode": controller.mode.rawValue,

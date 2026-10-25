@@ -143,19 +143,3 @@ object FileNaming {
         calendar.get(Calendar.HOUR_OF_DAY), calendar.get(Calendar.MINUTE), calendar.get(Calendar.SECOND),
     )
 }
-
-object LumaHistogram {
-    /** argb — пиксели в формате Android (0xAARRGGBB); count — число столбцов гистограммы. */
-    fun bins(argb: IntArray, count: Int = 64): IntArray {
-        val bins = IntArray(count)
-        for (p in argb) {
-            val r = (p shr 16) and 0xFF
-            val g = (p shr 8) and 0xFF
-            val b = p and 0xFF
-            // яркость по Rec. 709 в целых числах (коэффициенты ×1024)
-            val luma = (218 * r + 732 * g + 74 * b) shr 10
-            bins[minOf(luma * count / 256, count - 1)]++
-        }
-        return bins
-    }
-}

@@ -76,29 +76,97 @@ struct TopBar: View {
     }
 }
 
-/// Гистограмма яркости: слева тени, справа света.
+/// Гистограмма яркости: слева тени, справа света. Пунктир делит шкалу на трети — тени, полутона и света; под графиком —
+/// их доли, провалы в чёрное, средняя яркость (она же — метка под графиком) и пересвет.
 struct HistogramView: View {
     let bins: [Int]
+    let stats: LumaStats?
+    /// Пересвет и провалы. Жёлтый, а не красный: красный на тёмном видно плохо.
+    private static let warning = Color(red: 1, green: 0.84, blue: 0.04)
+
+    private struct Figure {
+        let label: String
+        let value: String
+        var alert = false
+    }
 
     var body: some View {
-        Canvas { context, size in
-            guard let peak = bins.max(), peak > 0 else { return }
-            let width = size.width / CGFloat(bins.count)
-            var path = Path()
-            path.move(to: CGPoint(x: 0, y: size.height))
-            for (i, count) in bins.enumerated() {
-                // корень сглаживает пики, чтобы был виден и «хвост»
-                let h = size.height * CGFloat((Double(count) / Double(peak)).squareRoot())
-                path.addLine(to: CGPoint(x: CGFloat(i) * width, y: size.height - h))
-                path.addLine(to: CGPoint(x: CGFloat(i + 1) * width, y: size.height - h))
+        VStack(spacing: 6) {
+            graph.frame(height: 78)
+            if let stats {
+                row([Figure(label: "Тени", value: LumaStats.share(stats.shadows)),
+                     Figure(label: "Полутона", value: LumaStats.share(stats.midtones)),
+                     Figure(label: "Света", value: LumaStats.share(stats.highlights))])
+                row([Figure(label: "Провалы", value: LumaStats.clipping(stats.clippedShadows),
+                            alert: LumaStats.isClipped(stats.clippedShadows)),
+                     Figure(label: "Средняя", value: LumaStats.share(stats.mean)),
+                     Figure(label: "Пересвет", value: LumaStats.clipping(stats.clippedHighlights),
+                            alert: LumaStats.isClipped(stats.clippedHighlights))])
             }
-            path.addLine(to: CGPoint(x: size.width, y: size.height))
-            path.closeSubpath()
-            context.fill(path, with: .color(.white.opacity(0.75)))
         }
-        .frame(width: 220, height: 80)
+        .frame(width: 264)
         .padding(8)
         .background(.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 10))
+        .help("Яркость кадра: слева тени, справа света, пунктир делит шкалу на трети. Провалы — почти чёрные точки, "
+            + "пересвет — точки на белом: от 1% они жёлтые. Считается по картинке live view.")
+    }
+
+    private var graph: some View {
+        Canvas { context, size in
+            // снизу — полоска под метку средней яркости
+            let height = size.height - 8
+            for third in [1.0 / 3, 2.0 / 3] {
+                var line = Path()
+                line.move(to: CGPoint(x: size.width * third, y: 0))
+                line.addLine(to: CGPoint(x: size.width * third, y: height))
+                context.stroke(line, with: .color(.white.opacity(0.3)), style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+            }
+            if let peak = bins.max(), peak > 0 {
+                let width = size.width / CGFloat(bins.count)
+                var path = Path()
+                path.move(to: CGPoint(x: 0, y: height))
+                for (i, count) in bins.enumerated() {
+                    // корень сглаживает пики, чтобы был виден и «хвост»
+                    let h = height * CGFloat((Double(count) / Double(peak)).squareRoot())
+                    path.addLine(to: CGPoint(x: CGFloat(i) * width, y: height - h))
+                    path.addLine(to: CGPoint(x: CGFloat(i + 1) * width, y: height - h))
+                }
+                path.addLine(to: CGPoint(x: size.width, y: height))
+                path.closeSubpath()
+                context.fill(path, with: .color(.white.opacity(0.75)))
+            }
+            guard let stats else { return }
+            // провалы и пересвет — жёлтая кромка с той стороны, где детали потеряны
+            if LumaStats.isClipped(stats.clippedShadows) {
+                context.fill(Path(CGRect(x: 0, y: 0, width: 3, height: height)), with: .color(Self.warning))
+            }
+            if LumaStats.isClipped(stats.clippedHighlights) {
+                context.fill(Path(CGRect(x: size.width - 3, y: 0, width: 3, height: height)), with: .color(Self.warning))
+            }
+            let x = size.width * stats.mean / 100
+            var marker = Path()
+            marker.move(to: CGPoint(x: x, y: height + 2))
+            marker.addLine(to: CGPoint(x: x - 4, y: size.height))
+            marker.addLine(to: CGPoint(x: x + 4, y: size.height))
+            marker.closeSubpath()
+            context.fill(marker, with: .color(.white))
+        }
+    }
+
+    private func row(_ figures: [Figure]) -> some View {
+        HStack(spacing: 0) {
+            ForEach(figures.indices, id: \.self) { i in
+                HStack(spacing: 3) {
+                    Text(figures[i].label).foregroundStyle(.white.opacity(0.6))
+                    Text(figures[i].value).fontWeight(.semibold)
+                        .foregroundStyle(figures[i].alert ? Self.warning : .white.opacity(0.9))
+                }
+                .frame(maxWidth: .infinity)
+            }
+        }
+        .font(.system(size: 10.5))
+        .monospacedDigit()
+        .lineLimit(1)
     }
 }
 

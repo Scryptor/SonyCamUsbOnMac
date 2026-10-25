@@ -21,6 +21,8 @@ final class CameraController {
     private(set) var frame: CGImage?
     /// Гистограмма яркости последнего кадра (64 столбца).
     private(set) var histogram: [Int] = []
+    /// Доли теней, полутонов и светов, провалы, пересвет и средняя яркость по тому же кадру.
+    private(set) var histogramStats: LumaStats?
     private(set) var fps: Double = 0
     /// fps для строки состояния: обновляется дважды в секунду, а не с каждым кадром.
     private(set) var shownFPS = 0
@@ -104,6 +106,9 @@ final class CameraController {
     private(set) var isPairing = false
     /// Что сейчас с Wi-Fi: «ищу камеру», «камера найдена, нужно сопряжение» и т.п.
     private(set) var wifiStatus: String?
+    /// Камера на кабеле видна на шине USB, а macOS её программе не отдаёт — ждёт «Разрешить» в окне доступа.
+    private(set) var cableAccessHint = false
+    @ObservationIgnored private var cableAccessWatch = CableAccessWatch()
 
     init() {
         presets = Self.loadPresets(key: presetsKey)
@@ -123,6 +128,7 @@ final class CameraController {
                 try? await Task.sleep(for: .milliseconds(500))
                 self?.tickFrameStats()
                 self?.tickShownStats()
+                self?.tickCableAccess()
             }
         }
         // без кабеля — ищем камеру в сети
@@ -872,9 +878,9 @@ final class CameraController {
         tasks.append(Task.detached(priority: .userInitiated) { [weak self] in
             for await jpeg in frames {
                 guard let image = Self.decode(jpeg) else { continue }
-                let bins = Self.histogram(of: image)
+                let levels = Self.histogramLevels(of: image)
                 guard !Task.isCancelled else { break }
-                await self?.show(image, jpeg: jpeg, histogram: bins)
+                await self?.show(image, jpeg: jpeg, levels: levels)
             }
         })
     }
@@ -890,15 +896,26 @@ final class CameraController {
         }
     }
 
-    private func show(_ image: CGImage, jpeg: Data, histogram: [Int]) {
+    private func show(_ image: CGImage, jpeg: Data, levels: [Int]) {
         frame = image
         lastJPEG = jpeg
-        self.histogram = histogram
+        // в видео белое в live view — 234, в фото — 255: шкала гистограммы — до белого
+        let white = LumaStats.whiteLevel(levels: levels, video: mode != .photo)
+        histogram = levels.isEmpty ? [] : LumaHistogram.bins(levels: levels, whiteLevel: white)
+        histogramStats = LumaStats(levels: levels, whiteLevel: white)
         let now = Date()
         if let lastFrameAt { frameGaps.append((now, now.timeIntervalSince(lastFrameAt))) }
         lastFrameAt = now
         frameTimes.append(now)
         tickFrameStats()
+    }
+
+    /// Пока ищем камеру: она на шине USB, а программе не видна — подсказка про доступ к съёмным томам.
+    private func tickCableAccess() {
+        let searching = phase == .searching && transportKind == nil
+        let shown = cableAccessWatch.update(onBus: searching && USBBus.hasSonyCamera(),
+                                            visible: !tracker.attached.isEmpty, now: Date())
+        if cableAccessHint != shown { cableAccessHint = shown }
     }
 
     /// Числа для строки состояния и подсказки о кадрах; пересчитываются дважды в секунду.
@@ -969,6 +986,7 @@ final class CameraController {
         frameTimes = []
         frameGaps = []
         histogram = []
+        histogramStats = nil
         fps = 0
         shownFPS = 0
         frameGapMs = 0
@@ -989,18 +1007,19 @@ final class CameraController {
         return CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary)
     }
 
-    /// Гистограмма по уменьшенной копии кадра (128×72 достаточно для графика).
-    nonisolated private static func histogram(of image: CGImage) -> [Int] {
-        let width = 128, height = 72, bytesPerRow = width * 4
+    /// Уровни яркости по уменьшенной копии кадра. 256×144 без сглаживания: при усреднении мелкие пересвеченные
+    /// места растворились бы в соседях и пересвет было бы не видно.
+    nonisolated private static func histogramLevels(of image: CGImage) -> [Int] {
+        let width = 256, height = 144, bytesPerRow = width * 4
         var pixels = [UInt8](repeating: 0, count: bytesPerRow * height)
         let drawn = pixels.withUnsafeMutableBytes { buffer -> Bool in
             guard let context = CGContext(data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 8,
                                           bytesPerRow: bytesPerRow, space: CGColorSpaceCreateDeviceRGB(),
                                           bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
-            context.interpolationQuality = .low
+            context.interpolationQuality = .none
             context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
             return true
         }
-        return drawn ? LumaHistogram.bins(rgba: pixels, width: width, height: height, bytesPerRow: bytesPerRow) : []
+        return drawn ? LumaHistogram.levels(rgba: pixels, width: width, height: height, bytesPerRow: bytesPerRow) : []
     }
 }

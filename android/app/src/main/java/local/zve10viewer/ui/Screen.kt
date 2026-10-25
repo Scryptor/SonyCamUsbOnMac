@@ -58,6 +58,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
@@ -75,6 +77,7 @@ import local.zve10viewer.settings.SettingID
 import local.zve10viewer.settings.ShootingMode
 import local.zve10viewer.settings.SlowQuick
 import local.zve10viewer.settings.ValueFormatter
+import local.zve10viewer.settings.LumaStats
 import local.zve10viewer.sony.SonyProp
 import kotlin.math.sqrt
 
@@ -82,6 +85,8 @@ val Panel = Color(0xD91C1C1E)
 val PanelLight = Color(0x1FFFFFFF)
 val Secondary = Color(0xFF9A9AA0)
 val Accent = Color(0xFF0A84FF)
+/** Предупреждение: пересвет и провалы на гистограмме. Жёлтый, а не красный: красный на тёмном видно плохо. */
+val Warning = Color(0xFFFFD60A)
 
 /** Что открыто на экране. Меняется касаниями. */
 class ScreenState {
@@ -351,7 +356,7 @@ private fun Controls(controller: CameraController, screen: ScreenState) {
         if (!screen.fnOpen) {
             Column(Modifier.align(Alignment.BottomStart).padding(bottom = 76.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 val bins = controller.histogram
-                if (controller.histogramOn && bins != null) HistogramView(bins)
+                if (controller.histogramOn && bins != null) HistogramView(bins, controller.histogramStats)
                 if (controller.shots.isNotEmpty()) ShotsStrip(controller)
             }
         }
@@ -570,11 +575,18 @@ private fun TopBar(controller: CameraController, screen: ScreenState) {
                 }
             }
         }
-        Text("+", color = Color.White, fontSize = 22.sp,
-            modifier = Modifier.size(44.dp).background(PanelLight, RoundedCornerShape(9.dp))
-                .clickable(enabled = controller.phase == CameraController.Phase.ready) { controller.savePreset() }
-                .padding(top = 6.dp),
-            textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+        Box(
+            Modifier.size(44.dp).background(PanelLight, RoundedCornerShape(9.dp))
+                .clickable(enabled = controller.phase == CameraController.Phase.ready) { controller.savePreset() },
+            contentAlignment = Alignment.Center,
+        ) {
+            // «+» рисуем сами, как значок гистограммы: символ шрифта стоял выше центра и был мельче соседей
+            Canvas(Modifier.size(20.dp)) {
+                val stroke = 2.5.dp.toPx()
+                drawLine(Color.White, Offset(size.width / 2, 0f), Offset(size.width / 2, size.height), stroke, StrokeCap.Round)
+                drawLine(Color.White, Offset(0f, size.height / 2), Offset(size.width, size.height / 2), stroke, StrokeCap.Round)
+            }
+        }
         Text("⚙", color = Color.White, fontSize = 22.sp,
             modifier = Modifier.size(44.dp).background(PanelLight, RoundedCornerShape(9.dp))
                 .clickable { screen.closeOverlays(); screen.settingsOpen = true }
@@ -592,24 +604,77 @@ private fun TopBar(controller: CameraController, screen: ScreenState) {
     }
 }
 
-/** Гистограмма яркости: слева тени, справа света. */
+/**
+ * Гистограмма яркости: слева тени, справа света. Пунктир делит шкалу на трети — тени, полутона и света; под графиком —
+ * их доли, провалы в чёрное, средняя яркость (она же — метка под графиком) и пересвет.
+ */
 @Composable
-private fun HistogramView(bins: IntArray) {
-    Canvas(Modifier.background(Color(0x73000000), RoundedCornerShape(10.dp)).padding(8.dp).size(240.dp, 90.dp)) {
-        val peak = bins.maxOrNull()?.takeIf { it > 0 } ?: return@Canvas
-        val w = size.width / bins.size
-        val path = Path().apply {
-            moveTo(0f, size.height)
-            bins.forEachIndexed { i, count ->
-                // корень сглаживает пики, чтобы был виден и «хвост»
-                val h = size.height * sqrt(count.toFloat() / peak)
-                lineTo(i * w, size.height - h)
-                lineTo((i + 1) * w, size.height - h)
+private fun HistogramView(bins: IntArray, stats: LumaStats?) {
+    Column(
+        Modifier.background(Color(0x73000000), RoundedCornerShape(10.dp)).padding(10.dp).width(300.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Canvas(Modifier.fillMaxWidth().height(96.dp)) {
+            // снизу — полоска под метку средней яркости
+            val height = size.height - 9.dp.toPx()
+            val dash = PathEffect.dashPathEffect(floatArrayOf(3.dp.toPx(), 3.dp.toPx()))
+            for (third in listOf(1f / 3, 2f / 3)) {
+                drawLine(Color.White.copy(alpha = 0.3f), Offset(size.width * third, 0f), Offset(size.width * third, height),
+                    strokeWidth = 1.dp.toPx(), pathEffect = dash)
             }
-            lineTo(size.width, size.height)
-            close()
+            val peak = bins.maxOrNull() ?: 0
+            if (peak > 0) {
+                val w = size.width / bins.size
+                val path = Path().apply {
+                    moveTo(0f, height)
+                    bins.forEachIndexed { i, count ->
+                        // корень сглаживает пики, чтобы был виден и «хвост»
+                        val h = height * sqrt(count.toFloat() / peak)
+                        lineTo(i * w, height - h)
+                        lineTo((i + 1) * w, height - h)
+                    }
+                    lineTo(size.width, height)
+                    close()
+                }
+                drawPath(path, Color.White.copy(alpha = 0.75f))
+            }
+            if (stats == null) return@Canvas
+            // провалы и пересвет — жёлтая кромка с той стороны, где детали потеряны
+            val edge = 3.dp.toPx()
+            if (LumaStats.isClipped(stats.clippedShadows)) drawRect(Warning, Offset.Zero, Size(edge, height))
+            if (LumaStats.isClipped(stats.clippedHighlights)) drawRect(Warning, Offset(size.width - edge, 0f), Size(edge, height))
+            val x = size.width * (stats.mean / 100).toFloat()
+            val marker = Path().apply {
+                moveTo(x, height + 2.dp.toPx())
+                lineTo(x - 5.dp.toPx(), size.height)
+                lineTo(x + 5.dp.toPx(), size.height)
+                close()
+            }
+            drawPath(marker, Color.White)
         }
-        drawPath(path, Color.White.copy(alpha = 0.75f))
+        if (stats != null) {
+            HistogramRow(listOf(Triple("Тени", LumaStats.share(stats.shadows), false),
+                Triple("Полутона", LumaStats.share(stats.midtones), false),
+                Triple("Света", LumaStats.share(stats.highlights), false)))
+            HistogramRow(listOf(
+                Triple("Провалы", LumaStats.clipping(stats.clippedShadows), LumaStats.isClipped(stats.clippedShadows)),
+                Triple("Средняя", LumaStats.share(stats.mean), false),
+                Triple("Пересвет", LumaStats.clipping(stats.clippedHighlights), LumaStats.isClipped(stats.clippedHighlights))))
+        }
+    }
+}
+
+/** Строка подписей под гистограммой: подпись, значение, выделить ли его. Каждая — под своей третью. */
+@Composable
+private fun HistogramRow(figures: List<Triple<String, String, Boolean>>) {
+    Row(Modifier.fillMaxWidth()) {
+        for ((label, value, alert) in figures) {
+            Row(Modifier.weight(1f), horizontalArrangement = Arrangement.Center) {
+                Text(label, Modifier.alignByBaseline(), color = Color.White.copy(alpha = 0.6f), fontSize = 13.sp, maxLines = 1)
+                Text(" $value", Modifier.alignByBaseline(), color = if (alert) Warning else Color.White.copy(alpha = 0.9f),
+                    fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, style = TextStyle(fontFeatureSettings = "tnum"))
+            }
+        }
     }
 }
 
