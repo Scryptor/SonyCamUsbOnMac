@@ -25,6 +25,9 @@ data class QualityTiming(
     val downFps: Double = 12.0,
     /** Не ниже этой частоты на высоком (прогноз) — возвращаем. */
     val upFps: Double = 18.0,
+    /** Пока картинка увеличена (≥ 1,5×), полное превью держим до последнего: детали важнее плавности. */
+    val sharpDownFps: Double = 6.0,
+    val sharpUpFps: Double = 10.0,
     val downWindowMs: Long = 5000,
     val upWindowMs: Long = 10_000,
     /** Столько быстрых кадров нужно в окне вниз, чтобы судить о канале. */
@@ -116,8 +119,11 @@ class LiveViewQualityPolicy(private val timing: QualityTiming = QualityTiming(),
     /** Идёт смена качества: камера ещё не перешла, а время ожидания не вышло. */
     fun isSwitching(now: Long): Boolean = requested != null && now - requestedAt < timing.switchTimeoutMs
 
-    /** Какое качество нужно сейчас; null — оставить как есть. outage — связь пропала: о канале ничего не известно. */
-    fun decide(now: Long, outage: Boolean): LiveViewQuality? {
+    /**
+     * Какое качество нужно сейчас; null — оставить как есть. outage — связь пропала: о канале ничего не известно.
+     * sharp — картинка увеличена (≥ 1,5×): снижаем при прогнозе меньше 6 к/с и возвращаем с 10 (вместо 12 и 18).
+     */
+    fun decide(now: Long, outage: Boolean, sharp: Boolean = false): LiveViewQuality? {
         if (requested != null) {
             if (now - requestedAt < timing.switchTimeoutMs) return null
             requested = null
@@ -125,8 +131,8 @@ class LiveViewQualityPolicy(private val timing: QualityTiming = QualityTiming(),
         if (outage) return null
         val current = level ?: return null
         val target = when (current) {
-            LiveViewQuality.high -> if (shouldGoDown(now)) LiveViewQuality.low else null
-            LiveViewQuality.low -> if (shouldGoUp(now)) LiveViewQuality.high else null
+            LiveViewQuality.high -> if (shouldGoDown(now, if (sharp) timing.sharpDownFps else timing.downFps)) LiveViewQuality.low else null
+            LiveViewQuality.low -> if (shouldGoUp(now, if (sharp) timing.sharpUpFps else timing.upFps)) LiveViewQuality.high else null
         }
         if (target == null) {
             val up = lastUpAt
@@ -174,21 +180,21 @@ class LiveViewQualityPolicy(private val timing: QualityTiming = QualityTiming(),
         return maxOf(holdUntil, levelSince + timing.upWindowMs, now) - now
     }
 
-    private fun shouldGoDown(now: Long): Boolean {
+    private fun shouldGoDown(now: Long, downFps: Double): Boolean {
         if (now - levelSince < timing.downWindowMs) return false
         val stalls = samples.count { now - it.at <= timing.stallWindowMs && it.fetchMs > timing.stallMs }
         if (stalls >= timing.stallsToDown) return true
         val fast = samples.count { now - it.at <= timing.downWindowMs && it.fetchMs <= timing.stallMs }
         if (fast < timing.minDownSamples) return false
         val fps = predictedHighFps(now, timing.downWindowMs) ?: return false
-        return fps < timing.downFps
+        return fps < downFps
     }
 
-    private fun shouldGoUp(now: Long): Boolean {
+    private fun shouldGoUp(now: Long, upFps: Double): Boolean {
         if (now < holdUntil || now - levelSince < timing.upWindowMs) return false
         val recent = samples.filter { now - it.at <= timing.upWindowMs }
         if (recent.size < timing.minUpSamples || recent.any { it.fetchMs > timing.stallMs }) return false
         val fps = predictedHighFps(now, timing.upWindowMs) ?: return false
-        return fps >= timing.upFps
+        return fps >= upFps
     }
 }

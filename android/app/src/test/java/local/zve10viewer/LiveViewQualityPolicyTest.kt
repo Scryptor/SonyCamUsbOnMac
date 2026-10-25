@@ -19,6 +19,8 @@ private const val LOW_BYTES = 34 * 1024
 private class Bench(val policy: LiveViewQualityPolicy = LiveViewQualityPolicy(now = 0), var now: Long = 0) {
     var level = high
     var obeys = true
+    /** Картинка увеличена (≥ 1,5×): высокое держим до последнего. */
+    var sharp = false
     val switches = mutableListOf<Pair<Long, LiveViewQuality>>()
     /** Выдержка в момент каждого спуска вниз. */
     val holds = mutableListOf<Long>()
@@ -29,7 +31,7 @@ private class Bench(val policy: LiveViewQualityPolicy = LiveViewQualityPolicy(no
         while (now < limit && more()) {
             val fetch = fetchMs(level)
             policy.frame(now, if (level == high) HIGH_BYTES else LOW_BYTES, fetch, level)
-            policy.decide(now, outage = false)?.let {
+            policy.decide(now, outage = false, sharp = sharp)?.let {
                 switches += now to it
                 if (it == low) holds += policy.holdMs
                 if (obeys) level = it
@@ -152,6 +154,34 @@ class LiveViewQualityPolicyTest {
         highFits = false
         bench.runWhile(upAt + 200_000, channel) { bench.holds.size < 3 }
         assertEquals(15_000L, bench.holds.last())
+    }
+
+    @Test fun sharpKeepsHighDownToSixFPS() {
+        // высокое идёт 125 мс — прогноз 8 к/с: обычно снижаем, при увеличении держим
+        val eight: (LiveViewQuality) -> Double = { if (it == high) 125.0 else 20.0 }
+        val usual = Bench()
+        usual.run(until = 30_000, eight)
+        assertEquals(low, usual.level)
+        val sharp = Bench().apply { this.sharp = true }
+        sharp.run(until = 30_000, eight)
+        assertTrue(sharp.switches.isEmpty())
+        // 200 мс — 5 к/с: снижаем и при увеличении
+        val five: (LiveViewQuality) -> Double = { if (it == high) 200.0 else 20.0 }
+        val sharpFive = Bench().apply { this.sharp = true }
+        sharpFive.run(until = 30_000, five)
+        assertEquals(low, sharpFive.level)
+    }
+
+    @Test fun sharpReturnsHighFromTenFPS() {
+        // на низком кадр идёт 48 мс: прогноз на высоком ~11 к/с — мало для 18, хватает для 10
+        val middling: (LiveViewQuality) -> Double = { if (it == high) 90.0 else 48.0 }
+        for (sharp in listOf(false, true)) {
+            val bench = Bench().apply { this.sharp = sharp }
+            bench.run(until = 6_000, weakForHigh)
+            assertEquals(low, bench.level)
+            bench.run(until = 60_000, middling)
+            assertEquals(if (sharp) high else low, bench.level)
+        }
     }
 
     @Test fun rttIsTheMinimumOverTenSeconds() {
