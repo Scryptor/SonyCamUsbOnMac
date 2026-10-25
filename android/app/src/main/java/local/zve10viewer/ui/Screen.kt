@@ -168,7 +168,8 @@ fun App(controller: CameraController) {
             }
             // и на экране ожидания: там видно, куда программа стучится и что ей отвечают
             if (screen.debugOpen) {
-                DebugPanel(controller, screen, Modifier.align(Alignment.CenterEnd).padding(end = 18.dp)
+                // слева под кнопками сверху, как на Mac: справа под панелью остались бы спуск и запись
+                DebugPanel(controller, screen, Modifier.align(Alignment.TopStart).padding(start = 18.dp, top = 84.dp)
                     .fillMaxWidth(0.45f).fillMaxHeight(0.8f))
             }
         }
