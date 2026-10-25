@@ -38,7 +38,9 @@ open "/Applications/ZV-E10 Viewer.app" --args --automation
 
 Токен меняется при каждом запуске.
 
-Пока API включён, macOS не усыпляет программу (App Nap), даже если её окно закрыто другими: иначе таймеры растягиваются и превью падает до 6–12 кадров/с, а тесты начинают зависеть от того, что открыто на экране.
+Пока API включён, macOS не усыпляет программу (App Nap), даже если её окно закрыто другими: иначе таймеры растягиваются и превью падает до 6–12 кадров/с, а тесты начинают зависеть от того, что открыто на экране. Пока идёт сеанс с камерой, программа держит это и без API.
+
+Только вместе с API действует переменная `ZV_PTPIP_HOST`: по Wi-Fi программа подключается лишь к этому адресу, без поиска камеры в сети. Так тесты гонят связь через прокси «плохого Wi-Fi» `scripts/badnet.py` (см. `scripts/wifi_resilience.py`).
 
 ## Запросы и ответы
 
@@ -75,6 +77,7 @@ open "/Applications/ZV-E10 Viewer.app" --args --automation
 | `capturing` | bool | идёт съёмка фото |
 | `fps` | число | кадров превью в секунду за последние 2 с |
 | `frameGapMs` | число | самая долгая пауза между кадрами превью за последние 10 с, мс |
+| `link` | объект | как идёт связь: `state` — `ok`, `weak` (кадры запаздывают), `interrupted` (связь прервалась), `reconnecting` (сеанс восстанавливается); `seconds` — сколько длится `interrupted` или `reconnecting`; `quality` — качество превью по Wi-Fi (`high` 1024×576, `low` 640×360, `null` по USB); `reconnects` — сколько раз сеанс восстанавливался с запуска; `lastRecoverySeconds` — сколько заняло последнее восстановление (от обрыва до первого кадра); `throughputKBs` — поток превью за 5 с, КБ/с; `rttMs` — отклик камеры на пробу |
 | `transport` | строка или `null` | как подключена камера: `usb` или `wifi` |
 | `wifi` | объект | `enabled` — подключаться ли по Wi-Fi, `pairing` — идёт сопряжение, `host` и `cameraName` — где и какая камера была в прошлый раз, `status` — сообщение о Wi-Fi на экране ожидания или `null` |
 | `frameSize` | `[ширина, высота]` | размер кадра превью; нет поля, пока кадров нет |
@@ -85,7 +88,7 @@ open "/Applications/ZV-E10 Viewer.app" --args --automation
 | `status` | строка или `null` | сообщение под пресетами, например «Сохранено: …» |
 | `review` | объект или `null` | просмотр снимка поверх видео: `title`, `source` («Загруженный снимок», «Кадр с камеры», «Снимок из ленты»), `timed` (закроется сам), `hasImage`, `files` (пути) |
 | `shots` | массив | снимки и стоп-кадры сессии, новые сначала: `title`, `files` |
-| `prefs` | объект | настройки программы: `destination`, `folder`, `reviewEnabled`, `reviewSeconds`, `reviewSource`, `autoHide`, `autoHideSeconds` |
+| `prefs` | объект | настройки программы: `destination`, `folder`, `reviewEnabled`, `reviewSeconds`, `reviewSource`, `autoHide`, `autoHideSeconds`, `wifiAdaptiveQuality` |
 | `cameraDestination` | число или `null` | куда камера сохраняет снимки (`0xD222`): 1 — Mac, 16 — карта, 17 — оба |
 | `presets` | массив | `name` и `values` — словарь «настройка → значение» |
 | `ui` | объект | что на экране: `fnOpen`, `allSettingsOpen`, `selected`, `group`, `editing` (если открыта строка), `info` (если открыта подсказка из плашки: `connection`, `frames` или `slowMotion`), `histogram`, `controlsHidden`, `manualHidden` |
@@ -180,6 +183,7 @@ open "/Applications/ZV-E10 Viewer.app" --args --automation
 | `autoHide` | `true`, `false` |
 | `autoHideSeconds` | `1`…`30` |
 | `wifiEnabled` | `true`, `false` |
+| `wifiAdaptiveQuality` | `true`, `false` — снижать качество превью при слабом Wi-Fi |
 
 Неизвестный ключ или недопустимое значение — 409.
 
