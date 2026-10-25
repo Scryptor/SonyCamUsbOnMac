@@ -1,5 +1,6 @@
 package local.zve10viewer
 
+import local.zve10viewer.ptp.DataProgress
 import local.zve10viewer.ptp.PtpEvent
 import local.zve10viewer.ptp.PtpIp
 import local.zve10viewer.ptp.PtpIpInitResult
@@ -185,6 +186,48 @@ class PtpIpTest {
         less.consume(PtpIpPacket(9, bytes(le32(4), le64(10))))
         less.consume(PtpIpPacket(12, bytes(le32(4), byteArrayOf(7, 8))))
         assertArrayEquals(byteArrayOf(7, 8), less.consume(PtpIpPacket(7, bytes(le16(0x2001), le32(4))))!!.data)
+    }
+
+    @Test fun transactionReportsExpectedLength() {
+        val t = PtpIpTransaction(8)
+        assertNull(t.expected)
+        // чужая транзакция длину не задаёт
+        t.consume(PtpIpPacket(9, bytes(le32(7), le64(5))))
+        assertNull(t.expected)
+        t.consume(PtpIpPacket(9, bytes(le32(8), le64(9_000_000))))
+        assertEquals(9_000_000L, t.expected)
+    }
+
+    @Test fun dataProgressLifecycle() {
+        val progress = DataProgress()
+        assertNull(progress.current)
+        progress.begin(100)
+        progress.add(40)
+        assertEquals(DataProgress.Reading(40, 100), progress.current)
+        progress.finish()
+        assertNull(progress.current)
+        // размер неизвестен — только принятые байты
+        progress.begin(null)
+        progress.add(7)
+        assertEquals(DataProgress.Reading(7, null), progress.current)
+    }
+
+    @Test fun transactionOpensAndClosesItsDataPhase() {
+        val progress = DataProgress()
+        val t = PtpIpTransaction(3, progress)
+        // ответ чужой транзакции фазу не открывает и не закрывает
+        t.consume(PtpIpPacket(9, bytes(le32(2), le64(9))))
+        assertNull(progress.current)
+        t.consume(PtpIpPacket(9, bytes(le32(3), le64(5))))
+        assertEquals(DataProgress.Reading(0, 5), progress.current)
+        // байты считает транспорт по мере чтения из сокета, а не транзакция по целым пакетам Data
+        progress.add(2)
+        t.consume(PtpIpPacket(10, bytes(le32(3), byteArrayOf(1, 2))))
+        assertEquals(DataProgress.Reading(2, 5), progress.current)
+        t.consume(PtpIpPacket(7, bytes(le16(0x2001), le32(2))))
+        assertEquals(DataProgress.Reading(2, 5), progress.current)
+        t.consume(PtpIpPacket(7, bytes(le16(0x2001), le32(3))))
+        assertNull(progress.current)
     }
 
     @Test fun liveViewJpegIsLocatedInPlaceBySizeField() {

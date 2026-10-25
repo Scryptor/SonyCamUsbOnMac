@@ -229,20 +229,29 @@ class CameraSession(private val transport: PtpTransport, private val timing: Ses
     }
 
     /**
-     * Снимок: полунажатие (автофокус), спуск, отпускание. При download — забирает все файлы снимка
-     * (RAW+JPEG — два файла) из памяти камеры по адресу 0xFFFFC001.
+     * Снимок: полунажатие (автофокус), спуск, отпускание. При download — забирает файлы снимка из памяти камеры по
+     * адресу 0xFFFFC001; files — сколько их (RAW+JPEG — два, по свойству 0xD253 FileFormat), и ещё столько, сколько
+     * лежало в памяти камеры до спуска. Пришли все — сразу
+     * возвращаемся: спуск свободен, а не ждёт ещё 2,5 с второго файла, которого не будет. onPhase — этапы для экрана:
+     * фокусировка (после полунажатия), спуск отработан (после S2), качается файл N из files (его размер — из ObjectInfo).
      */
-    suspend fun capturePhoto(download: Boolean): List<CapturedObject> {
+    suspend fun capturePhoto(download: Boolean, files: Int, onPhase: (CapturePhase) -> Unit = {}): List<CapturedObject> {
         if (!isReady) throw SessionException.NotReady()
+        // в памяти камеры уже лежат объекты (прошлый снимок не забрали: тайм-аут, обрыв, сменили формат) — забираем и
+        // их: это настоящие снимки, а без этого каждый следующий снимок отставал бы на один
+        val leftover = maxOf(0L, (_properties.value[SonyProp.OBJECT_IN_MEMORY]?.current?.intValue ?: 0L) - 0x8000).toInt()
+        val wanted = files + leftover
         val half = listOf(SonyProp.SHUTTER_HALF_PRESS.toLong())
         val full = listOf(SonyProp.SHUTTER_FULL_PRESS.toLong())
         call(SonyOp.CONTROL_DEVICE, half, PRESS)
+        onPhase(CapturePhase.Focusing)
         try {
             if (_properties.value[SonyProp.FOCUS_MODE]?.current?.intValue != 1L) {
                 // в автофокусе даём камере до секунды навестись (FocusFound 2 или 3 — готово)
                 waitFor(SonyProp.FOCUS_FOUND, 1000) { it == 2L || it == 3L }
             }
             call(SonyOp.CONTROL_DEVICE, full, PRESS)
+            onPhase(CapturePhase.Exposing)
             call(SonyOp.CONTROL_DEVICE, full, RELEASE)
             call(SonyOp.CONTROL_DEVICE, half, RELEASE)
         } catch (e: Exception) {
@@ -253,23 +262,26 @@ class CameraSession(private val transport: PtpTransport, private val timing: Ses
         }
         if (!download) return emptyList()
 
-        val files = ArrayList<CapturedObject>()
+        val result = ArrayList<CapturedObject>()
         var deadline = System.currentTimeMillis() + timing.captureTimeoutMs
         while (System.currentTimeMillis() < deadline) {
             refresh()
             if ((_properties.value[SonyProp.OBJECT_IN_MEMORY]?.current?.intValue ?: 0) > 0x8000) {
                 val info = ObjectInfo.parse(call(SonyOp.GET_OBJECT_INFO, listOf(Sony.CAPTURED_OBJECT_HANDLE)).data)
                 // защита от повторной выдачи того же файла, пока счётчик в камере не обновился
-                if (files.any { it.filename == info.filename }) break
+                if (result.any { it.filename == info.filename }) break
+                onPhase(CapturePhase.Downloading(result.size + 1, maxOf(wanted, result.size + 1), 0,
+                    info.compressedSize.takeIf { it > 0 }))
                 val data = call(SonyOp.GET_OBJECT, listOf(Sony.CAPTURED_OBJECT_HANDLE)).data
-                files.add(CapturedObject(info.filename, data))
-                // после файла ждём ещё немного: при RAW+JPEG второй появляется следом
+                result.add(CapturedObject(info.filename, data))
+                if (result.size >= wanted) break
+                // файлов меньше, чем должно быть: при RAW+JPEG второй появляется следом — ждём его ещё немного
                 deadline = System.currentTimeMillis() + timing.confirmTimeoutMs
                 continue
             }
             delay(timing.pollMs)
         }
-        return files
+        return result
     }
 
     /** Перечитывает свойства, пока условие не выполнится или не выйдет время подтверждения. */

@@ -1,5 +1,11 @@
 package local.zve10viewer.ui
 
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -22,6 +28,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -36,8 +43,14 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.withFrameMillis
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -48,19 +61,31 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.lerp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.Canvas
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import androidx.compose.ui.text.TextStyle
 import local.zve10viewer.CameraController
+import local.zve10viewer.CameraController.FeedbackTarget
+import local.zve10viewer.session.CaptureFeedback
+import local.zve10viewer.session.RecordingToggle
 import local.zve10viewer.settings.CaptureMode
 import local.zve10viewer.settings.FnSlot
 import local.zve10viewer.settings.SettingCatalog
@@ -124,7 +149,8 @@ private fun Tile(controller: CameraController, screen: ScreenState, slot: FnSlot
             horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center,
         ) {
             Text("Все", color = Secondary, fontSize = 14.sp)
-            Text("⚙", color = Color.White, fontSize = 19.sp)
+            // высотой со строку значения у соседних плиток
+            TopBarIcon(TopBarGlyph.settings, Modifier.size(width = 41.dp, height = 26.dp))
         }
     }
 }
@@ -305,14 +331,14 @@ fun AllSettingsPanel(controller: CameraController, screen: ScreenState, modifier
 
 /** Справа по центру: «Фото / Видео» и под ним спуск (фото) или стоп-кадр и запись (видео). */
 @Composable
-fun RightColumn(controller: CameraController, modifier: Modifier) {
+fun RightColumn(controller: CameraController, feedback: FeedbackState, modifier: Modifier) {
     Column(modifier, horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(16.dp)) {
         ModeSwitch(controller)
         if (controller.mode == CaptureMode.photo) {
-            ShutterButton(controller)
+            ShutterButton(controller, feedback)
         } else {
-            GrabButton(controller)
-            RecordButton(controller)
+            GrabButton(controller, feedback)
+            RecordButton(controller, feedback)
         }
     }
 }
@@ -332,25 +358,28 @@ private fun ModeSwitch(controller: CameraController) {
     }
 }
 
+/** Спуск: пока камера снимает — дуга вместо кольца (доля загрузки или крутится) и подпись слева; кнопка неактивна. */
 @Composable
-private fun ShutterButton(controller: CameraController) {
+private fun ShutterButton(controller: CameraController, feedback: FeedbackState) {
     val busy = controller.isCapturing
-    Box(
-        Modifier.size(84.dp).border(5.dp, Color.White.copy(alpha = 0.9f), CircleShape)
-            .clickable(enabled = controller.phase == CameraController.Phase.ready && !busy) { controller.capturePhoto() },
-        contentAlignment = Alignment.Center,
-    ) {
-        Box(Modifier.size(64.dp).background(if (busy) Color.Gray else Color.White, CircleShape))
-        if (busy) CircularProgressIndicator(Modifier.size(24.dp), color = Color.Black, strokeWidth = 3.dp)
+    val phase = controller.capturePhase
+    CaptureButton(84.dp, FeedbackTarget.shutter, feedback, enabled = controller.phase == CameraController.Phase.ready && !busy,
+        waveColor = Color.White, caption = phase?.let(CaptureFeedback::caption), onClick = { controller.capturePhoto() }) {
+        if (busy) {
+            PendingArc(phase?.let(CaptureFeedback::fraction), Color.White, Modifier.fillMaxSize())
+        } else {
+            Box(Modifier.fillMaxSize().border(5.dp, Color.White.copy(alpha = 0.9f), CircleShape))
+        }
+        Box(Modifier.size(64.dp).background(Color.White.copy(alpha = if (busy) 0.5f else 1f), CircleShape))
     }
 }
 
+/** Стоп-кадр — мгновенный, без ожидания: волна, вспышка и полёт кадра в ленту. */
 @Composable
-private fun GrabButton(controller: CameraController) {
-    Box(
-        Modifier.size(58.dp).background(Panel, CircleShape).clickable(enabled = controller.frame != null) { controller.grabFrame() },
-        contentAlignment = Alignment.Center,
-    ) {
+private fun GrabButton(controller: CameraController, feedback: FeedbackState) {
+    CaptureButton(58.dp, FeedbackTarget.grab, feedback, enabled = controller.frame != null, waveColor = Color.White, caption = null,
+        onClick = { controller.grabFrame() }) {
+        Box(Modifier.fillMaxSize().background(Panel, CircleShape))
         // рамка видоискателя с объективом — «снимок кадра»
         Canvas(Modifier.size(26.dp)) {
             val c = size.width * 0.28f
@@ -367,60 +396,126 @@ private fun GrabButton(controller: CameraController) {
     }
 }
 
+/**
+ * Запись: пока камера не ответила — крутящаяся дуга (красная — запуск, белая — остановка) и подпись слева. Круг
+ * становится квадратом (и обратно) за 250 мс, только когда камера подтвердила запись свойством.
+ */
 @Composable
-private fun RecordButton(controller: CameraController) {
+private fun RecordButton(controller: CameraController, feedback: FeedbackState) {
     val ready = controller.phase == CameraController.Phase.ready
-    Box(
-        Modifier.size(84.dp).border(5.dp, Color.White.copy(alpha = 0.9f), CircleShape).alpha(if (ready) 1f else 0.4f)
-            .clickable(enabled = ready) { controller.toggleRecording() },
-        contentAlignment = Alignment.Center,
-    ) {
-        if (controller.isRecording) {
-            Box(Modifier.size(32.dp).background(Color.Red, RoundedCornerShape(7.dp)))
+    val request = controller.recordingRequest
+    val morph by animateFloatAsState(if (controller.isRecording) 1f else 0f, tween(250), label = "record")
+    CaptureButton(84.dp, FeedbackTarget.record, feedback, enabled = ready && request == null, waveColor = Color.Red,
+        caption = when (request) {
+            RecordingToggle.Request.starting -> "Запуск записи…"
+            RecordingToggle.Request.stopping -> "Остановка…"
+            null -> null
+        },
+        onClick = { controller.toggleRecording() }, modifier = Modifier.alpha(if (ready) 1f else 0.4f)) {
+        if (request != null) {
+            PendingArc(null, if (request == RecordingToggle.Request.starting) Color.Red else Color.White, Modifier.fillMaxSize())
         } else {
-            Box(Modifier.size(60.dp).background(Color.Red, CircleShape))
+            Box(Modifier.fillMaxSize().border(5.dp, Color.White.copy(alpha = 0.9f), CircleShape))
+        }
+        Box(Modifier.size(lerp(60.dp, 32.dp, morph)).background(Color.Red, RoundedCornerShape(lerp(30.dp, 7.dp, morph))))
+    }
+}
+
+/**
+ * Последние снимки и стоп-кадры: касание — галерея на этом снимке, «+N» — на седьмом; долгое касание — открыть файл в
+ * другой программе. Новая миниатюра появляется с «пружинкой» и белой рамкой; к миниатюре стоп-кадра сначала долетает
+ * сам кадр.
+ */
+@Composable
+fun ShotsStrip(controller: CameraController, feedback: FeedbackState, onOpen: (CameraController.Shot) -> Unit) {
+    // лента на экране — стоп-кадр летит в неё; спрятали — в угол
+    DisposableEffect(Unit) {
+        feedback.stripVisible = true
+        onDispose {
+            feedback.stripVisible = false
+            feedback.stripTarget = null
+        }
+    }
+    Row(Modifier.background(Panel, RoundedCornerShape(12.dp)).padding(6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        controller.shots.take(6).forEachIndexed { index, shot ->
+            key(shot.id) {
+                ShotThumbnail(controller, shot, feedback, first = index == 0, onClick = { onOpen(shot) })
+            }
+        }
+        if (controller.shots.size > 6) {
+            Text("+${controller.shots.size - 6}", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                modifier = Modifier.size(width = 52.dp, height = 64.dp).clip(RoundedCornerShape(8.dp)).background(PanelLight)
+                    .clickable { controller.shots.getOrNull(6)?.let(onOpen) }.wrapContentHeight())
         }
     }
 }
 
-/** Последние снимки и стоп-кадры: касание — открыть поверх видео, долгое касание — открыть в галерее. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun ShotsStrip(controller: CameraController) {
-    Row(Modifier.background(Panel, RoundedCornerShape(12.dp)).padding(6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalAlignment = Alignment.CenterVertically) {
-        controller.shots.take(6).forEachIndexed { index, shot ->
-            var menu by remember { mutableStateOf(false) }
-            Box {
-                val thumbnail = shot.thumbnail
-                Box(Modifier.size(64.dp).clip(RoundedCornerShape(8.dp)).background(PanelLight)
-                    .combinedClickable(onClick = { controller.openShot(index) }, onLongClick = { menu = true })) {
-                    if (thumbnail != null) Image(thumbnail, shot.title, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
-                }
-                DropdownMenu(menu, { menu = false }) {
-                    shot.files.forEach { file ->
-                        DropdownMenuItem(text = { Text("Открыть ${file.name}") }, onClick = {
-                            controller.openExternally(file)
-                            menu = false
-                        })
-                    }
+private fun ShotThumbnail(controller: CameraController, shot: CameraController.Shot, feedback: FeedbackState, first: Boolean,
+                          onClick: () -> Unit) {
+    var menu by remember { mutableStateOf(false) }
+    val scale = remember { Animatable(1f) }
+    val ring = remember { Animatable(0f) }
+    val fresh = feedback.fresh
+    LaunchedEffect(fresh) {
+        if (fresh?.first != shot.id) return@LaunchedEffect
+        // новая: 0,6 → 1 пружиной, белая рамка гаснет за 600 мс
+        launch {
+            scale.snapTo(0.6f)
+            scale.animateTo(1f, spring(dampingRatio = 0.45f, stiffness = Spring.StiffnessMediumLow))
+        }
+        ring.snapTo(1f)
+        ring.animateTo(0f, tween(600))
+    }
+    val hidden = feedback.hiddenShot == shot.id
+    Box {
+        val thumbnail = shot.thumbnail
+        Box(Modifier.size(64.dp)
+            // сюда летит стоп-кадр
+            .then(if (first) Modifier.onGloballyPositioned { feedback.stripTarget = it.boundsInRoot() } else Modifier)
+            .graphicsLayer {
+                alpha = if (hidden) 0f else 1f
+                scaleX = scale.value
+                scaleY = scale.value
+            }
+            .clip(RoundedCornerShape(8.dp)).background(PanelLight)
+            .drawWithContent {
+                drawContent()
+                val a = ring.value
+                if (a > 0f) {
+                    val width = 2.dp.toPx()
+                    drawRoundRect(Color.White.copy(alpha = a), Offset(width / 2, width / 2), Size(size.width - width, size.height - width),
+                        CornerRadius(7.dp.toPx()), style = Stroke(width))
                 }
             }
+            .combinedClickable(onClick = onClick, onLongClick = { menu = true })) {
+            if (thumbnail != null) Image(thumbnail, shot.title, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
         }
-        if (controller.shots.size > 6) Text("+${controller.shots.size - 6}", color = Secondary, fontSize = 14.sp,
-            modifier = Modifier.padding(horizontal = 6.dp))
+        DropdownMenu(menu, { menu = false }) {
+            shot.files.forEach { file ->
+                DropdownMenuItem(text = { Text("Открыть ${file.name}") }, onClick = {
+                    controller.openExternally(file)
+                    menu = false
+                })
+            }
+        }
     }
 }
 
 /** Просмотр снимка поверх видео: по таймеру после съёмки или до закрытия, если открыт из ленты. */
 @Composable
 fun ReviewOverlay(controller: CameraController, review: CameraController.Review) {
-    Box(Modifier.fillMaxSize().background(Color.Black).pointerInput(review) { detectTapGestures { controller.dismissReview() } }) {
-        val image = review.image
-        if (image != null) {
-            Image(image, review.title, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
-        } else {
-            CircularProgressIndicator(Modifier.align(Alignment.Center), color = Color.White)
+    Box(Modifier.fillMaxSize().background(Color.Black).pointerInput(Unit) { detectTapGestures { controller.dismissReview() } }) {
+        // скачанный снимок сменяет кадр с камеры плавно
+        Crossfade(review.image, animationSpec = tween(250), label = "review") { image ->
+            if (image != null) {
+                Image(image, review.title, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
+            } else {
+                Box(Modifier.fillMaxSize()) { CircularProgressIndicator(Modifier.align(Alignment.Center), color = Color.White) }
+            }
         }
         Text("${review.source} · нажмите, чтобы вернуться", color = Color.White, fontSize = 16.sp,
             modifier = Modifier.align(Alignment.TopCenter).padding(18.dp).background(Panel, RoundedCornerShape(10.dp))
@@ -431,7 +526,9 @@ fun ReviewOverlay(controller: CameraController, review: CameraController.Review)
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             Text(review.title, color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
-            if (review.detail.isNotEmpty()) Text(review.detail, color = Secondary, fontSize = 16.sp)
+            // снимок ещё качается — та же подпись, что у кнопки спуска
+            val detail = if (review.live) controller.capturePhase?.let(CaptureFeedback::caption) ?: review.detail else review.detail
+            if (detail.isNotEmpty()) Text(detail, color = Secondary, fontSize = 16.sp, style = TextStyle(fontFeatureSettings = "tnum"))
             review.files.firstOrNull()?.let { file ->
                 Text("Открыть", color = Color.White, fontSize = 16.sp, modifier = Modifier.background(PanelLight, RoundedCornerShape(9.dp))
                     .clickable { controller.openExternally(review.files.firstOrNull { it.mime == "image/jpeg" } ?: file) }
@@ -439,22 +536,30 @@ fun ReviewOverlay(controller: CameraController, review: CameraController.Review)
             }
         }
         review.endsAt?.let { endsAt ->
-            Countdown(endsAt, Modifier.align(Alignment.CenterEnd).padding(end = 24.dp))
+            Countdown(review.shownAt, endsAt, Modifier.align(Alignment.CenterEnd).padding(end = 24.dp))
         }
     }
 }
 
+/** Сколько ещё показывать снимок: кольцо плавно убывает от полного до пустого, в середине — целые секунды. */
 @Composable
-private fun Countdown(endsAt: Long, modifier: Modifier) {
+private fun Countdown(startsAt: Long, endsAt: Long, modifier: Modifier) {
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(endsAt) {
-        while (now < endsAt) {
-            delay(250)
-            now = System.currentTimeMillis()
-        }
+        while (now < endsAt) withFrameMillis { now = System.currentTimeMillis() }
     }
-    val left = maxOf(0L, endsAt - now)
-    Box(modifier.size(76.dp).border(4.dp, Color.White.copy(alpha = 0.25f), CircleShape), contentAlignment = Alignment.Center) {
-        Text("${(left + 999) / 1000}", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Bold)
+    val total = (endsAt - startsAt).coerceAtLeast(1L)
+    val seconds by remember(endsAt) { derivedStateOf { (maxOf(0L, endsAt - now) + 999) / 1000 } }
+    Box(
+        modifier.size(76.dp).background(Panel, CircleShape).drawBehind {
+            val width = 4.dp.toPx()
+            val left = (endsAt - now).coerceIn(0L, total).toFloat() / total
+            drawCircle(Color.White.copy(alpha = 0.25f), size.minDimension / 2 - width / 2, style = Stroke(width))
+            drawArc(Color.White, -90f, 360f * left, false, Offset(width / 2, width / 2), Size(size.width - width, size.height - width),
+                style = Stroke(width, cap = StrokeCap.Round))
+        },
+        contentAlignment = Alignment.Center,
+    ) {
+        Text("$seconds", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Bold)
     }
 }

@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.receiveAsFlow
 import local.zve10viewer.debug.LinkJournal
+import local.zve10viewer.ptp.DataProgress
 import local.zve10viewer.ptp.PtpEvent
 import local.zve10viewer.ptp.PtpIp
 import local.zve10viewer.ptp.PtpIpInitResult
@@ -139,6 +140,9 @@ class PtpIpTransport private constructor(
     /** Отправить последним перед CloseSession, например вернуть камере высокое качество превью; null — ничего. */
     @Volatile var farewell: Farewell? = null
 
+    /** Принятые байты фазы данных от Start Data до ответа — для доли загрузки снимка. */
+    override val dataProgress = DataProgress()
+
     init {
         thread(name = "ptpip-events", isDaemon = true) { readEvents() }
         thread(name = "ptpip-link", isDaemon = true) { watch() }
@@ -169,7 +173,7 @@ class PtpIpTransport private constructor(
             }
             out.flush()
             val input = command.getInputStream()
-            val transaction = PtpIpTransaction(tid)
+            val transaction = PtpIpTransaction(tid, dataProgress)
             while (true) {
                 val packet = commandReader.nextView()
                 if (packet == null) {
@@ -187,6 +191,9 @@ class PtpIpTransport private constructor(
                             lastRx = t
                             commandRx = t
                             progressAt = t
+                            // доля загрузки — по байтам из сокета от Start Data до ответа, а не по целым пакетам
+                            // Data (камера шлёт их по 2 МБ): иначе «Загрузка N %» шла бы рывками
+                            dataProgress.add(n)
                         }
                         // тайм-аут — на тишину: большой RAW по Wi-Fi идёт дольше, но непрерывно. Пока связи нет, он
                         // не идёт, а сам по себе сеанс не закрывает — это решает слежение за связью
@@ -215,6 +222,9 @@ class PtpIpTransport private constructor(
             // если транспорт уже закрыло слежение (или программа), причина у него своя
             shutDown(LinkLoss.broken, rst = true, why = e.message)
             throw TransportException(closedMessage(), disconnected = true)
+        } finally {
+            // и при тайм-ауте или обрыве: недокачанное не должно висеть на кнопке спуска
+            dataProgress.finish()
         }
     }
 
