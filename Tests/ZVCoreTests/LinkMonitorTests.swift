@@ -25,8 +25,12 @@ private func run(_ monitor: inout LinkMonitor, from start: Date, until seconds: 
     // проба сразу, пока ответа нет — следующей нет; камера не отвечала ни разу — это не провал
     #expect(actions.filter { $0.action == .sendProbe }.map(\.t) == [0.25])
     #expect(!monitor.isOutage)
+    // ответ через 4 с — проба пережила провал, это не время отклика
     monitor.probeAnswered(at: start.addingTimeInterval(4.6))
-    #expect(monitor.rtt != nil)
+    #expect(monitor.rtt == nil)
+    _ = monitor.tick(now: start.addingTimeInterval(6.75))
+    monitor.probeAnswered(at: start.addingTimeInterval(6.8))
+    #expect(monitor.rtt.map { abs($0 - 0.05) < 0.001 } == true)
 }
 
 @Test func linkMonitorRidesThroughAShortStall() {
@@ -120,4 +124,35 @@ private func run(_ monitor: inout LinkMonitor, from start: Date, until seconds: 
     #expect(WiFiPolicy.forgetsPairing(initFailReason: 1))
     #expect(!WiFiPolicy.forgetsPairing(initFailReason: 2))
     #expect(!WiFiPolicy.forgetsPairing(initFailReason: 3))
+}
+
+@Test func linkMonitorKeepsCountingSilenceAcrossRetriedOperations() {
+    let start = Date(timeIntervalSinceReferenceDate: 1000)
+    var monitor = LinkMonitor(now: start)
+    var closed: TimeInterval?
+    var t: TimeInterval = 0.25
+    monitor.operationStarted(at: start)
+    while t <= 20, closed == nil {
+        let now = start.addingTimeInterval(t)
+        // live view после тайм-аута в 8 с спрашивает снова — отсчёт от самой старой операции без ответа
+        if t == 8 || t == 16 { monitor.operationStarted(at: now) }
+        for action in monitor.tick(now: now) {
+            if action == .sendProbe { monitor.probeAnswered(at: now.addingTimeInterval(0.02)) }
+            if action == .close(.cameraSilent) { closed = t }
+        }
+        t += 0.25
+    }
+    #expect(closed.map { $0 >= 15 && $0 <= 15.5 } == true)
+}
+
+@Test func linkMonitorStartsSilentCameraClockAfterAnOutage() {
+    let start = Date(timeIntervalSinceReferenceDate: 1000)
+    var monitor = LinkMonitor(now: start)
+    monitor.operationStarted(at: start)
+    _ = run(&monitor, from: start, until: 20, ping: { _ in false })
+    #expect(monitor.isOutage)
+    // провал кончился ответом на пробу — «камера не отвечает» считается с этого момента, а не с начала операции
+    monitor.eventReceived(at: start.addingTimeInterval(20.1))
+    #expect(!monitor.isOutage)
+    #expect(monitor.tick(now: start.addingTimeInterval(21)).allSatisfy { $0 != .close(.cameraSilent) })
 }

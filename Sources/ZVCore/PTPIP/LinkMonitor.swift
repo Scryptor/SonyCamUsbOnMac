@@ -61,6 +61,8 @@ public struct LinkMonitor: Sendable {
     public private(set) var commandRx: Date
     public private(set) var eventRx: Date
     public private(set) var outageSince: Date?
+    /// Когда кончился последний провал: тишина до него не идёт ни в «камера не отвечает», ни в тайм-ауты.
+    public private(set) var outageEndedAt = Date.distantPast
     /// Когда ping впервые ответил во время провала.
     public private(set) var linkBackAt: Date?
     public private(set) var rtt: TimeInterval?
@@ -69,7 +71,8 @@ public struct LinkMonitor: Sendable {
     private var probesAnswered = false
     private var lastProbeAt = Date.distantPast
     private var lastPingAt = Date.distantPast
-    /// С какого момента ждём ответа на операцию; nil — операций нет.
+    /// С какого момента ждём ответа: самая старая операция, на которую не пришёл ответ (тайм-аут у вызывающего —
+    /// он спросит снова — отсчёт не обнуляет); nil — камера ничего не должна.
     private var waitingSince: Date?
 
     public init(now: Date, timing: Timing = Timing()) {
@@ -84,24 +87,29 @@ public struct LinkMonitor: Sendable {
     /// Пришли байты по командному соединению.
     public mutating func commandReceived(at now: Date) {
         commandRx = max(commandRx, now)
-        endOutage()
+        endOutage(at: now)
     }
 
     /// Пришли байты по событийному соединению.
     public mutating func eventReceived(at now: Date) {
         eventRx = max(eventRx, now)
-        endOutage()
+        endOutage(at: now)
     }
 
     public mutating func probeAnswered(at now: Date) {
-        if let sent = probeSentAt { rtt = now.timeIntervalSince(sent) }
+        // ответ на пробу, пережившую провал, — не время отклика
+        if let sent = probeSentAt, now.timeIntervalSince(sent) < timing.outageAfter { rtt = now.timeIntervalSince(sent) }
         probeSentAt = nil
         probesAnswered = true
         eventReceived(at: now)
     }
 
-    public mutating func operationStarted(at now: Date) { waitingSince = now }
-    public mutating func operationFinished() { waitingSince = nil }
+    public mutating func operationStarted(at now: Date) {
+        if waitingSince == nil { waitingSince = now }
+    }
+
+    /// Пришёл ответ на операцию — камера ничего не должна.
+    public mutating func operationAnswered() { waitingSince = nil }
 
     public mutating func pinged(_ answered: Bool, at now: Date) {
         guard isOutage else { return }
@@ -129,7 +137,7 @@ public struct LinkMonitor: Sendable {
             lastPingAt = now
             return [.ping]
         }
-        if let waiting = waitingSince, now.timeIntervalSince(max(waiting, commandRx)) >= timing.cameraSilentAfter,
+        if let waiting = waitingSince, now.timeIntervalSince(max(waiting, commandRx, outageEndedAt)) >= timing.cameraSilentAfter,
            now.timeIntervalSince(eventRx) < timing.outageAfter {
             return [.close(.cameraSilent)]
         }
@@ -149,8 +157,10 @@ public struct LinkMonitor: Sendable {
         return max(max(commandRx, eventRx), earliest)
     }
 
-    private mutating func endOutage() {
+    private mutating func endOutage(at now: Date) {
+        guard outageSince != nil else { return }
         outageSince = nil
+        outageEndedAt = now
         linkBackAt = nil
     }
 }

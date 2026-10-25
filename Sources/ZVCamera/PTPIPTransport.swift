@@ -346,7 +346,6 @@ public actor PTPIPTransport: PTPTransport {
         let tid = nextTransactionID
         nextTransactionID &+= 1
         monitor.operationStarted(at: Date())
-        defer { monitor.operationFinished() }
         do {
             try await command.write(PTPIP.operationRequest(operation, transactionID: tid, params: params, dataOut: outData != nil))
             if let outData {
@@ -361,7 +360,10 @@ public actor PTPIPTransport: PTPTransport {
                     try await command.write(PTPIP.probeResponse)
                     continue
                 }
-                if let reply = transaction.consume(packet) { return reply }
+                if let reply = transaction.consume(packet) {
+                    monitor.operationAnswered()
+                    return reply
+                }
             }
         } catch TransportError.timeout {
             // ответа нет, а связь есть — это решает вызывающий (live view спросит снова); сеанс не рвём
