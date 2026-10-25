@@ -51,6 +51,10 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.withFrameMillis
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -343,17 +347,60 @@ fun RightColumn(controller: CameraController, feedback: FeedbackState, modifier:
     }
 }
 
+/** «Фото / Видео / S&Q» — значки в капсуле, как кнопки верхней панели: у выбранного белый круг, под капсулой — его название. */
 @Composable
 private fun ModeSwitch(controller: CameraController) {
     val enabled = controller.isWritable(SettingID.exposureProgram) && !controller.isRecording
-    Column(Modifier.background(Panel, RoundedCornerShape(12.dp)).padding(4.dp).alpha(if (enabled) 1f else 0.5f)) {
-        ShootingMode.entries.forEach { mode ->
-            val active = controller.shootingMode == mode
-            Text(mode.title, color = if (active) Color.Black else Color.White, fontSize = 17.sp,
-                fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
-                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                modifier = Modifier.width(88.dp).background(if (active) Color.White else Color.Transparent, RoundedCornerShape(9.dp))
-                    .clickable(enabled = enabled) { controller.switchMode(mode) }.padding(vertical = 10.dp))
+    Column(Modifier.alpha(if (enabled) 1f else 0.5f), horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Column(Modifier.background(Panel, RoundedCornerShape(percent = 50)).padding(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            ShootingMode.entries.forEach { mode ->
+                val active = controller.shootingMode == mode
+                Box(
+                    Modifier.size(48.dp).clip(CircleShape).background(if (active) Color.White else Color.Transparent)
+                        .semantics { contentDescription = mode.title }
+                        .clickable(enabled = enabled) { controller.switchMode(mode) },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    ModeGlyph(mode, if (active) Color.Black else Color.White)
+                }
+            }
+        }
+        Text(controller.shootingMode.title, color = Color.White.copy(alpha = 0.8f), fontSize = 14.sp)
+    }
+}
+
+/**
+ * Значок режима съёмки в квадрате 52×52, как у верхней панели (масштаб 1,12): фото — корпус камеры с объективом, видео —
+ * камера с треугольником-объективом, S&Q — буквами: своего значка у камеры для него нет.
+ */
+@Composable
+private fun ModeGlyph(mode: ShootingMode, color: Color) {
+    if (mode == ShootingMode.slowQuick) {
+        Text("S&Q", color = color, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        return
+    }
+    Canvas(Modifier.size(48.dp)) {
+        val k = size.minDimension / 52f * 1.12f
+        val dx = (size.width - 52f * k) / 2
+        val dy = (size.height - 52f * k) / 2
+        fun p(x: Float, y: Float) = Offset(dx + x * k, dy + y * k)
+        val line = Stroke(maxOf(2f * k, 1.5.dp.toPx()), cap = StrokeCap.Round, join = StrokeJoin.Round)
+        if (mode == ShootingMode.photo) {
+            drawRoundRect(color, p(14f, 20f), Size(24f * k, 15f * k), CornerRadius(3f * k), style = line)
+            // видоискатель — «горб» над корпусом
+            drawRoundRect(color, p(19.5f, 16.5f), Size(6.5f * k, 4f * k), CornerRadius(1.2f * k))
+            drawCircle(color, 4.8f * k, p(26f, 27.5f), style = line)
+        } else {
+            drawRoundRect(color, p(13f, 19.5f), Size(18f * k, 13f * k), CornerRadius(3f * k), style = line)
+            val lens = Path().apply {
+                p(31.5f, 24.5f).let { moveTo(it.x, it.y) }
+                p(38.5f, 20.5f).let { lineTo(it.x, it.y) }
+                p(38.5f, 31.5f).let { lineTo(it.x, it.y) }
+                p(31.5f, 27.5f).let { lineTo(it.x, it.y) }
+                close()
+            }
+            drawPath(lens, color, style = line)
         }
     }
 }
@@ -363,14 +410,15 @@ private fun ModeSwitch(controller: CameraController) {
 private fun ShutterButton(controller: CameraController, feedback: FeedbackState) {
     val busy = controller.isCapturing
     val phase = controller.capturePhase
-    CaptureButton(84.dp, FeedbackTarget.shutter, feedback, enabled = controller.phase == CameraController.Phase.ready && !busy,
+    // пользователь попросил кнопки съёмки поменьше: было 84 dp
+    CaptureButton(72.dp, FeedbackTarget.shutter, feedback, enabled = controller.phase == CameraController.Phase.ready && !busy,
         waveColor = Color.White, caption = phase?.let(CaptureFeedback::caption), onClick = { controller.capturePhoto() }) {
         if (busy) {
             PendingArc(phase?.let(CaptureFeedback::fraction), Color.White, Modifier.fillMaxSize())
         } else {
-            Box(Modifier.fillMaxSize().border(5.dp, Color.White.copy(alpha = 0.9f), CircleShape))
+            Box(Modifier.fillMaxSize().border(4.dp, Color.White.copy(alpha = 0.9f), CircleShape))
         }
-        Box(Modifier.size(64.dp).background(Color.White.copy(alpha = if (busy) 0.5f else 1f), CircleShape))
+        Box(Modifier.size(54.dp).background(Color.White.copy(alpha = if (busy) 0.5f else 1f), CircleShape))
     }
 }
 
@@ -405,7 +453,7 @@ private fun RecordButton(controller: CameraController, feedback: FeedbackState) 
     val ready = controller.phase == CameraController.Phase.ready
     val request = controller.recordingRequest
     val morph by animateFloatAsState(if (controller.isRecording) 1f else 0f, tween(250), label = "record")
-    CaptureButton(84.dp, FeedbackTarget.record, feedback, enabled = ready && request == null, waveColor = Color.Red,
+    CaptureButton(72.dp, FeedbackTarget.record, feedback, enabled = ready && request == null, waveColor = Color.Red,
         caption = when (request) {
             RecordingToggle.Request.starting -> "Запуск записи…"
             RecordingToggle.Request.stopping -> "Остановка…"
@@ -415,9 +463,9 @@ private fun RecordButton(controller: CameraController, feedback: FeedbackState) 
         if (request != null) {
             PendingArc(null, if (request == RecordingToggle.Request.starting) Color.Red else Color.White, Modifier.fillMaxSize())
         } else {
-            Box(Modifier.fillMaxSize().border(5.dp, Color.White.copy(alpha = 0.9f), CircleShape))
+            Box(Modifier.fillMaxSize().border(4.dp, Color.White.copy(alpha = 0.9f), CircleShape))
         }
-        Box(Modifier.size(lerp(60.dp, 32.dp, morph)).background(Color.Red, RoundedCornerShape(lerp(30.dp, 7.dp, morph))))
+        Box(Modifier.size(lerp(52.dp, 28.dp, morph)).background(Color.Red, RoundedCornerShape(lerp(26.dp, 6.dp, morph))))
     }
 }
 

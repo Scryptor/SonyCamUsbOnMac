@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 import ZVCore
 
-/// Справа по центру: «Фото / Видео» и под ним спуск (фото) или стоп-кадр и запись (видео).
+/// Справа по центру: переключатель «Фото / Видео / S&Q» и под ним спуск (фото) или стоп-кадр и запись (видео).
 /// Палец (курсор) закрывает кнопку — отклик вокруг неё: кольцо, волна, дуга ожидания, подпись слева.
 struct RightColumn: View {
     let controller: CameraController
@@ -20,29 +20,77 @@ struct RightColumn: View {
     }
 }
 
+/// «Фото / Видео / S&Q» — значки в капсуле, как кнопки верхней панели: у выбранного белый круг, под капсулой — его
+/// название.
 private struct ModeSwitch: View {
     let controller: CameraController
 
     var body: some View {
         let enabled = controller.isWritable(.exposureProgram) && !controller.isRecording
-        VStack(spacing: 2) {
-            ForEach(ShootingMode.allCases, id: \.self) { mode in
-                let selected = controller.shootingMode == mode
-                Button { controller.switchMode(mode) } label: {
-                    Text(mode.title)
-                        .font(.callout.weight(selected ? .bold : .regular))
-                        .frame(width: 64, height: 26)
-                        .foregroundStyle(selected ? Color.black : Color.white)
-                        .background(selected ? Color.white : Color.clear, in: RoundedRectangle(cornerRadius: 7))
+        VStack(spacing: 5) {
+            VStack(spacing: 4) {
+                ForEach(ShootingMode.allCases, id: \.self) { mode in
+                    let selected = controller.shootingMode == mode
+                    Button { controller.switchMode(mode) } label: {
+                        ModeGlyph(mode: mode, color: selected ? .black : .white)
+                            .frame(width: 34, height: 34)
+                            .background(selected ? Color.white : Color.clear, in: Circle())
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(controller.isRecording ? "Во время записи режим не переключается" : mode.title)
+                    .accessibilityLabel(mode.title)
                 }
-                .buttonStyle(.plain)
             }
+            .padding(4)
+            .background(.ultraThinMaterial, in: Capsule())
+            Text(controller.shootingMode.title)
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.8))
         }
-        .padding(3)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
         .disabled(!enabled)
         .opacity(enabled ? 1 : 0.5)
-        .help(controller.isRecording ? "Во время записи режим не переключается" : "Фото, видео или замедленная и ускоренная съёмка (S&Q)")
+    }
+}
+
+/// Значок режима съёмки в квадрате 52×52, как значки верхней панели: фото — корпус камеры с объективом, видео — камера
+/// с треугольником-объективом, S&Q — буквами: своего значка у камеры для него нет.
+private struct ModeGlyph: View {
+    let mode: ShootingMode
+    let color: Color
+
+    var body: some View {
+        if mode == .slowQuick {
+            Text("S&Q")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(color)
+        } else {
+            Canvas { context, size in
+                let scale = size.width / 52 * 1.25
+                context.translateBy(x: size.width / 2 - 26 * scale, y: size.height / 2 - 26 * scale)
+                context.scaleBy(x: scale, y: scale)
+                let shading = GraphicsContext.Shading.color(color)
+                let line = StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round)
+                if mode == .photo {
+                    context.stroke(Path(roundedRect: CGRect(x: 14, y: 20, width: 24, height: 15), cornerRadius: 3),
+                                   with: shading, style: line)
+                    // видоискатель — «горб» над корпусом
+                    context.fill(Path(roundedRect: CGRect(x: 19.5, y: 16.5, width: 6.5, height: 4), cornerRadius: 1.2),
+                                 with: shading)
+                    context.stroke(Path(ellipseIn: CGRect(x: 21.2, y: 22.7, width: 9.6, height: 9.6)), with: shading,
+                                   style: line)
+                } else {
+                    context.stroke(Path(roundedRect: CGRect(x: 13, y: 19.5, width: 18, height: 13), cornerRadius: 3),
+                                   with: shading, style: line)
+                    var lens = Path()
+                    lens.addLines([CGPoint(x: 31.5, y: 24.5), CGPoint(x: 38.5, y: 20.5), CGPoint(x: 38.5, y: 31.5),
+                                   CGPoint(x: 31.5, y: 27.5)])
+                    lens.closeSubpath()
+                    context.stroke(lens, with: shading, style: line)
+                }
+            }
+            .accessibilityHidden(true)
+        }
     }
 }
 
@@ -57,11 +105,12 @@ private struct ShutterButton: View {
                 if busy {
                     PendingArc(fraction: controller.capturePhase.flatMap(CaptureFeedback.fraction), color: .white)
                 } else {
-                    Circle().strokeBorder(.white.opacity(0.9), lineWidth: 4)
+                    Circle().strokeBorder(.white.opacity(0.9), lineWidth: 3.5)
                 }
-                Circle().fill(.white.opacity(busy ? 0.55 : 1)).frame(width: busy ? 42 : 48, height: busy ? 42 : 48)
+                Circle().fill(.white.opacity(busy ? 0.55 : 1)).frame(width: busy ? 35 : 40, height: busy ? 35 : 40)
             }
-            .frame(width: 64, height: 64)
+            // пользователь попросил кнопки съёмки поменьше: было 64
+            .frame(width: 54, height: 54)
             .animation(.easeInOut(duration: 0.2), value: busy)
         }
         .buttonStyle(CaptureButtonStyle())
@@ -101,14 +150,14 @@ struct RecordButton: View {
                 if let request {
                     PendingArc(fraction: nil, color: request == .starting ? .red : .white)
                 } else {
-                    Circle().strokeBorder(.white.opacity(0.9), lineWidth: 4)
+                    Circle().strokeBorder(.white.opacity(0.9), lineWidth: 3.5)
                 }
                 // круг ↔ квадрат — только когда камера подтвердила
-                RoundedRectangle(cornerRadius: recording ? 6 : 23)
+                RoundedRectangle(cornerRadius: recording ? 5 : 19)
                     .fill(.red)
-                    .frame(width: recording ? 26 : 46, height: recording ? 26 : 46)
+                    .frame(width: recording ? 22 : 38, height: recording ? 22 : 38)
             }
-            .frame(width: 64, height: 64)
+            .frame(width: 54, height: 54)
             .animation(.easeInOut(duration: 0.25), value: recording)
         }
         .buttonStyle(CaptureButtonStyle())
