@@ -1,6 +1,9 @@
 package local.zve10viewer
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.test.runTest
@@ -12,6 +15,8 @@ import local.zve10viewer.ptp.PtpTransport
 import local.zve10viewer.ptp.PtpType
 import local.zve10viewer.ptp.PtpValue
 import local.zve10viewer.session.CameraSession
+import local.zve10viewer.session.LiveViewQuality
+import local.zve10viewer.session.RefreshCoalescer
 import local.zve10viewer.session.SessionException
 import local.zve10viewer.session.SessionTiming
 import local.zve10viewer.session.SetResult
@@ -25,6 +30,7 @@ import local.zve10viewer.settings.apply
 import local.zve10viewer.sony.PropertyRange
 import local.zve10viewer.sony.SonyOp
 import local.zve10viewer.sony.SonyProp
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -134,6 +140,66 @@ class SessionTest {
         gate.complete(Unit)
         testScheduler.advanceUntilIdle()
         assertEquals(listOf(1L, 3L), written)
+    }
+
+    @Test fun propertyEventBurstRefreshesOneMoreTimeAtMost() = runTest {
+        var refreshes = 0
+        val gate = CompletableDeferred<Unit>()
+        // своя область: перечитывающая корутина ждёт событий бесконечно, тест её потом отменяет
+        val scope = CoroutineScope(coroutineContext + Job())
+        val refresher = RefreshCoalescer(scope) {
+            refreshes++
+            if (refreshes == 1) gate.await()
+        }
+        refresher.request()
+        testScheduler.runCurrent()
+        assertEquals(1, refreshes)
+        // пока первое перечитывание идёт, пачка событий — одно в очереди
+        repeat(10) { refresher.request() }
+        gate.complete(Unit)
+        testScheduler.advanceUntilIdle()
+        assertEquals(2, refreshes)
+        refresher.request()
+        testScheduler.advanceUntilIdle()
+        assertEquals(3, refreshes)
+        scope.cancel()
+    }
+
+    @Test fun liveViewFrameComesWithItsTimingAndShortReplies() = runTest {
+        val frame = javaClass.getResource("/fixtures/lv_frame_raw.bin")!!.readBytes()
+        var denied = 2
+        val camera = object : PtpTransport {
+            override val events: Flow<PtpEvent> = emptyFlow()
+            override fun send(operation: Int, params: List<Long>, outData: ByteArray?, timeoutMs: Int?): PtpReply {
+                // кадр не готов дважды (7 и 6 мс), потом кадр за 30 мс
+                val reply = if (denied-- > 0) PtpReply(PtpResponseCode.ACCESS_DENIED) else PtpReply(PtpResponseCode.OK, data = frame)
+                reply.elapsedNanos = if (reply.isOK) 30_000_000 else (6 + maxOf(denied, 0)) * 1_000_000L
+                return reply
+            }
+            override fun close() {}
+        }
+        val sample = CameraSession(camera, FAST).nextLiveViewFrame()
+        assertEquals(2, sample.waits)
+        assertEquals(22260, sample.bytes)
+        // JPEG — прямо в ответе камеры, без копии
+        assertEquals(1524, sample.jpegOffset)
+        assertEquals(20736, sample.jpegLength)
+        assertTrue(sample.data === frame)
+        assertEquals(30.0, sample.fetchMs, 1e-9)
+        assertEquals(6.0, sample.shortReplyMs!!, 1e-9)
+        assertEquals(20736, sample.jpeg().size)
+    }
+
+    @Test fun liveViewQualityIsWrittenWithoutReadBack() = runTest {
+        val camera = FakeCamera()
+        val session = ready(camera, this)
+        val before = camera.sent.size
+        session.setLiveViewQuality(LiveViewQuality.low)
+        val after = camera.sent.drop(before)
+        // смену подтвердит ширина кадров — перечитывать свойства незачем
+        assertEquals(listOf(SonyOp.SET_EXT_PROP_VALUE to listOf(SonyProp.LIVE_VIEW_IMAGE_QUALITY.toLong())), after.map { it.first to it.second })
+        assertArrayEquals(byteArrayOf(1), after[0].third)
+        session.close()
     }
 
     @Test fun fileNamesNeverOverwrite() {

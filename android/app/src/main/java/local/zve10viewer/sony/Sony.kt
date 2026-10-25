@@ -51,6 +51,8 @@ object SonyProp {
     const val JPEG_QUALITY = 0xD252
     const val FILE_FORMAT = 0xD253
     const val PRIORITY_MODE = 0xD25A
+    /** Качество превью: 1 — низкое (640×360, ~34 КБ на кадр), 2 — высокое (1024×576, ~72 КБ). По Wi-Fi работает. */
+    const val LIVE_VIEW_IMAGE_QUALITY = 0xD26A
     const val SHUTTER_HALF_PRESS = 0xD2C1
     const val SHUTTER_FULL_PRESS = 0xD2C2
     const val MOVIE_REC_BUTTON = 0xD2C8
@@ -169,22 +171,36 @@ object SonyPropertyParser {
 }
 
 object LiveViewFrame {
-    /** Кадр live view: первые 4 байта — смещение до JPEG, дальше сам JPEG. */
-    fun jpeg(data: ByteArray): ByteArray? {
+    /** Где в ответе камеры лежит JPEG. */
+    data class Span(val offset: Int, val length: Int)
+
+    /**
+     * Кадр live view: u32 смещение до JPEG, u32 его размер, дальше служебное (рамки фокуса), сам JPEG и снова
+     * служебное. Возвращает место JPEG в ответе — декодировать можно прямо оттуда, без копии.
+     */
+    fun locate(data: ByteArray): Span? {
         if (data.size <= 8) return null
-        val offset = (data[0].toInt() and 0xFF) or ((data[1].toInt() and 0xFF) shl 8) or
-            ((data[2].toInt() and 0xFF) shl 16) or ((data[3].toInt() and 0xFF) shl 24)
+        val offset = le32(data, 0)
+        val size = le32(data, 4)
         if (offset in 0 until data.size - 1 && data[offset] == 0xFF.toByte() && data[offset + 1] == 0xD8.toByte()) {
-            return data.copyOfRange(offset, data.size)
+            val length = if (size > 0 && size <= data.size - offset) size else data.size - offset
+            return Span(offset, length)
         }
         // запасной путь: ищем начало JPEG (FF D8 FF)
         for (i in 0 until data.size - 2) {
             if (data[i] == 0xFF.toByte() && data[i + 1] == 0xD8.toByte() && data[i + 2] == 0xFF.toByte()) {
-                return data.copyOfRange(i, data.size)
+                return Span(i, data.size - i)
             }
         }
         return null
     }
+
+    /** Сам JPEG отдельным массивом (копия). */
+    fun jpeg(data: ByteArray): ByteArray? = locate(data)?.let { data.copyOfRange(it.offset, it.offset + it.length) }
+
+    /** Отрицательное (больше 2 ГБ) — не размер и не смещение: такой кадр не разобрать. */
+    private fun le32(data: ByteArray, at: Int): Int = (data[at].toInt() and 0xFF) or ((data[at + 1].toInt() and 0xFF) shl 8) or
+        ((data[at + 2].toInt() and 0xFF) shl 16) or ((data[at + 3].toInt() and 0xFF) shl 24)
 }
 
 /** Стандартный набор PTP ObjectInfo (ответ на GetObjectInfo) — нужны имя файла, размер и формат. */

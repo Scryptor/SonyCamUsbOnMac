@@ -129,6 +129,9 @@ sealed class PtpValue {
 
 data class PtpReply(val code: Int, val params: List<Long> = emptyList(), val data: ByteArray = ByteArray(0)) {
     val isOK: Boolean get() = code == PtpResponseCode.OK
+
+    /** Сколько шёл обмен: от отправки запроса до ответа, без ожидания своей очереди, нс (для замеров канала). */
+    var elapsedNanos: Long = 0
 }
 
 data class PtpEvent(val code: Int, val params: List<Long> = emptyList())

@@ -9,6 +9,9 @@ import local.zve10viewer.ptp.PtpIpTransaction
 import local.zve10viewer.ptp.PtpParseException
 import local.zve10viewer.ptp.PtpReply
 import local.zve10viewer.ptp.Ssdp
+import local.zve10viewer.sony.LiveViewFrame
+import java.io.ByteArrayInputStream
+import java.io.InputStream
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -123,6 +126,75 @@ class PtpIpTest {
             "USN: uuid:00000000-0005-0010-8000-000000000000::urn:schemas-sony-com:service:DigitalImaging:1\r\n\r\n"
         assertEquals(Ssdp.Response("192.168.1.194", "uuid:00000000-0005-0010-8000-000000000000"), Ssdp.parse(reply))
         assertNull(Ssdp.parse("HTTP/1.1 200 OK\r\nLOCATION: http://192.168.1.1:1900/igd.xml\r\nST: upnp:rootdevice\r\n\r\n"))
+    }
+
+    @Test fun probeRequestIsAnEmptyPacket() {
+        assertArrayEquals(bytes(le32(8), le32(13)), PtpIp.probeRequest)
+        assertArrayEquals(bytes(le32(8), le32(14)), PtpIp.probeResponse)
+    }
+
+    @Test fun initFailKeepsItsReason() {
+        // 2 — камера занята: сопряжение при этом не забываем
+        assertEquals(PtpIpInitResult.Rejected(2), PtpIp.parseInitReply(PtpIpPacket(5, le32(2))))
+    }
+
+    @Test fun readerReadsStraightFromTheSocketStream() {
+        val payload = ByteArray(100_000) { (it % 7).toByte() }
+        val first = packet(10, bytes(le32(5), payload))
+        val second = packet(7, bytes(le16(0x2001), le32(5)))
+        val reader = PtpIpPacketReader()
+        // TCP отдаёт поток кусками по 1460 байт
+        val input = object : InputStream() {
+            val source = ByteArrayInputStream(first + second)
+            override fun read(): Int = source.read()
+            override fun read(b: ByteArray, off: Int, len: Int): Int = source.read(b, off, minOf(len, 1460))
+        }
+        val transaction = PtpIpTransaction(5)
+        var reply: PtpReply? = null
+        while (reply == null) {
+            val view = reader.nextView()
+            if (view == null) {
+                assertTrue(reader.readFrom(input) > 0)
+                continue
+            }
+            reply = transaction.consume(view)
+        }
+        assertEquals(0x2001, reply.code)
+        assertArrayEquals(payload, reply.data)
+        assertEquals(-1, reader.readFrom(input))
+    }
+
+    @Test fun readerRejectsAbsurdLength() {
+        // длина больше любого файла камеры — поток сбился: дальше его не разобрать
+        val reader = PtpIpPacketReader()
+        reader.feed(bytes(le32(0x7FFF_FFF0), le32(10)))
+        try {
+            reader.next()
+            fail("ожидали ошибку длины")
+        } catch (e: PtpParseException) {
+            assertTrue(e.message!!.contains("длина"))
+        }
+    }
+
+    @Test fun transactionGrowsPastTheAnnouncedSizeAndTrimsShortData() {
+        val more = PtpIpTransaction(3)
+        more.consume(PtpIpPacket(9, bytes(le32(3), le64(2))))
+        more.consume(PtpIpPacket(12, bytes(le32(3), byteArrayOf(1, 2, 3, 4))))
+        assertArrayEquals(byteArrayOf(1, 2, 3, 4), more.consume(PtpIpPacket(7, bytes(le16(0x2001), le32(3))))!!.data)
+        val less = PtpIpTransaction(4)
+        less.consume(PtpIpPacket(9, bytes(le32(4), le64(10))))
+        less.consume(PtpIpPacket(12, bytes(le32(4), byteArrayOf(7, 8))))
+        assertArrayEquals(byteArrayOf(7, 8), less.consume(PtpIpPacket(7, bytes(le16(0x2001), le32(4))))!!.data)
+    }
+
+    @Test fun liveViewJpegIsLocatedInPlaceBySizeField() {
+        // u32 смещение, u32 размер, служебное, JPEG, снова служебное
+        val data = bytes(le32(12), le32(4), ByteArray(4), byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 1, 2), ByteArray(6) { 9 })
+        assertEquals(LiveViewFrame.Span(12, 4), LiveViewFrame.locate(data))
+        assertArrayEquals(byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 1, 2), LiveViewFrame.jpeg(data))
+        // размер не сходится — до конца ответа
+        val broken = bytes(le32(12), le32(1000), ByteArray(4), byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 1, 2))
+        assertEquals(LiveViewFrame.Span(12, 4), LiveViewFrame.locate(broken))
     }
 
     @Test fun cameraAccessPointIsRecognisedByItsAddress() {

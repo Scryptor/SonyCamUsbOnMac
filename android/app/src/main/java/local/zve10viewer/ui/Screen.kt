@@ -69,7 +69,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import local.zve10viewer.CameraController
+import local.zve10viewer.CameraController.FrameNotice
 import local.zve10viewer.Prefs
+import local.zve10viewer.session.LiveViewQuality
 import local.zve10viewer.settings.CaptureMode
 import local.zve10viewer.settings.SettingCatalog
 import local.zve10viewer.settings.SettingGroup
@@ -325,14 +327,54 @@ private fun Video(controller: CameraController, modifier: Modifier) {
     Box(modifier, contentAlignment = Alignment.Center) {
         val frame = controller.frame
         if (frame != null) {
+            val notice = controller.frameNotice
+            // связь прервалась — последний кадр остаётся, но приглушён: видно, что он не живой
+            val dimmed = notice == FrameNotice.interrupted || notice == FrameNotice.reconnecting
             Image(frame, null, contentScale = ContentScale.Fit,
-                modifier = Modifier.fillMaxSize().alpha(if (controller.isFrameStale) 0.45f else 1f))
-            if (controller.isFrameStale) {
-                Text("Нет картинки с камеры…", color = Color.White, fontSize = 18.sp,
-                    modifier = Modifier.background(Panel, RoundedCornerShape(10.dp)).padding(horizontal = 16.dp, vertical = 10.dp))
+                modifier = Modifier.fillMaxSize().alpha(if (dimmed) 0.55f else 1f))
+            when (notice) {
+                // кадр не тускнеет: картинка, скорее всего, сейчас пойдёт дальше
+                FrameNotice.weakSignal -> Text("Слабый сигнал Wi-Fi", color = Color.White, fontSize = 16.sp,
+                    modifier = Modifier.align(Alignment.TopCenter).padding(top = 84.dp)
+                        .background(Panel, RoundedCornerShape(10.dp)).padding(horizontal = 14.dp, vertical = 8.dp))
+                FrameNotice.interrupted, FrameNotice.reconnecting -> LinkNotice(controller, notice)
+                FrameNotice.none -> Unit
             }
         } else {
             CircularProgressIndicator(color = Color.White)
+        }
+    }
+}
+
+/** Связи с камерой нет: сколько уже длится и, через 10 с, что можно сделать. */
+@Composable
+private fun LinkNotice(controller: CameraController, notice: FrameNotice) {
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            now = System.currentTimeMillis()
+            delay(500)
+        }
+    }
+    val seconds = maxOf(0L, (now - controller.noticeSince) / 1000)
+    val wifi = controller.transportKind == CameraController.TransportKind.wifi
+    val title = when {
+        notice == FrameNotice.reconnecting -> "Переподключаюсь к камере…"
+        wifi -> "Связь с камерой прервалась · %d:%02d".format(seconds / 60, seconds % 60)
+        else -> "Нет картинки с камеры · %d:%02d".format(seconds / 60, seconds % 60)
+    }
+    Column(
+        Modifier.widthIn(max = 480.dp).background(Panel, RoundedCornerShape(14.dp)).padding(horizontal = 22.dp, vertical = 16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            CircularProgressIndicator(Modifier.size(20.dp), color = Color.White, strokeWidth = 2.dp)
+            Text(title, color = Color.White, fontSize = 18.sp, style = TextStyle(fontFeatureSettings = "tnum"))
+        }
+        if (wifi && seconds >= 10) {
+            Text("Поднесите камеру ближе к роутеру или планшету и выключите Bluetooth, если он не нужен",
+                color = Secondary, fontSize = 15.sp, lineHeight = 20.sp,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center)
         }
     }
 }
@@ -382,7 +424,9 @@ private fun StatusPill(controller: CameraController, screen: ScreenState) {
         // касание — подсказка: адреса и сигнал / что это за кадры
         PillText("${controller.deviceInfo?.model ?: "Камера"} · ${transportLabel(controller)}",
             Modifier.clickable { screen.togglePillInfo(PillInfo.connection) })
-        PillText("${controller.shownFps} к/с", Modifier.clickable { screen.togglePillInfo(PillInfo.frames) })
+        // превью снижено из-за слабого сигнала — видно сразу, рядом с частотой
+        val reduced = if (controller.liveViewQuality == LiveViewQuality.low) " · 360p" else ""
+        PillText("${controller.shownFps} к/с$reduced", Modifier.clickable { screen.togglePillInfo(PillInfo.frames) })
         PillText(ValueFormatter.label(SettingID.exposureProgram, controller.property(SettingID.exposureProgram)))
         controller.slowMotion?.let { slow ->
             PillText(slowMotionSummary(slow), Modifier.clickable { screen.togglePillInfo(PillInfo.slowMotion) })
@@ -441,6 +485,11 @@ private fun PillInfoCard(controller: CameraController, info: PillInfo) {
                     details.cameraHost?.let { InfoRow("IP камеры", it) }
                     details.localHost?.let { InfoRow("IP планшета", it) }
                     details.signalDbm?.let { InfoRow("Сигнал Wi-Fi", "${it.toString().replace('-', '−')} дБм, ${signalWord(it)}") }
+                    when (controller.liveViewQuality) {
+                        LiveViewQuality.low -> InfoNote("Превью 640×360 — сигнала не хватает на полное качество", Color.White)
+                        LiveViewQuality.high -> InfoNote("Превью 1024×576")
+                        null -> Unit
+                    }
                     InfoNote(if (controller.wifiDirect) {
                         "Камера сама раздаёт сеть, сигнал — между планшетом и камерой. Если картинка дёргается, поднесите планшет ближе к камере."
                     } else {
@@ -689,6 +738,7 @@ private fun SettingsPanel(controller: CameraController, modifier: Modifier) {
     var autoHide by remember { mutableStateOf(prefs.autoHide) }
     var autoHideSeconds by remember { mutableIntStateOf(prefs.autoHideSeconds) }
     var wifiEnabled by remember { mutableStateOf(prefs.wifiEnabled) }
+    var adaptiveQuality by remember { mutableStateOf(controller.adaptiveQuality) }
     var wifiCamera by remember { mutableStateOf(prefs.wifiCameraName?.let { name -> prefs.wifiHost?.let { "$name · $it" } ?: name }) }
     Column(
         modifier.background(Color(0xF22C2C2E), RoundedCornerShape(18.dp)).padding(24.dp)
@@ -725,6 +775,11 @@ private fun SettingsPanel(controller: CameraController, modifier: Modifier) {
         Spacer(Modifier.height(8.dp))
         Text("Wi-Fi", color = Secondary, fontSize = 15.sp)
         Toggle("Подключаться по Wi-Fi, когда камеры нет на кабеле", wifiEnabled) { wifiEnabled = it; prefs.wifiEnabled = it }
+        Toggle("Снижать качество превью при слабом Wi-Fi", adaptiveQuality) {
+            adaptiveQuality = it
+            controller.applyAdaptiveQuality(it)
+        }
+        Text("1024×576 → 640×360, только когда сигнала не хватает", color = Secondary, fontSize = 13.sp)
         val cameraName = wifiCamera
         if (cameraName != null) {
             Row(verticalAlignment = Alignment.CenterVertically) {

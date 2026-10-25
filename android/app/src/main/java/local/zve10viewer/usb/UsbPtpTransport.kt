@@ -97,6 +97,7 @@ class UsbPtpTransport(
         val timeout = timeoutMs ?: defaultTimeoutMs
         // вне сессии (GetDeviceInfo, OpenSession) transaction id — 0, внутри — по порядку с 1
         val transactionId = if (sessionOpen) nextTransactionId++ else 0
+        val started = System.nanoTime()
         write(PtpContainer.command(operation, transactionId, params), timeout)
         if (outData != null) write(PtpContainer.data(operation, transactionId, outData), timeout)
         var data = ByteArray(0)
@@ -116,6 +117,7 @@ class UsbPtpTransport(
                         sessionOpen = true
                         nextTransactionId = 1
                     }
+                    reply.elapsedNanos = System.nanoTime() - started
                     return reply
                 }
                 else -> Log.w(TAG, "неожиданный контейнер типа ${container.type}")

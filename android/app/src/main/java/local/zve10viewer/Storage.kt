@@ -72,6 +72,11 @@ class Prefs(context: Context) {
         get() = prefs.getString("wifiCameraName", null)
         set(value) = prefs.edit().putString("wifiCameraName", value).apply()
 
+    /** Снижать качество превью по Wi-Fi (1024×576 → 640×360), только когда сигнала на полное не хватает. */
+    var adaptiveLiveViewQuality: Boolean
+        get() = prefs.getBoolean("adaptiveLiveViewQuality", true)
+        set(value) = prefs.edit().putBoolean("adaptiveLiveViewQuality", value).apply()
+
     var presets: List<Preset>
         get() = PresetCatalog.fromJson(prefs.getString("presets", "[]")!!)
         set(value) = prefs.edit().putString("presets", PresetCatalog.toJson(value)).apply()

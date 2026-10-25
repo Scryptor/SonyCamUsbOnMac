@@ -1,6 +1,7 @@
 package local.zve10viewer.ptp
 
 import java.io.ByteArrayOutputStream
+import java.io.InputStream
 import java.net.URI
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -11,13 +12,33 @@ data class PtpIpPacket(val type: Int, val payload: ByteArray) {
     override fun hashCode() = type * 31 + payload.contentHashCode()
 }
 
+/**
+ * Пакет прямо в буфере читателя, без копии: содержимое — `bytes[offset, offset + length)`.
+ * Действует, пока у читателя не попросили следующий пакет или не дочитали поток.
+ */
+class PtpIpPacketView {
+    var type = 0
+        internal set
+    var bytes: ByteArray = ByteArray(0)
+        internal set
+    var offset = 0
+        internal set
+    var length = 0
+        internal set
+
+    fun toPacket() = PtpIpPacket(type, bytes.copyOfRange(offset, offset + length))
+}
+
 sealed class PtpIpInitResult {
     data class Accepted(val connectionNumber: Long, val cameraName: String) : PtpIpInitResult()
-    /** 1 — программа не сопряжена с камерой. */
+    /** 1 — программа не сопряжена с камерой, 2 — камера занята, 3 — без причины (CIPA DC-X005). */
     data class Rejected(val reason: Long) : PtpIpInitResult()
 }
 
 class PtpIpRejected(val reason: Long) : Exception("камера отклонила подключение (причина $reason)")
+
+/** Камера не принимает соединение на порту PTP/IP: PC Remote выключен или камера в другом режиме. */
+class PtpIpRefused : Exception("камера не принимает подключение")
 
 /** PTP поверх TCP (CIPA DC-005): два соединения на порт 15740 — команды с данными и события. */
 object PtpIp {
@@ -41,6 +62,10 @@ object PtpIp {
     const val END_DATA = 12
     const val PROBE_REQUEST = 13
     const val PROBE_RESPONSE = 14
+
+    /** Причины Init Fail. Только первая значит, что камера программу не знает. */
+    const val INIT_FAIL_NOT_PAIRED = 1L
+    const val INIT_FAIL_BUSY = 2L
 
     /** Приветствие: GUID программы, её имя (его камера показывает при сопряжении) и версия протокола 1.0. */
     fun initCommandRequest(guid: ByteArray, name: String): ByteArray {
@@ -70,6 +95,9 @@ object PtpIp {
     fun endData(transactionId: Long, payload: ByteArray): ByteArray = packet(END_DATA, le32(transactionId) + payload)
 
     val probeResponse: ByteArray get() = packet(PROBE_RESPONSE, ByteArray(0))
+
+    /** Проба «ты здесь?» по событийному соединению: камера отвечает ProbeResponse за 5–50 мс. */
+    val probeRequest: ByteArray get() = packet(PROBE_REQUEST, ByteArray(0))
 
     fun parseInitReply(packet: PtpIpPacket): PtpIpInitResult {
         val r = ByteReader(packet.payload)
@@ -111,46 +139,69 @@ object PtpIp {
 /**
  * Поток TCP приходит кусками: копим байты и отдаём целые пакеты.
  * Буфер растёт удвоением и не пересобирается на каждом куске: камера шлёт файл пакетами по 2 МБ,
- * а TCP отдаёт их по 1–60 КБ.
+ * а TCP отдаёт их по 1–60 КБ. Из сокета читаем прямо в этот буфер, а пакеты отдаём без копии (`nextView`).
  */
 class PtpIpPacketReader {
     private var buffer = ByteArray(INITIAL)
     private var start = 0
     private var end = 0
+    private val view = PtpIpPacketView()
 
     fun feed(data: ByteArray, count: Int = data.size) {
-        if (end + count > buffer.size) {
-            val used = end - start
-            if (used + count <= buffer.size) {
-                buffer.copyInto(buffer, 0, start, end)
-            } else {
-                val grown = ByteArray(maxOf(buffer.size * 2, used + count))
-                buffer.copyInto(grown, 0, start, end)
-                buffer = grown
-            }
-            start = 0
-            end = used
-        }
+        makeRoom(count)
         data.copyInto(buffer, end, 0, count)
         end += count
     }
 
-    /** Следующий целый пакет; null — пакет ещё не дочитан. */
-    fun next(): PtpIpPacket? {
+    /**
+     * Читает из потока сразу в буфер, без промежуточного массива. Возвращает, сколько байт пришло;
+     * -1 — поток закончился. Блокирует, как и само чтение.
+     */
+    fun readFrom(input: InputStream): Int {
+        makeRoom(MIN_READ)
+        val n = input.read(buffer, end, buffer.size - end)
+        if (n > 0) end += n
+        return n
+    }
+
+    /** Следующий целый пакет (копия); null — пакет ещё не дочитан. */
+    fun next(): PtpIpPacket? = nextView()?.toPacket()
+
+    /** Следующий целый пакет прямо в буфере; null — пакет ещё не дочитан. Действует до следующего вызова. */
+    fun nextView(): PtpIpPacketView? {
         if (end - start < 8) return null
         val length = u32(start)
         val type = u32(start + 4).toInt()
-        if (length < 8) throw PtpParseException("неверная длина пакета $length")
+        // длина меньше заголовка или больше любого файла камеры — поток сбился, дальше его не разобрать
+        if (length < 8 || length > MAX_PACKET) throw PtpParseException("неверная длина пакета $length")
         if (end - start < length) return null
-        val packet = PtpIpPacket(type, buffer.copyOfRange(start + 8, start + length.toInt()))
+        view.type = type
+        view.bytes = buffer
+        view.offset = start + 8
+        view.length = length.toInt() - 8
         start += length.toInt()
         if (start == end) {
             start = 0
             end = 0
-            // после большого файла не держим мегабайты впустую
+            // после большого файла не держим мегабайты впустую; отданный пакет ещё смотрит в старый буфер — он живёт
             if (buffer.size > 4 * 1024 * 1024) buffer = ByteArray(INITIAL)
         }
-        return packet
+        return view
+    }
+
+    /** Место ещё под count байт в конце: сдвигаем недочитанное в начало или растим буфер удвоением. */
+    private fun makeRoom(count: Int) {
+        if (end + count <= buffer.size) return
+        val used = end - start
+        if (used + count <= buffer.size) {
+            buffer.copyInto(buffer, 0, start, end)
+        } else {
+            val grown = ByteArray(maxOf(buffer.size * 2, used + count))
+            buffer.copyInto(grown, 0, start, end)
+            buffer = grown
+        }
+        start = 0
+        end = used
     }
 
     private fun u32(at: Int): Long =
@@ -158,46 +209,69 @@ class PtpIpPacketReader {
 
     private companion object {
         const val INITIAL = 64 * 1024
+        /** Сколько места держать под одно чтение из сокета. */
+        const val MIN_READ = 64 * 1024
+        const val MAX_PACKET = 256L * 1024 * 1024
     }
 }
 
 /**
  * Ответ на одну операцию: данные (Start Data → Data… → End Data) и ответ камеры.
  * Пакеты чужих транзакций — остатки оборванного обмена — пропускаются.
+ * Данные собираются в буфер ровно того размера, что объявила камера: кадр отдаётся без лишней копии.
  */
 class PtpIpTransaction(private val transactionId: Long) {
-    private var data = ByteArrayOutputStream()
+    private var data = EMPTY
+    private var filled = 0
 
     /** Возвращает ответ, когда он пришёл; до этого — null. */
-    fun consume(packet: PtpIpPacket): PtpReply? {
-        val r = ByteReader(packet.payload)
-        return when (packet.type) {
-            PtpIp.START_DATA -> {
-                // длина известна заранее — буфер сразу нужного размера, без пересборок
-                if (r.remaining >= 12 && r.u32() == transactionId) {
-                    val total = r.u64()
-                    if (total in 1..MAX_PRESIZE && data.size() == 0) data = ByteArrayOutputStream(total.toInt())
-                }
-                null
+    fun consume(packet: PtpIpPacket): PtpReply? = consume(packet.type, packet.payload, 0, packet.payload.size)
+
+    fun consume(packet: PtpIpPacketView): PtpReply? = consume(packet.type, packet.bytes, packet.offset, packet.length)
+
+    private fun consume(type: Int, bytes: ByteArray, offset: Int, length: Int): PtpReply? = when (type) {
+        PtpIp.START_DATA -> {
+            // длина известна заранее — буфер сразу нужного размера, без пересборок
+            if (length >= 12 && u32(bytes, offset) == transactionId) {
+                val total = u32(bytes, offset + 4) or (u32(bytes, offset + 8) shl 32)
+                if (total in 1..MAX_PRESIZE && filled == 0) data = ByteArray(total.toInt())
             }
-            PtpIp.DATA, PtpIp.END_DATA -> {
-                if (r.remaining >= 4 && r.u32() == transactionId) data.write(packet.payload, 4, packet.payload.size - 4)
-                null
-            }
-            PtpIp.OPERATION_RESPONSE -> {
-                if (r.remaining < 6) return null
-                val code = r.u16()
-                if (r.u32() != transactionId) return null
-                val params = ArrayList<Long>()
-                while (r.remaining >= 4) params += r.u32()
-                PtpReply(code, params, data.toByteArray())
-            }
-            else -> null
+            null
         }
+        PtpIp.DATA, PtpIp.END_DATA -> {
+            if (length >= 4 && u32(bytes, offset) == transactionId) append(bytes, offset + 4, length - 4)
+            null
+        }
+        PtpIp.OPERATION_RESPONSE -> {
+            if (length < 6 || u32(bytes, offset + 2) != transactionId) {
+                null
+            } else {
+                val code = (bytes[offset].toInt() and 0xFF) or ((bytes[offset + 1].toInt() and 0xFF) shl 8)
+                val params = ArrayList<Long>()
+                var at = offset + 6
+                while (at + 4 <= offset + length) {
+                    params += u32(bytes, at)
+                    at += 4
+                }
+                // камера прислала ровно объявленное — отдаём сам буфер
+                PtpReply(code, params, if (filled == data.size) data else data.copyOf(filled))
+            }
+        }
+        else -> null
+    }
+
+    private fun append(bytes: ByteArray, offset: Int, count: Int) {
+        if (filled + count > data.size) data = data.copyOf(maxOf(data.size * 2, filled + count))
+        bytes.copyInto(data, filled, offset, offset + count)
+        filled += count
     }
 
     private companion object {
         const val MAX_PRESIZE = 256L * 1024 * 1024
+        val EMPTY = ByteArray(0)
+
+        fun u32(b: ByteArray, at: Int): Long =
+            (0 until 4).fold(0L) { acc, i -> acc or ((b[at + i].toLong() and 0xFF) shl (8 * i)) }
     }
 }
 

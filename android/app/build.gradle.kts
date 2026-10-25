@@ -32,6 +32,8 @@ android {
     }
     buildFeatures {
         compose = true
+        // BuildConfig.DEBUG: параметры отладки через прокси стенда (ptpipHost, linkCheckUrl) — только в debug-сборке
+        buildConfig = true
     }
 }
 

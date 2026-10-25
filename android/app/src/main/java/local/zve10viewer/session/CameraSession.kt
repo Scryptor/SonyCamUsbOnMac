@@ -4,6 +4,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -52,6 +53,45 @@ sealed class SetResult {
 }
 
 data class CapturedObject(val filename: String, val data: ByteArray)
+
+/** Кадр live view и как он шёл — по этим отсчётам видно, сколько тянет канал. JPEG лежит прямо в ответе камеры. */
+class LiveViewSample(
+    /** Ответ камеры целиком; JPEG в нём — с jpegOffset длиной jpegLength. */
+    val data: ByteArray,
+    val jpegOffset: Int,
+    val jpegLength: Int,
+    /** Сколько шёл запрос, вернувший кадр: от отправки до ответа, без ожидания своей очереди, мс. */
+    val fetchMs: Double,
+    /** Самый короткий ответ «кадр не готов» перед этим кадром — оценка времени отклика камеры, мс. */
+    val shortReplyMs: Double?,
+    /** Сколько раз камера ответила «кадр не готов» перед этим кадром. */
+    val waits: Int,
+) {
+    /** Сколько байт пришло в ответе камеры. */
+    val bytes: Int get() = data.size
+
+    /** Сам JPEG отдельным массивом (копия) — для сохранения кадра. */
+    fun jpeg(): ByteArray = data.copyOfRange(jpegOffset, jpegOffset + jpegLength)
+}
+
+/**
+ * Перечитывания свойств по событиям 0xC203: одно в работе и не больше одного в очереди. Пачка событий — одно-два
+ * перечитывания, а не по одному на событие: каждое — ~2,8 КБ и лишний обмен, который на слабом Wi-Fi отнимает
+ * кадры у live view.
+ */
+class RefreshCoalescer(scope: CoroutineScope, private val refresh: suspend () -> Unit) {
+    private val requests = Channel<Unit>(Channel.CONFLATED)
+
+    init {
+        scope.launch {
+            for (request in requests) refresh()
+        }
+    }
+
+    fun request() {
+        requests.trySend(Unit)
+    }
+}
 
 /** Сеанс работы с камерой Sony в режиме PC Remote. */
 class CameraSession(private val transport: PtpTransport, private val timing: SessionTiming = SessionTiming()) {
@@ -142,21 +182,26 @@ class CameraSession(private val transport: PtpTransport, private val timing: Ses
         return after == 1L
     }
 
-    /** Следующий кадр live view (JPEG). Пока кадр не готов, камера отвечает AccessDenied — ждём и повторяем. */
     /** Сколько раз подряд камера ответила «кадр не готов» перед последним кадром (для замеров). */
     @Volatile var lastLiveViewWaits = 0
         private set
 
-    suspend fun nextLiveViewFrame(): ByteArray {
+    /**
+     * Следующий кадр live view и как он шёл. Пока кадр не готов, камера отвечает AccessDenied — ждём и повторяем;
+     * короткий ответ заодно показывает время отклика камеры.
+     */
+    suspend fun nextLiveViewFrame(): LiveViewSample {
         var waits = 0
+        var shortest: Long? = null
         while (true) {
             coroutineContext.ensureActive()
             val reply = raw(SonyOp.GET_OBJECT, listOf(Sony.LIVE_VIEW_HANDLE))
             when (reply.code) {
                 PtpResponseCode.OK -> {
-                    LiveViewFrame.jpeg(reply.data)?.let {
+                    LiveViewFrame.locate(reply.data)?.let { span ->
                         lastLiveViewWaits = waits
-                        return it
+                        return LiveViewSample(reply.data, span.offset, span.length, reply.elapsedNanos / 1e6,
+                            shortest?.let { it / 1e6 }, waits)
                     }
                     delay(20)
                 }
@@ -164,12 +209,23 @@ class CameraSession(private val transport: PtpTransport, private val timing: Ses
                 // ждём недолго: кадр у камеры готов раз в 40 мс, и длинная пауза сбивает ровность видео
                 PtpResponseCode.ACCESS_DENIED, PtpResponseCode.DEVICE_BUSY -> {
                     waits++
+                    if (reply.elapsedNanos > 0) shortest = minOf(shortest ?: reply.elapsedNanos, reply.elapsedNanos)
                     delay(5)
                 }
                 PtpResponseCode.INVALID_OBJECT_HANDLE -> delay(50)
                 else -> throw SessionException.OperationFailed(SonyOp.GET_OBJECT, reply.code)
             }
         }
+    }
+
+    /**
+     * Качество превью (0xD26A): записываем без проверки чтением — смену подтверждает ширина следующих кадров,
+     * а лишние перечитывания свойств на слабом Wi-Fi отнимали бы кадры.
+     */
+    suspend fun setLiveViewQuality(quality: LiveViewQuality) {
+        if (!isReady) throw SessionException.NotReady()
+        call(SonyOp.SET_EXT_PROP_VALUE, listOf(SonyProp.LIVE_VIEW_IMAGE_QUALITY.toLong()),
+            PtpValue.encode(quality.cameraValue, PtpType.UINT8))
     }
 
     /**
@@ -237,11 +293,15 @@ class CameraSession(private val transport: PtpTransport, private val timing: Ses
 
     private fun listenForEvents(scope: CoroutineScope) {
         eventJob = scope.launch {
+            // перечитывает в своей корутине: пока идёт одно, события только ставят в очередь не больше одного
+            val refresher = RefreshCoalescer(this) {
+                val t0 = System.nanoTime()
+                runCatching { refresh() }
+                android.util.Log.d("ZVFrames", "событие 0xC203 → свойства перечитаны за %.0f мс".format((System.nanoTime() - t0) / 1e6))
+            }
             transport.events.collect { event ->
                 if (event.code == Sony.PROPERTY_CHANGED_EVENT) {
-                    val t0 = System.nanoTime()
-                    runCatching { refresh() }
-                    android.util.Log.d("ZVFrames", "событие 0xC203 → свойства перечитаны за %.0f мс".format((System.nanoTime() - t0) / 1e6))
+                    refresher.request()
                 } else {
                     android.util.Log.d("ZVFrames", "событие 0x%04X".format(event.code))
                 }

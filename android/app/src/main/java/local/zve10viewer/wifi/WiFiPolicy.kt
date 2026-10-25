@@ -51,4 +51,35 @@ class WiFiPolicy {
         nextAttempt = now + seconds * 1000L
         return seconds
     }
+
+    /** Сеть Wi-Fi появилась — пробуем сразу, не дожидаясь паузы после обрыва. */
+    fun networkAvailable() {
+        nextAttempt = 0
+    }
+
+    companion object {
+        /**
+         * Сколько восстанавливаем оборвавшийся сеанс тихо — с последним кадром на экране, по тому же адресу, без
+         * поиска. Дальше — обычное ожидание: экран «Подключите камеру» и поиск камеры в сети.
+         */
+        const val RECONNECT_WINDOW_MS = 60_000L
+
+        private val RECONNECT_DELAYS = longArrayOf(0, 500, 1000, 2000, 3000)
+
+        /** Пауза перед попыткой номер attempt (с нуля): первая — сразу, дальше 0,5, 1, 2, 3, 5, 5… с. */
+        fun reconnectDelayMs(attempt: Int): Long = RECONNECT_DELAYS.getOrElse(attempt) { 5000 }
+
+        /**
+         * Бросить тихое восстановление и перейти к обычному ожиданию: прошла минута, или камера отказала в
+         * соединении (PC Remote выключили) — тогда ждать по тому же адресу нечего.
+         */
+        fun reconnectGivesUp(startedAt: Long, now: Long, refused: Boolean): Boolean =
+            refused || now - startedAt >= RECONNECT_WINDOW_MS
+
+        /**
+         * Отказ камеры в приветствии (Init Fail): забывать ли сопряжение. 1 — камера программу не знает;
+         * 2 — занята (например, ещё держит прошлое подключение), 3 — без причины: это проходит, сопряжение не трогаем.
+         */
+        fun forgetsPairing(initFailReason: Long): Boolean = initFailReason == 1L
+    }
 }

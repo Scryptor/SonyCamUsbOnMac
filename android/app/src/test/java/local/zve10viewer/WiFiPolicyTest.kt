@@ -49,4 +49,32 @@ class WiFiPolicyTest {
         policy.connected()
         assertFalse(policy.showsStaleHint)
     }
+
+    @Test fun quietReconnectRetriesAtOnceThenBacksOffToFiveSeconds() {
+        // по тому же адресу: сразу, затем 0,5, 1, 2, 3, 5, 5… с
+        assertEquals(listOf(0L, 500L, 1000L, 2000L, 3000L, 5000L, 5000L, 5000L), List(8) { WiFiPolicy.reconnectDelayMs(it) })
+    }
+
+    @Test fun quietReconnectGivesUpAfterAMinuteOrWhenTheCameraRefuses() {
+        assertFalse(WiFiPolicy.reconnectGivesUp(startedAt = 1_000, now = 60_999, refused = false))
+        assertTrue(WiFiPolicy.reconnectGivesUp(startedAt = 1_000, now = 61_000, refused = false))
+        // PC Remote выключили — ждать по тому же адресу нечего
+        assertTrue(WiFiPolicy.reconnectGivesUp(startedAt = 1_000, now = 1_500, refused = true))
+    }
+
+    @Test fun onlyNotPairedInitFailForgetsThePairing() {
+        assertTrue(WiFiPolicy.forgetsPairing(1))
+        // 2 — камера занята (держит прошлое подключение), 3 — без причины: это проходит
+        assertFalse(WiFiPolicy.forgetsPairing(2))
+        assertFalse(WiFiPolicy.forgetsPairing(3))
+        assertFalse(WiFiPolicy.forgetsPairing(0))
+    }
+
+    @Test fun wifiNetworkAppearingSkipsTheBackoff() {
+        val policy = WiFiPolicy()
+        policy.sessionLost(now = 1_000)
+        assertFalse(policy.mayAttempt(enabled = true, pairing = false, now = 1_500))
+        policy.networkAvailable()
+        assertTrue(policy.mayAttempt(enabled = true, pairing = false, now = 1_500))
+    }
 }

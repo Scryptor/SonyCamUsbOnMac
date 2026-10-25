@@ -4,8 +4,13 @@
     <uses-feature android:name="android.hardware.usb.host" android:required="true" />
     <!-- Wi-Fi: камера в режиме PC Remote по сети (PTP/IP) -->
     <uses-permission android:name="android.permission.INTERNET" />
-    <!-- уровень сигнала Wi-Fi в подсказке о подключении -->
+    <!-- уровень сигнала Wi-Fi в подсказке о подключении; слежение за сетью Wi-Fi (пропала — провал, появилась — попытка) -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- сокеты привязаны к сети Wi-Fi, даже если она не сеть по умолчанию (Wi-Fi Direct без интернета, сотовая связь) -->
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+    <!-- Wi-Fi без энергосбережения на время сеанса (WifiLock WIFI_MODE_FULL_LOW_LATENCY) -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <application
         android:label="ZV-E10 Viewer"
