@@ -239,6 +239,8 @@ class CameraController(private val context: Context, private val scope: Coroutin
     var recordingRequest by mutableStateOf<RecordingToggle.Request?>(null)
         private set
     private var recordingToggle = RecordingToggle()
+    /** Нажатие записи, которое ещё идёт в камеру. */
+    private var recordingCall: Job? = null
     var review by mutableStateOf<Review?>(null)
         private set
     /** Снимки и стоп-кадры этой сессии, новые сначала. */
@@ -584,11 +586,18 @@ class CameraController(private val context: Context, private val scope: Coroutin
     fun toggleRecording() {
         val session = session ?: return
         if (phase != Phase.ready) return
+        // прошлый вызов ещё не вернулся (связь пропала, отказ по времени уже был): второе нажатие дошло бы следом за
+        // первым, когда связь вернётся, — запуск и сразу остановка, лишний ролик на карте
+        if (recordingCall?.isActive == true) {
+            feedback(FeedbackEvent.Failed(FeedbackTarget.record))
+            showStatus("Камера ещё не ответила на прошлое нажатие")
+            return
+        }
         val toggle = recordingToggle
         if (!toggle.press(isRecording, System.currentTimeMillis())) return
         recordingRequest = toggle.request
         feedback(FeedbackEvent.Accepted(FeedbackTarget.record))
-        scope.launch {
+        recordingCall = scope.launch {
             val recording = try {
                 session.toggleRecording()
             } catch (e: CancellationException) {
@@ -717,7 +726,8 @@ class CameraController(private val context: Context, private val scope: Coroutin
                     session.set(SonyProp.STILL_IMAGE_STORE_DESTINATION, destination.cameraValue)
                 }
                 val objects = session.capturePhoto(destination.savesToDevice, fileCount) { step ->
-                    capturePhase = step
+                    // транспорт не считает принятые байты — доли не будет: «Загрузка…» и крутящаяся дуга, а не «0 %»
+                    capturePhase = if (step is CapturePhase.Downloading && transport?.dataProgress == null) step.copy(expected = null) else step
                     when (step) {
                         CapturePhase.Exposing -> {
                             takenAt = System.currentTimeMillis()
@@ -1927,6 +1937,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
         recordingStartedAt = null
         recordingToggle = RecordingToggle()
         recordingRequest = null
+        recordingCall = null
         isApplyingPreset = false
         isCapturing = false
         capturePhase = null

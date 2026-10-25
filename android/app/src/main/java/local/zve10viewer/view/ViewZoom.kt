@@ -138,14 +138,28 @@ data class ViewZoom(val factor: Double, val centerX: Double, val centerY: Double
             val high = ln(MAX_FACTOR)
             var x = ln(factor)
             var rest = ln(k)
+            // дошли до предела — ровно до него: с 7,999999… «за пределом» не узнать, и сверх шёл бы без сопротивления
             if (rest > 0 && x < high) {
-                val step = min(rest, high - x)
-                x += step
-                rest -= step
+                if (rest >= high - x) {
+                    rest -= high - x
+                    x = high
+                } else {
+                    x += rest
+                    rest = 0.0
+                }
             } else if (rest < 0 && x > low) {
-                val step = max(rest, low - x)
-                x += step
-                rest -= step
+                if (rest <= low - x) {
+                    rest -= low - x
+                    x = low
+                } else {
+                    x += rest
+                    rest = 0.0
+                }
+            }
+            if (rest == 0.0) {
+                // ровно на пределе — ровно предел, без погрешности exp(ln(8))
+                if (x == high) return MAX_FACTOR
+                if (x == low) return 1.0
             }
             x += rest * RESISTANCE
             return exp(x).coerceIn(ELASTIC_MIN, ELASTIC_MAX)

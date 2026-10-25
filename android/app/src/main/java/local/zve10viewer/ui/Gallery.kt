@@ -83,6 +83,9 @@ import androidx.compose.ui.unit.toSize
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import local.zve10viewer.CameraController
@@ -121,17 +124,29 @@ private class GalleryImages(private val saver: MediaSaver) {
         override fun sizeOf(key: Long, value: Page) = value.bitmap.allocationByteCount
     }
 
+    /** Сколько открытых снимков сейчас декодируется: соседние ждут, пока открытый не готов. */
+    private val currentLoads = MutableStateFlow(0)
+
     fun cached(id: Long): Bitmap? = cache.get(id)?.bitmap
 
     /** Участки снимка в полном разрешении (вызывать не в главном потоке). */
     fun regionDecoder(uri: Uri): BitmapRegionDecoder? = saver.regionDecoder(uri)
 
-    /** Снимок нужного размера: из кэша, если там такой или лучше, иначе — декодируем из файла. */
+    /**
+     * Снимок нужного размера: из кэша, если там такой или лучше, иначе — декодируем из файла. Открытый — первым:
+     * соседние ждут его. Отменили (страница ушла или стала соседней) — результат не попадает ни на экран, ни в кэш.
+     */
     suspend fun load(shot: Shot, fitSide: Int, full: Boolean): Bitmap? {
         cache.get(shot.id)?.let { if (it.full || !full) return it.bitmap }
         val file = shot.jpeg ?: return null
         val side = if (full) fitSide else maxOf(1, fitSide / 2)
-        val bitmap = withContext(Dispatchers.IO) { saver.decode(file.uri, side) } ?: return null
+        if (!full) currentLoads.first { it == 0 }
+        if (full) currentLoads.update { it + 1 }
+        val bitmap = try {
+            withContext(Dispatchers.IO) { saver.decode(file.uri, side) }
+        } finally {
+            if (full) currentLoads.update { it - 1 }
+        } ?: return null
         cache.put(shot.id, Page(bitmap, full))
         return bitmap
     }
@@ -468,38 +483,43 @@ private suspend fun androidx.compose.ui.input.pointer.PointerInputScope.pageGest
         var moved = Offset.Zero
         val tracker = VelocityTracker()
         tracker.addPosition(down.uptimeMillis, down.position)
-        while (true) {
-            val event = awaitPointerEvent()
-            val pressed = event.changes.count { it.pressed }
-            if (pressed == 0) break
-            val pan = event.calculatePan()
-            if (mode == 0) {
-                moved += pan
-                when {
-                    pressed >= 2 -> mode = TRANSFORM
-                    moved.getDistance() > slop && zoom().isZoomed -> mode = TRANSFORM
-                    moved.getDistance() > slop -> mode = if (moved.y > 0 && abs(moved.y) > abs(moved.x) * 1.2f) DISMISS else PAGER
+        try {
+            while (true) {
+                val event = awaitPointerEvent()
+                val pressed = event.changes.count { it.pressed }
+                if (pressed == 0) break
+                val pan = event.calculatePan()
+                if (mode == 0) {
+                    moved += pan
+                    when {
+                        pressed >= 2 -> mode = TRANSFORM
+                        moved.getDistance() > slop && zoom().isZoomed -> mode = TRANSFORM
+                        moved.getDistance() > slop -> mode = if (moved.y > 0 && abs(moved.y) > abs(moved.x) * 1.2f) DISMISS else PAGER
+                    }
+                }
+                when (mode) {
+                    TRANSFORM -> {
+                        // шаг за шагом от текущего увеличения, без своей «базы»: прерванный жест не оставит следующему скачок
+                        var z = zoom()
+                        val k = event.calculateZoom()
+                        if (k != 1f) z = z.zoomed(k.toDouble(), event.calculateCentroid(useCurrent = true), view, full, elastic = true)
+                        if (pan != Offset.Zero && (z.isZoomed || pressed >= 2)) z = z.panned(pan, view, full)
+                        onZoom(z)
+                        event.changes.forEach { if (it.positionChanged()) it.consume() }
+                    }
+                    DISMISS -> {
+                        onDismissDrag(pan.y)
+                        event.changes.firstOrNull()?.let { tracker.addPosition(it.uptimeMillis, it.position) }
+                        event.changes.forEach { if (it.positionChanged()) it.consume() }
+                    }
                 }
             }
+        } finally {
+            // и когда жест прервали: увеличение не застревает между 0,87× и 1×, снимок не висит на полпути вниз
             when (mode) {
-                TRANSFORM -> {
-                    var z = zoom()
-                    val k = event.calculateZoom()
-                    if (k != 1f) z = z.zoomed(k.toDouble(), event.calculateCentroid(useCurrent = true), view, full, elastic = true)
-                    if (pan != Offset.Zero && (z.isZoomed || pressed >= 2)) z = z.panned(pan, view, full)
-                    onZoom(z)
-                    event.changes.forEach { if (it.positionChanged()) it.consume() }
-                }
-                DISMISS -> {
-                    onDismissDrag(pan.y)
-                    event.changes.firstOrNull()?.let { tracker.addPosition(it.uptimeMillis, it.position) }
-                    event.changes.forEach { if (it.positionChanged()) it.consume() }
-                }
+                TRANSFORM -> onSettle(zoom().settled(view, full))
+                DISMISS -> onDismissEnd(tracker.calculateVelocity().y)
             }
-        }
-        when (mode) {
-            TRANSFORM -> onSettle(zoom().settled(view, full))
-            DISMISS -> onDismissEnd(tracker.calculateVelocity().y)
         }
     }
 }

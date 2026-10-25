@@ -230,12 +230,17 @@ class CameraSession(private val transport: PtpTransport, private val timing: Ses
 
     /**
      * Снимок: полунажатие (автофокус), спуск, отпускание. При download — забирает файлы снимка из памяти камеры по
-     * адресу 0xFFFFC001; files — сколько их (RAW+JPEG — два, по свойству 0xD253 FileFormat). Пришли все — сразу
+     * адресу 0xFFFFC001; files — сколько их (RAW+JPEG — два, по свойству 0xD253 FileFormat), и ещё столько, сколько
+     * лежало в памяти камеры до спуска. Пришли все — сразу
      * возвращаемся: спуск свободен, а не ждёт ещё 2,5 с второго файла, которого не будет. onPhase — этапы для экрана:
      * фокусировка (после полунажатия), спуск отработан (после S2), качается файл N из files (его размер — из ObjectInfo).
      */
     suspend fun capturePhoto(download: Boolean, files: Int, onPhase: (CapturePhase) -> Unit = {}): List<CapturedObject> {
         if (!isReady) throw SessionException.NotReady()
+        // в памяти камеры уже лежат объекты (прошлый снимок не забрали: тайм-аут, обрыв, сменили формат) — забираем и
+        // их: это настоящие снимки, а без этого каждый следующий снимок отставал бы на один
+        val leftover = maxOf(0L, (_properties.value[SonyProp.OBJECT_IN_MEMORY]?.current?.intValue ?: 0L) - 0x8000).toInt()
+        val wanted = files + leftover
         val half = listOf(SonyProp.SHUTTER_HALF_PRESS.toLong())
         val full = listOf(SonyProp.SHUTTER_FULL_PRESS.toLong())
         call(SonyOp.CONTROL_DEVICE, half, PRESS)
@@ -265,11 +270,11 @@ class CameraSession(private val transport: PtpTransport, private val timing: Ses
                 val info = ObjectInfo.parse(call(SonyOp.GET_OBJECT_INFO, listOf(Sony.CAPTURED_OBJECT_HANDLE)).data)
                 // защита от повторной выдачи того же файла, пока счётчик в камере не обновился
                 if (result.any { it.filename == info.filename }) break
-                onPhase(CapturePhase.Downloading(result.size + 1, maxOf(files, result.size + 1), 0,
+                onPhase(CapturePhase.Downloading(result.size + 1, maxOf(wanted, result.size + 1), 0,
                     info.compressedSize.takeIf { it > 0 }))
                 val data = call(SonyOp.GET_OBJECT, listOf(Sony.CAPTURED_OBJECT_HANDLE)).data
                 result.add(CapturedObject(info.filename, data))
-                if (result.size >= files) break
+                if (result.size >= wanted) break
                 // файлов меньше, чем должно быть: при RAW+JPEG второй появляется следом — ждём его ещё немного
                 deadline = System.currentTimeMillis() + timing.confirmTimeoutMs
                 continue

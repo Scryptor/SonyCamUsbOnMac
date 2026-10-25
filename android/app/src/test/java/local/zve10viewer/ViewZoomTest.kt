@@ -8,6 +8,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.math.pow
 
 private val VIEW = Size(1280f, 800f)
 private val FRAME = Size(1024f, 576f)
@@ -70,6 +71,15 @@ class ViewZoomTest {
         assertEquals(1.0, ViewZoom.identity.zoomed(0.5, center, VIEW, FRAME, elastic = false).factor, 1e-9)
         // обратно в пределы — без сопротивления
         assertEquals(8.6 / 1.5, ViewZoom(8.6, 0.5, 0.5).zoomed(1 / 1.5, center, VIEW, FRAME, elastic = true).factor, 1e-9)
+    }
+
+    @Test fun elasticResistsTheOvershootOfOneBigStep() {
+        // одним шагом до 8× и ещё 5 % сверх: сверх предела — с сопротивлением (8 · 1,05^0,3), а не 8,4
+        val zoom = ViewZoom(1.1008, 0.5, 0.5).zoomed(8 / 1.1008 * 1.05, Offset(640f, 400f), VIEW, FRAME, elastic = true)
+        assertEquals(8 * 1.05.pow(0.3), zoom.factor, 1e-9)
+        // и дальше от ровно 8×, а не от 7,999999…
+        val next = ViewZoom(8.0, 0.5, 0.5).zoomed(1.05, Offset(640f, 400f), VIEW, FRAME, elastic = true)
+        assertEquals(8 * 1.05.pow(0.3), next.factor, 1e-9)
     }
 
     @Test fun visibleRegionCentered() {

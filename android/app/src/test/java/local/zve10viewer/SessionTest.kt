@@ -127,6 +127,21 @@ class SessionTest {
         session.close()
     }
 
+    @Test fun captureTakesTheLeftoverObjectToo() = runTest {
+        // прошлый снимок не забрали (тайм-аут, обрыв): объект уже в памяти камеры до спуска
+        val camera = FakeCamera().apply { leaveInMemory("DSC00010.JPG" to ByteArray(4)) }
+        val session = ready(camera, this)
+        camera.capturedFiles = listOf("DSC00011.JPG" to ByteArray(6))
+        val phases = mutableListOf<CapturePhase>()
+        val files = session.capturePhoto(download = true, files = 1) { phases += it }
+        // оба файла — настоящие снимки; иначе каждый следующий снимок отставал бы на один
+        assertEquals(listOf("DSC00010.JPG", "DSC00011.JPG"), files.map { it.filename })
+        assertEquals(listOf(CapturePhase.Downloading(1, 2, 0, 4), CapturePhase.Downloading(2, 2, 0, 6)),
+            phases.filterIsInstance<CapturePhase.Downloading>())
+        assertEquals(0, camera.objectsInMemory)
+        session.close()
+    }
+
     @Test fun captureWithoutDownloadStopsAfterTheShutter() = runTest {
         val camera = FakeCamera().apply { capturedFiles = listOf("DSC00004.JPG" to ByteArray(5)) }
         val session = ready(camera, this)
@@ -278,6 +293,15 @@ class FakeCamera : PtpTransport {
 
     private fun prop(code: Int) = props.firstOrNull { it.code == code }
 
+    /** Сколько объектов сейчас в памяти камеры. */
+    val objectsInMemory: Int get() = memory.size
+
+    /** Объект, оставшийся в памяти камеры от прошлого снимка. */
+    fun leaveInMemory(file: Pair<String, ByteArray>) {
+        memory.addLast(file)
+        syncMemory()
+    }
+
     override fun send(operation: Int, params: List<Long>, outData: ByteArray?, timeoutMs: Int?): PtpReply {
         sent += Triple(operation, params, outData)
         val ok = PtpResponseCode.OK
@@ -302,7 +326,8 @@ class FakeCamera : PtpTransport {
                     prop(SonyProp.MOVIE_RECORDING_STATE)!!.let { it.current = 1 - it.current }
                 }
                 if (!press && button == SonyProp.SHUTTER_FULL_PRESS && capturedFiles.isNotEmpty()) {
-                    memory = ArrayDeque(capturedFiles)
+                    // как у камеры: новые файлы встают в очередь за теми, что ещё не забрали
+                    memory.addAll(capturedFiles)
                     capturedFiles = emptyList()
                     syncMemory()
                 }
