@@ -152,8 +152,10 @@ public enum CaptureFeedback {
     (экран 300×150) → `origin` = (16, 16); `dragOrigin((−40, 2000))` = (0, 630); Codable туда-обратно;
   - `RecordingToggle`: `startConfirmedByCamera` (press(false) → `.starting`, observe(false) → nil, observe(true) →
     `.started`, request nil); `secondPressIgnoredWhilePending`; `timeoutFails` (5,9 с → nil, 6,1 с →
-    `.failed(.starting)`); `completedWithoutChangeFails`; `completedAfterObserveIsSilent`; `stopConfirmed`;
-    `errorFails` (completed(nil) → `.failed`);
+    `.failed(.starting)`); `completedWithoutChangeKeepsWaiting` (сессия ждёт подтверждения только 2,5 с, камера
+    бывает медленнее: completed(false) → nil, запрос ещё идёт, потом observe(true) → `.started`, а без него tick
+    6,1 с → `.failed(.starting)`); `completedAfterObserveIsSilent`; `stopConfirmed`; `errorFails`
+    (completed(nil) → `.failed`);
   - `CaptureFeedback`: `.focusing` → «Фокусировка…»; `.exposing` → «Снимаю…»; downloading 1/1, 0,42 от 8 МБ →
     «Загрузка 42 %» и 0,42; 2/2 → «Загрузка 2/2 · 42 %»; expected 300 КБ или nil → «Загрузка…» и nil;
   - `LiveViewQualityPolicy`: `sharpKeepsHighDownToSixFPS` — канал на 8 к/с высокого: без sharp снижает, с sharp
