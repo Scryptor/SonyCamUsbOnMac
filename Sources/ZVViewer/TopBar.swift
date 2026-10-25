@@ -12,24 +12,24 @@ struct TopBar: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Button(action: screen.toggleHistogram) {
-                    Label("Гистограмма", systemImage: "chart.bar.xaxis")
-                        .labelStyle(.iconOnly)
+                    TopBarIconView(icon: .histogram)
                         .frame(width: 30, height: 26)
                         .background(screen.histogramOn ? Color.accentColor : Color.white.opacity(0.08),
                                     in: RoundedRectangle(cornerRadius: 7))
                 }
                 .buttonStyle(.plain)
                 .help("Гистограмма")
+                .accessibilityLabel("Гистограмма")
 
                 Button(action: screen.toggleStatusBar) {
-                    Label("Строка состояния", systemImage: "rectangle.topthird.inset.filled")
-                        .labelStyle(.iconOnly)
+                    TopBarIconView(icon: .statusBar)
                         .frame(width: 30, height: 26)
                         .background(screen.statusBarOn ? Color.accentColor : Color.white.opacity(0.08),
                                     in: RoundedRectangle(cornerRadius: 7))
                 }
                 .buttonStyle(.plain)
                 .help(screen.statusBarOn ? "Спрятать строку состояния" : "Показать строку состояния")
+                .accessibilityLabel("Строка состояния")
 
                 ForEach(Array(controller.presets.enumerated()), id: \.offset) { index, preset in
                     Button { controller.applyPreset(index) } label: {
@@ -51,13 +51,14 @@ struct TopBar: View {
                 }
 
                 Button { controller.savePreset() } label: {
-                    Image(systemName: "plus")
-                        .frame(width: 26, height: 26)
+                    TopBarIconView(icon: .savePreset)
+                        .frame(width: 30, height: 26)
                         .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
                 }
                 .buttonStyle(.plain)
                 .disabled(controller.phase != .ready)
                 .help("Сохранить текущие настройки как пресет")
+                .accessibilityLabel("Сохранить пресет")
 
                 SettingsButton()
             }
@@ -186,12 +187,13 @@ private struct SettingsButton: View {
 
     var body: some View {
         Button { openSettings() } label: {
-            Image(systemName: "gearshape")
-                .frame(width: 26, height: 26)
+            TopBarIconView(icon: .settings)
+                .frame(width: 30, height: 26)
                 .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
         }
         .buttonStyle(.plain)
         .help("Настройки (⌘,)")
+        .accessibilityLabel("Настройки")
     }
 }
 
