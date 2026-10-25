@@ -107,3 +107,45 @@ private func photoCamera() -> FakeCamera {
     // в видеорежиме в строке значений — режим записи, как формат снимка в фоторежиме
     #expect(SettingCatalog.infoLine(for: .video) == SettingCatalog.infoLine + [.movieRecordingSetting])
 }
+
+/// Этапы снимка — для подписи и дуги на кнопке спуска.
+private final class PhaseLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: [CapturePhase] = []
+    func add(_ phase: CapturePhase) { lock.withLock { items.append(phase) } }
+    var phases: [CapturePhase] { lock.withLock { items } }
+}
+
+@Test func captureReportsPhasesInOrder() async throws {
+    let cam = photoCamera()
+    cam.capturedFiles = [("DSC00003.JPG", Data(repeating: 7, count: 2000))]
+    let s = try await readySession(cam)
+    let log = PhaseLog()
+    _ = try await s.capturePhoto(download: true, files: 1) { log.add($0) }
+    #expect(log.phases == [.focusing, .exposing, .downloading(file: 1, files: 1, received: 0, expected: 2000)])
+}
+
+@Test func captureStopsRightAfterExpectedFiles() async throws {
+    func pollsAfterDownload(files: Int?) async throws -> Int {
+        let cam = photoCamera()
+        cam.capturedFiles = [("DSC00004.JPG", Data([0xFF, 0xD8, 1]))]
+        let s = try await readySession(cam)
+        _ = try await s.capturePhoto(download: true, files: files)
+        let sent = cam.sent
+        guard let last = sent.lastIndex(where: { $0.op == SonyOp.getObject && $0.params == [Sony.capturedObjectHandle] }) else { return -1 }
+        return sent[(last + 1)...].filter { $0.op == SonyOp.getAllExtPropInfo }.count
+    }
+    // знаем, сколько файлов, — одно перечитывание, чтобы убедиться, что в памяти камеры пусто
+    #expect(try await pollsAfterDownload(files: 1) <= 1)
+    // не знаем — ждём, не появится ли второй (RAW+JPEG)
+    #expect(try await pollsAfterDownload(files: nil) > 5)
+}
+
+@Test func captureWithMoreFilesThanExpectedTakesThemAll() async throws {
+    // формат поменяли на самой камере: ждали один файл, пришло два — забираем оба, ничего не остаётся в камере
+    let cam = photoCamera()
+    cam.capturedFiles = [("DSC00005.ARW", Data([1])), ("DSC00005.JPG", Data([0xFF, 0xD8]))]
+    let s = try await readySession(cam)
+    let files = try await s.capturePhoto(download: true, files: 1)
+    #expect(files.map(\.filename) == ["DSC00005.ARW", "DSC00005.JPG"])
+}

@@ -15,6 +15,44 @@ public protocol PTPTransport: AnyObject, Sendable {
     /// outData — только само значение, без контейнера: транспорт оборачивает его сам.
     func send(_ operation: UInt16, _ params: [UInt32], outData: Data?) async throws -> PTPReply
     var events: AsyncStream<PTPEvent> { get }
+    /// Сколько пришло в текущей фазе данных — для доли загрузки снимка; nil — транспорт этого не знает.
+    var dataProgress: DataProgress? { get }
+}
+
+extension PTPTransport {
+    public var dataProgress: DataProgress? { nil }
+}
+
+/// Счётчик принятых байт текущей фазы данных (от Start Data до ответа). Транспорт добавляет всё, что пришло, —
+/// считается только между begin и finish. Потокобезопасен: читается с экрана во время загрузки снимка.
+public final class DataProgress: @unchecked Sendable {
+    private let lock = NSLock()
+    private var active = false
+    private var received = 0
+    private var expected: Int?
+
+    public init() {}
+
+    public func begin(expected: Int?) {
+        lock.withLock {
+            active = true
+            received = 0
+            self.expected = expected
+        }
+    }
+
+    public func add(_ bytes: Int) {
+        lock.withLock { if active { received += bytes } }
+    }
+
+    public func finish() {
+        lock.withLock { active = false }
+    }
+
+    /// nil — данные сейчас не идут.
+    public var current: (received: Int, expected: Int?)? {
+        lock.withLock { active ? (received, expected) : nil }
+    }
 }
 
 public enum TransportError: Error, Equatable {

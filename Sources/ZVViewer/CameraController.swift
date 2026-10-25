@@ -44,12 +44,22 @@ final class CameraController {
     private(set) var review: Review?
     /// Снимки и стоп-кадры этой сессии, новые сначала.
     private(set) var shots: [Shot] = []
+    /// Где сейчас снимок: фокусировка, спуск, загрузка (доля — по Wi-Fi); nil — не снимаем.
+    private(set) var capturePhase: CapturePhase?
+    /// Запуск или остановка записи с кнопки, пока камера не подтвердила.
+    private(set) var recordingToggle = RecordingToggle()
+    /// Отклик на кнопки для экрана: последние события, новые в конце.
+    private(set) var feedback: [FeedbackEvent] = []
 
     struct Shot: Identifiable {
-        let id = UUID()
+        var id = UUID()
         let urls: [URL]
         let thumbnail: CGImage?
+        var takenAt = Date()
+        /// Размер снимка в точках (по миниатюре и картинке для просмотра); nil — не открылся.
+        var pixelSize: CGSize?
         var title: String { urls.map(\.lastPathComponent).joined(separator: " + ") }
+        var isFrameGrab: Bool { urls.count == 1 && urls[0].lastPathComponent.hasPrefix("Кадр ") }
     }
 
     struct Review {
@@ -63,6 +73,8 @@ final class CameraController {
     }
 
     @ObservationIgnored private var reviewTask: Task<Void, Never>?
+    /// Опрос доли загрузки снимка, 10 раз в секунду.
+    @ObservationIgnored private var progressTask: Task<Void, Never>?
     @ObservationIgnored private var temperatureTask: Task<Void, Never>?
     @ObservationIgnored private var recordingModeTask: Task<Void, Never>?
     /// Ведёт камеру к выбранному режиму записи; от его цели считаются быстрые шаги колесом.
@@ -181,6 +193,7 @@ final class CameraController {
                 try? await Task.sleep(for: .milliseconds(500))
                 self?.tickFrameStats()
                 self?.tickShownStats()
+                if let self { self.finishRecordingRequest(self.recordingToggle.tick(now: Date())) }
                 self?.tickCableAccess()
                 self?.adaptQuality()
             }
@@ -394,10 +407,34 @@ final class CameraController {
     }
 
     func toggleRecording() {
-        guard phase == .ready, let session else { return }
+        guard phase == .ready, let session, recordingToggle.press(recording: isRecording, at: Date()) else { return }
+        emit(.accepted(.record))
         Task { [weak self] in
-            if let recording = try? await session.toggleRecording() { self?.isRecording = recording }
+            let recording = try? await session.toggleRecording()
+            guard let self else { return }
+            if let recording { self.isRecording = recording }
+            self.finishRecordingRequest(self.recordingToggle.completed(recording: recording))
         }
+    }
+
+    /// Камера подтвердила запуск или остановку записи — или не подтвердила за 6 с.
+    private func finishRecordingRequest(_ outcome: RecordingToggle.Outcome?) {
+        switch outcome {
+        case .started: emit(.recordingStarted)
+        case .stopped: emit(.recordingStopped)
+        case .failed(.starting):
+            emit(.failed(.record))
+            showStatus("Камера не начала запись")
+        case .failed(.stopping):
+            emit(.failed(.record))
+            showStatus("Камера не остановила запись")
+        case nil: break
+        }
+    }
+
+    private func emit(_ kind: FeedbackEvent.Kind) {
+        feedback.append(FeedbackEvent(kind: kind))
+        if feedback.count > 8 { feedback.removeFirst(feedback.count - 8) }
     }
 
     // MARK: - Фото и видео
@@ -438,24 +475,31 @@ final class CameraController {
     func capturePhoto() {
         guard phase == .ready, mode == .photo, !isCapturing, !isApplyingPreset, let session else { return }
         isCapturing = true
+        emit(.accepted(.shutter))
         let destination = Prefs.destination
         let folder = Prefs.folderURL
-        let cameraFrame = frame
         let reviewOn = Prefs.reviewEnabled
         let source: Prefs.ReviewSource = destination.savesToMac ? Prefs.reviewSource : .camera
-        if reviewOn {
-            // кадр с камеры есть сразу; загруженный снимок появится после скачивания
-            showReview(Review(image: cameraFrame, title: "Снимок", detail: source == .camera ? "" : "Загружаю…",
-                              urls: [], source: "Кадр с камеры", endsAt: nil), timed: source == .camera)
+        // сколько файлов ждать — по формату снимка: RAW+JPEG — два
+        let files = properties[SonyProp.fileFormat]?.current.intValue.map { $0 == 2 ? 2 : 1 }
+        let progress = wifiTransport?.dataProgress
+        let (phases, sink) = AsyncStream<CapturePhase>.makeStream()
+        Task { [weak self] in
+            for await phase in phases { self?.captureMoved(to: phase, review: reviewOn ? source : nil, progress: progress) }
         }
         Task { [weak self] in
             guard let self else { return }
-            defer { self.isCapturing = false }
+            defer {
+                sink.finish()
+                self.isCapturing = false
+                self.capturePhase = nil
+            }
             do {
                 if self.properties[SonyProp.stillImageStoreDestination]?.current.intValue != destination.cameraValue {
                     _ = try await session.set(SonyProp.stillImageStoreDestination, to: destination.cameraValue)
                 }
-                let objects = try await session.capturePhoto(download: destination.savesToMac)
+                let objects = try await session.capturePhoto(download: destination.savesToMac, files: files) { sink.yield($0) }
+                let cameraFrame = self.review?.image ?? self.frame
                 guard destination.savesToMac else {
                     self.showStatus("Снимок сохранён на карту камеры")
                     return
@@ -463,8 +507,10 @@ final class CameraController {
                 guard !objects.isEmpty else { throw CaptureFailure.noFile }
                 let urls = try await Self.save(objects, to: folder)
                 let preview = await Self.previews(of: urls)
-                let shot = Shot(urls: urls, thumbnail: preview.thumbnail)
+                let shot = Shot(urls: urls, thumbnail: preview.thumbnail ?? cameraFrame,
+                                pixelSize: preview.size)
                 self.shots.insert(shot, at: 0)
+                self.emit(.shotAdded(shot.id))
                 let megabytes = Double(objects.reduce(0) { $0 + $1.data.count }) / 1_048_576
                 let detail = String(format: "%.1f МБ · «%@»", megabytes, FileManager.default.displayName(atPath: folder.path))
                 self.showStatus("Сохранено: \(shot.title)")
@@ -476,7 +522,39 @@ final class CameraController {
                 }
             } catch {
                 self.dismissReview()
+                self.emit(.failed(.shutter))
                 self.showStatus("Снимок не удался: \(error)")
+            }
+        }
+    }
+
+    /// Снимок перешёл на следующий этап. Спуск отработан — шторка и просмотр (кадр той секунды, когда камера снимала);
+    /// качается файл — по Wi-Fi видно, сколько пришло.
+    private func captureMoved(to phase: CapturePhase, review source: Prefs.ReviewSource?, progress: DataProgress?) {
+        guard isCapturing else { return }
+        capturePhase = phase
+        switch phase {
+        case .focusing:
+            break
+        case .exposing:
+            emit(.shutterFired)
+            if let source {
+                // загруженный снимок появится после скачивания
+                showReview(Review(image: frame, title: "Снимок", detail: source == .camera ? "" : "Загружаю…",
+                                  urls: [], source: "Кадр с камеры", endsAt: nil), timed: source == .camera)
+            }
+        case .downloading:
+            guard let progress, progressTask == nil else { return }
+            progressTask = Task { [weak self] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .milliseconds(100))
+                    guard let self, case let .downloading(file, files, _, expected) = self.capturePhase else { break }
+                    // счётчик — того же файла: между файлами успевает пройти кадр live view
+                    if let current = progress.current, current.expected == expected {
+                        self.capturePhase = .downloading(file: file, files: files, received: current.received, expected: expected)
+                    }
+                }
+                self?.progressTask = nil
             }
         }
     }
@@ -486,13 +564,18 @@ final class CameraController {
         guard phase == .ready || phase == .settling, let jpeg = lastJPEG else { return }
         let folder = Prefs.folderURL
         let thumbnail = frame
+        emit(.accepted(.grab))
         Task { [weak self] in
             do {
                 let name = FileNaming.frameGrab(at: Date())
                 let urls = try await Self.save([CapturedObject(filename: name, data: jpeg)], to: folder)
-                self?.shots.insert(Shot(urls: urls, thumbnail: thumbnail), at: 0)
+                let shot = Shot(urls: urls, thumbnail: thumbnail,
+                                pixelSize: thumbnail.map { CGSize(width: $0.width, height: $0.height) })
+                self?.shots.insert(shot, at: 0)
+                self?.emit(.frameGrabbed(shot.id))
                 self?.showStatus("Кадр сохранён: \(urls[0].lastPathComponent)")
             } catch {
+                self?.emit(.failed(.grab))
                 self?.showStatus("Не удалось сохранить кадр: \(error)")
             }
         }
@@ -550,8 +633,8 @@ final class CameraController {
         }.value
     }
 
-    /// Картинка для просмотра (до 2048 px) и миниатюра для ленты. JPEG предпочтительнее RAW: быстрее.
-    nonisolated private static func previews(of urls: [URL]) async -> (image: CGImage?, thumbnail: CGImage?) {
+    /// Картинка для просмотра (до 2048 px), миниатюра для ленты и размер снимка. JPEG предпочтительнее RAW: быстрее.
+    nonisolated private static func previews(of urls: [URL]) async -> (image: CGImage?, thumbnail: CGImage?, size: CGSize?) {
         await Task.detached(priority: .userInitiated) {
             let sorted = urls.sorted { a, _ in ["jpg", "jpeg"].contains(a.pathExtension.lowercased()) }
             for url in sorted {
@@ -563,9 +646,12 @@ final class CameraController {
                         kCGImageSourceThumbnailMaxPixelSize: size,
                     ] as CFDictionary)
                 }
-                if let image = thumb(2048) { return (image, thumb(160)) }
+                let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+                let width = properties?[kCGImagePropertyPixelWidth] as? Int, height = properties?[kCGImagePropertyPixelHeight] as? Int
+                let size = width.flatMap { w in height.map { CGSize(width: w, height: $0) } }
+                if let image = thumb(2048) { return (image, thumb(160), size) }
             }
-            return (nil, nil)
+            return (nil, nil, nil)
         }.value
     }
 
@@ -1166,6 +1252,7 @@ final class CameraController {
         if recording, recordingStartedAt == nil { recordingStartedAt = Date() }
         if !recording { recordingStartedAt = nil }
         isRecording = recording
+        finishRecordingRequest(recordingToggle.observe(recording: recording))
         for (code, target) in targets where snapshot[code]?.current.intValue == target {
             clearTarget(code)
         }
@@ -1344,6 +1431,10 @@ final class CameraController {
         recordingStartedAt = nil
         isApplyingPreset = false
         isCapturing = false
+        capturePhase = nil
+        progressTask?.cancel()
+        progressTask = nil
+        recordingToggle = RecordingToggle()
         reviewTask?.cancel()
         review = nil
         phase = .searching

@@ -160,6 +160,8 @@ public struct PTPIPPacketReader: Sendable {
 /// Пакеты чужих транзакций — остатки оборванного обмена — пропускаются.
 public struct PTPIPTransaction: Sendable {
     public let transactionID: UInt32
+    /// Сколько байт данных обещала камера (из Start Data); nil — фазы данных ещё не было.
+    public private(set) var expected: Int?
     private var data = Data()
 
     public init(transactionID: UInt32) {
@@ -171,6 +173,7 @@ public struct PTPIPTransaction: Sendable {
         var r = ByteReader(packet.payload)
         switch packet.type {
         case PTPIP.PacketType.startData:
+            if (try? r.u32()) == transactionID, let length = try? r.u64() { expected = Int(clamping: length) }
             return nil
         case PTPIP.PacketType.data, PTPIP.PacketType.endData:
             guard (try? r.u32()) == transactionID else { return nil }

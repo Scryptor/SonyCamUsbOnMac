@@ -315,6 +315,17 @@ final class AutomationServer {
             "status": controller.statusMessage ?? NSNull(),
             "mode": controller.mode.rawValue,
             "capturing": controller.isCapturing,
+            "capture": controller.capturePhase.map { phase -> [String: Any] in
+                switch phase {
+                case .focusing: return ["phase": "focusing"]
+                case .exposing: return ["phase": "exposing"]
+                case let .downloading(file, files, received, expected):
+                    return ["phase": "downloading", "file": file, "files": files, "received": received,
+                            "expected": expected ?? NSNull(), "caption": CaptureFeedback.caption(phase)]
+                }
+            } ?? NSNull(),
+            "recordingRequest": controller.recordingToggle.request?.rawValue ?? NSNull(),
+            "feedback": controller.feedback.map { "\($0.kind)" },
             "transport": controller.transportKind?.rawValue ?? NSNull(),
             "wifi": [
                 "enabled": Prefs.wifiEnabled, "pairing": controller.isPairing,

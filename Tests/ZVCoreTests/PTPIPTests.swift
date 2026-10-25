@@ -111,3 +111,29 @@ private func packet(_ type: UInt32, _ payload: [UInt8]) -> Data {
     reader.feed(bytes)
     #expect(throws: PTPIPError.self) { try reader.next() }
 }
+
+@Test func transactionKnowsExpectedLengthFromStartData() {
+    var transaction = PTPIPTransaction(transactionID: 7)
+    #expect(transaction.expected == nil)
+    var start = Data()
+    start.appendLE(UInt32(7))
+    start.appendLE(UInt64(9_000_000))
+    #expect(transaction.consume(PTPIPPacket(type: PTPIP.PacketType.startData, payload: start)) == nil)
+    #expect(transaction.expected == 9_000_000)
+    // старт чужой транзакции — не наш размер
+    var other = PTPIPTransaction(transactionID: 8)
+    _ = other.consume(PTPIPPacket(type: PTPIP.PacketType.startData, payload: start))
+    #expect(other.expected == nil)
+}
+
+@Test func dataProgressCountsOnlyDuringDataPhase() {
+    let progress = DataProgress()
+    progress.add(500)
+    #expect(progress.current == nil)
+    progress.begin(expected: 100)
+    progress.add(40)
+    #expect(progress.current?.received == 40)
+    #expect(progress.current?.expected == 100)
+    progress.finish()
+    #expect(progress.current == nil)
+}

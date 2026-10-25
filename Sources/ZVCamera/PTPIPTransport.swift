@@ -18,9 +18,12 @@ final class PTPIPChannel: @unchecked Sendable {
     private var idleFrom = Date.distantPast
     /// Связь пропала: ожидание пакета не истекает, пока она не вернётся или транспорт не закроют.
     private var paused = false
+    /// Куда считать принятые байты — для доли загрузки снимка.
+    private let progress: DataProgress?
 
-    private init(connection: NWConnection) {
+    private init(connection: NWConnection, progress: DataProgress?) {
         self.connection = connection
+        self.progress = progress
     }
 
     /// Когда по соединению в последний раз пришли байты.
@@ -50,8 +53,8 @@ final class PTPIPChannel: @unchecked Sendable {
         return "\(host)".split(separator: "%").first.map(String.init)
     }
 
-    /// Открывает соединение и ждёт готовности не дольше timeout.
-    static func open(host: String, port: UInt16, timeout: Duration) async throws -> PTPIPChannel {
+    /// Открывает соединение и ждёт готовности не дольше timeout. progress — счётчик принятых байт (канал команд).
+    static func open(host: String, port: UInt16, timeout: Duration, progress: DataProgress? = nil) async throws -> PTPIPChannel {
         let tcp = NWProtocolTCP.Options()
         tcp.noDelay = true
         // Связь по Wi-Fi может пропасть на десятки секунд: камера рядом и ждёт, а TCP сам довезёт данные, когда
@@ -68,7 +71,7 @@ final class PTPIPChannel: @unchecked Sendable {
         // запросы и подтверждения — в очередь «видео» Wi-Fi (WMM): их не задерживает другой трафик Mac
         parameters.serviceClass = .interactiveVideo
         let connection = NWConnection(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port)!, using: parameters)
-        let channel = PTPIPChannel(connection: connection)
+        let channel = PTPIPChannel(connection: connection, progress: progress)
         try await channel.start(timeout: timeout)
         return channel
     }
@@ -189,6 +192,8 @@ final class PTPIPChannel: @unchecked Sendable {
     }
 
     private func deliver(_ data: Data) {
+        // байты, а не пакеты: камера может прислать файл одним большим пакетом
+        progress?.add(data.count)
         lock.lock()
         lastRx = MonotonicTime.now()
         reader.feed(data)
@@ -234,6 +239,9 @@ public actor PTPIPTransport: PTPTransport {
     public nonisolated let linkStatus: AsyncStream<LinkStatus>
     private nonisolated let statusContinuation: AsyncStream<LinkStatus>.Continuation
     public nonisolated let host: String
+    /// Сколько пришло в текущей фазе данных: доля загрузки снимка на кнопке спуска.
+    public nonisolated var dataProgress: DataProgress? { progress }
+    private nonisolated let progress = DataProgress()
     private let identity: PTPIPIdentity
     private let timeout: Duration
     private var command: PTPIPChannel?
@@ -269,7 +277,7 @@ public actor PTPIPTransport: PTPTransport {
     @discardableResult
     public func connect(connectTimeout: Duration = .seconds(5), initTimeout: Duration = .seconds(5)) async throws -> String {
         guard !closed else { throw TransportError.disconnected }
-        let command = try await PTPIPChannel.open(host: host, port: PTPIP.port, timeout: connectTimeout)
+        let command = try await PTPIPChannel.open(host: host, port: PTPIP.port, timeout: connectTimeout, progress: progress)
         // канал — в свойство сразу: close() во время ожидания (отмена сопряжения, «Забыть») должен его оборвать
         guard adopt(command, as: .command) else { throw TransportError.disconnected }
         do {
@@ -363,6 +371,7 @@ public actor PTPIPTransport: PTPTransport {
         monitor.operationStarted(at: MonotonicTime.now())
         // время самого обмена — после своей очереди: ожидание за чужой транзакцией в него не входит
         let started = MonotonicTime.now()
+        defer { progress.finish() }
         do {
             try await command.write(PTPIP.operationRequest(operation, transactionID: tid, params: params, dataOut: outData != nil))
             if let outData {
@@ -377,7 +386,11 @@ public actor PTPIPTransport: PTPTransport {
                     try await command.write(PTPIP.probeResponse)
                     continue
                 }
-                if var reply = transaction.consume(packet) {
+                let reply = transaction.consume(packet)
+                if packet.type == PTPIP.PacketType.startData, let expected = transaction.expected {
+                    progress.begin(expected: expected)
+                }
+                if var reply {
                     monitor.operationAnswered()
                     reply.elapsed = MonotonicTime.now().timeIntervalSince(started)
                     return reply
