@@ -31,6 +31,9 @@ public enum AutomationAction: Equatable, Sendable, Decodable {
     case forgetWiFi
     /// Подсказка под строкой состояния: "connection", "frames"; nil — закрыть.
     case showInfo(String?)
+    /// Панель отладки на вкладке: "link", "preview", "camera", "properties", "log"; nil — та, что была.
+    case showDebug(String?)
+    case hideDebug
 
     private enum Keys: String, CodingKey {
         case action, key, setting, offset, value, group, name, index, confirm, mode
@@ -65,6 +68,8 @@ public enum AutomationAction: Equatable, Sendable, Decodable {
         case "cancelPairing": self = .cancelPairing
         case "forgetWiFi": self = .forgetWiFi
         case "showInfo": self = .showInfo(try c.decodeIfPresent(String.self, forKey: .name))
+        case "showDebug": self = .showDebug(try c.decodeIfPresent(String.self, forKey: .name))
+        case "hideDebug": self = .hideDebug
         default:
             throw DecodingError.dataCorruptedError(forKey: .action, in: c, debugDescription: "неизвестная команда \(action)")
         }

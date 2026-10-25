@@ -91,7 +91,7 @@ open "/Applications/ZV-E10 Viewer.app" --args --automation
 | `prefs` | объект | настройки программы: `destination`, `folder`, `reviewEnabled`, `reviewSeconds`, `reviewSource`, `autoHide`, `autoHideSeconds`, `wifiAdaptiveQuality` |
 | `cameraDestination` | число или `null` | куда камера сохраняет снимки (`0xD222`): 1 — Mac, 16 — карта, 17 — оба |
 | `presets` | массив | `name` и `values` — словарь «настройка → значение» |
-| `ui` | объект | что на экране: `fnOpen`, `allSettingsOpen`, `selected`, `group`, `editing` (если открыта строка), `info` (если открыта подсказка из плашки: `connection`, `frames` или `slowMotion`), `histogram`, `controlsHidden`, `manualHidden` |
+| `ui` | объект | что на экране: `fnOpen`, `allSettingsOpen`, `selected`, `group`, `editing` (если открыта строка), `info` (если открыта подсказка из плашки: `connection`, `frames` или `slowMotion`), `histogram`, `controlsHidden`, `manualHidden`, `debug` — открыта ли панель отладки, `debugTab` — её вкладка |
 | `settings` | массив | все 24 настройки, см. ниже |
 
 Элемент `settings`:
@@ -141,6 +141,13 @@ open "/Applications/ZV-E10 Viewer.app" --args --automation
 | `request` | `setting`, `value` (число) | поставить значение; 409, если настройку сейчас нельзя менять. Значение должно быть из `options`, иначе камера его не получит. `colorTemperature` работает как ползунок: вне режима «Цвет. темп.» камера сначала переключается в него; значение вне диапазона камеры — 409, и режим не меняется. `movieRecordingSetting` с кодом режима из `options` сам переключит формат видео, если нужно; пока камера идёт к режиму, у настройки `pending`, а `mode` — то, что на камере сейчас. `movieFileFormat` меняет режим целиком: в другом формате берётся та же частота с самым высоким битрейтом |
 | `step` | `offset` (число, например 1 или −1) | сдвинуть выбранную в меню Fn настройку на соседнее значение |
 | `switchMode` | `mode`: `"photo"`, `"video"` или `"slowQuick"` | переключить камеру в фото, видео или S&Q с той же буквой режима; 409, если режим сейчас менять нельзя |
+
+### Панель отладки
+
+| Команда | Параметры | Что делает |
+|---|---|---|
+| `showDebug` | `name` — `link`, `preview`, `camera`, `properties` или `log`; без него — та вкладка, что была | открыть панель отладки (как ⌥⌘D) |
+| `hideDebug` | — | закрыть её |
 
 ### Wi-Fi
 

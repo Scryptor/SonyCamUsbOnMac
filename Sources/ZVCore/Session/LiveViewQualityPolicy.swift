@@ -103,6 +103,12 @@ public struct LiveViewQualityPolicy: Sendable {
         rtts.filter { now.timeIntervalSince($0.at) <= 10 }.map(\.seconds).min() ?? 0.01
     }
 
+    /// На низком — сколько ещё ждать до попытки вернуть высокое (выдержка и окно на низком), с; на высоком — nil.
+    public func secondsUntilUpAttempt(now: Date) -> TimeInterval? {
+        guard level == .low else { return nil }
+        return max(0, max(holdUntil.timeIntervalSince(now), tuning.upWindow - now.timeIntervalSince(levelSince)))
+    }
+
     /// Прогноз частоты превью на высоком качестве по быстрым кадрам за окно; nil — данных мало.
     public func predictedHighFPS(now: Date, window: TimeInterval) -> Double? {
         let recent = samples.filter { now.timeIntervalSince($0.at) <= window && $0.seconds <= tuning.stallSeconds }

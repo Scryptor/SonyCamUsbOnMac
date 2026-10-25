@@ -108,6 +108,10 @@ struct LiveScreen: View {
             return .handled
         }
         .onKeyPress(.escape) {
+            if screen.debugOpen {
+                screen.debugOpen = false
+                return .handled
+            }
             if controller.review != nil {
                 controller.dismissReview()
                 return .handled
@@ -207,7 +211,7 @@ private struct StatusPill: View {
                     Text("\(controller.deviceInfo?.model ?? "Камера") · \(controller.transportLabel)")
                 }
             } popover: {
-                ConnectionInfo(controller: controller)
+                ConnectionInfo(controller: controller, screen: screen)
             }
             PillButton(info: .frames, screen: screen) {
                 // превью снижено из-за слабого Wi-Fi — видно сразу
@@ -271,6 +275,7 @@ private struct PillButton<Label: View, Popover: View>: View {
 
 private struct ConnectionInfo: View {
     let controller: CameraController
+    let screen: ScreenState
     @State private var details = CameraController.ConnectionDetails()
 
     private var wifi: Bool { controller.transportKind == .wifi }
@@ -306,6 +311,8 @@ private struct ConnectionInfo: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+            Button("Отладка…") { screen.openDebug(.link) }
+                .help("Всё о связи, превью и камере (⌥⌘D)")
         }
         // сигнал меняется — пока подсказка открыта, обновляем раз в секунду
         .task {

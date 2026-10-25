@@ -100,3 +100,19 @@ private let weak = Link(bytesPerSecond: 0.5e6)
     #expect(LiveViewQuality(frameWidth: 640) == .low)
     #expect(LiveViewQuality(frameWidth: 0) == nil)
 }
+
+@Test func percentileOfFrameGaps() {
+    #expect(Percentile.of([], 0.5) == nil)
+    #expect(Percentile.of([40, 41, 39, 300], 0.5) == 40)
+    #expect(Percentile.of([40, 41, 39, 300], 1) == 300)
+    #expect(Percentile.of(Array(repeating: 40, count: 99) + [500], 0.95) == 40)
+}
+
+@Test func qualityTellsWhenItWillTryHighAgain() {
+    var policy = LiveViewQualityPolicy(now: start)
+    #expect(policy.secondsUntilUpAttempt(now: start) == nil)
+    _ = simulate(&policy, from: start, seconds: 8, link: { _ in weak })
+    #expect(policy.level == .low)
+    let wait = policy.secondsUntilUpAttempt(now: start.addingTimeInterval(8)) ?? -1
+    #expect(wait > 9 && wait <= 15)
+}

@@ -93,6 +93,7 @@ public actor CameraSession {
     public func nextLiveViewSample() async throws -> LiveViewSample {
         let clock = ContinuousClock()
         var shortest: Duration?
+        var waits = 0
         while true {
             try Task.checkCancellation()
             let sent = clock.now
@@ -102,13 +103,14 @@ public actor CameraSession {
             case PTPResponseCode.ok:
                 if let jpeg = LiveViewFrame.jpeg(from: reply.data) {
                     return LiveViewSample(jpeg: jpeg, bytes: reply.data.count, seconds: took.seconds,
-                                          shortReplySeconds: shortest?.seconds)
+                                          shortReplySeconds: shortest?.seconds, waits: waits)
                 }
                 try await Task.sleep(for: .milliseconds(20))
             case PTPResponseCode.accessDenied, PTPResponseCode.deviceBusy:
                 // кадр ещё не готов или камера занята (например, переключает режим) — ждём и повторяем;
                 // короткий ответ заодно показывает время отклика камеры
                 shortest = min(shortest ?? took, took)
+                waits += 1
                 try await Task.sleep(for: .milliseconds(20))
             case PTPResponseCode.invalidObjectHandle:
                 try await Task.sleep(for: .milliseconds(50))

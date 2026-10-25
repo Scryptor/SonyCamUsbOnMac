@@ -22,6 +22,12 @@ struct ZVViewerApp: App {
                 }
         }
         .windowResizability(.contentMinSize)
+        .commands {
+            CommandGroup(after: .toolbar) {
+                Button(screen.debugOpen ? "Скрыть отладку" : "Отладка") { screen.toggleDebug() }
+                    .keyboardShortcut("d", modifiers: [.option, .command])
+            }
+        }
         Settings {
             SettingsView(controller: controller)
         }
@@ -33,13 +39,25 @@ struct RootView: View {
     let screen: ScreenState
 
     var body: some View {
-        switch controller.phase {
-        case .searching:
-            WaitingView(kind: .searching, controller: controller)
-        case .notPCRemote:
-            WaitingView(kind: .notPCRemote, controller: controller)
-        case .connecting, .settling, .ready:
-            LiveScreen(controller: controller, screen: screen)
+        ZStack(alignment: .topLeading) {
+            switch controller.phase {
+            case .searching:
+                WaitingView(kind: .searching, controller: controller)
+            case .notPCRemote:
+                WaitingView(kind: .notPCRemote, controller: controller)
+            case .connecting, .settling, .ready:
+                LiveScreen(controller: controller, screen: screen)
+            }
+        }
+        // панель отладки — поверх любого экрана, и ожидания тоже: там видно, куда программа стучится
+        .overlay(alignment: .topLeading) {
+            if screen.debugOpen {
+                GeometryReader { geometry in
+                    DebugPanel(controller: controller, screen: screen, maxHeight: geometry.size.height - 80)
+                        .padding(.top, 64)
+                        .padding(.leading, 16)
+                }
+            }
         }
     }
 }

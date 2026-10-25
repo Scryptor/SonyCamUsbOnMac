@@ -27,6 +27,37 @@ final class ScreenState {
 
     var pillInfo: PillInfo?
 
+    /// Вкладка панели отладки.
+    enum DebugTab: String, CaseIterable, Identifiable {
+        case link, preview, camera, properties, log
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .link: return "Связь"
+            case .preview: return "Превью"
+            case .camera: return "Камера"
+            case .properties: return "Свойства"
+            case .log: return "Журнал"
+            }
+        }
+    }
+
+    /// Панель отладки поверх экрана (⌥⌘D) и её вкладка.
+    var debugOpen = false
+    var debugTab: DebugTab = .link
+
+    func toggleDebug() {
+        debugOpen.toggle()
+    }
+
+    func openDebug(_ tab: DebugTab?) {
+        if let tab { debugTab = tab }
+        pillInfo = nil
+        debugOpen = true
+    }
+
     var controlsHidden: Bool { manualHidden || autoHidden }
 
     func togglePillInfo(_ info: PillInfo) {

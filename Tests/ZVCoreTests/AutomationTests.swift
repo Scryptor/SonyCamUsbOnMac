@@ -60,3 +60,13 @@ import Testing
     #expect(try decode(#"{"action":"showInfo","name":"frames"}"#) == .showInfo("frames"))
     #expect(try decode(#"{"action":"showInfo"}"#) == .showInfo(nil))
 }
+
+@Test func decodesDebugPanelActions() throws {
+    func decode(_ json: String) throws -> AutomationAction {
+        try JSONDecoder().decode(AutomationAction.self, from: Data(json.utf8))
+    }
+    // панель отладки: на вкладке, на той, что была, закрыть
+    #expect(try decode(#"{"action":"showDebug","name":"log"}"#) == .showDebug("log"))
+    #expect(try decode(#"{"action":"showDebug"}"#) == .showDebug(nil))
+    #expect(try decode(#"{"action":"hideDebug"}"#) == .hideDebug)
+}

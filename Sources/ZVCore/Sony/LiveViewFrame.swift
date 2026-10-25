@@ -33,12 +33,15 @@ public struct LiveViewSample: Sendable {
     public let seconds: TimeInterval
     /// Самый короткий ответ «кадр не готов» перед этим кадром — оценка времени отклика камеры, с.
     public let shortReplySeconds: TimeInterval?
+    /// Сколько раз перед этим кадром камера ответила «кадр не готов».
+    public let waits: Int
 
-    public init(jpeg: Data, bytes: Int, seconds: TimeInterval, shortReplySeconds: TimeInterval?) {
+    public init(jpeg: Data, bytes: Int, seconds: TimeInterval, shortReplySeconds: TimeInterval?, waits: Int = 0) {
         self.jpeg = jpeg
         self.bytes = bytes
         self.seconds = seconds
         self.shortReplySeconds = shortReplySeconds
+        self.waits = waits
     }
 }
 

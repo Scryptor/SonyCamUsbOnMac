@@ -176,6 +176,15 @@ final class AutomationServer {
             controller.cancelPairing()
         case .forgetWiFi:
             controller.forgetWiFiCamera()
+        case let .showDebug(name):
+            if let name {
+                guard let tab = ScreenState.DebugTab(rawValue: name) else { return "tab: link | preview | camera | properties | log" }
+                screen.openDebug(tab)
+            } else {
+                screen.openDebug(nil)
+            }
+        case .hideDebug:
+            screen.debugOpen = false
         case let .showInfo(name):
             guard let name else {
                 screen.pillInfo = nil
@@ -284,6 +293,8 @@ final class AutomationServer {
         if let editing = screen.editing { ui["editing"] = editing.rawValue }
         if let info = screen.pillInfo { ui["info"] = info.rawValue }
         ui["controlsHidden"] = screen.controlsHidden
+        ui["debug"] = screen.debugOpen
+        ui["debugTab"] = screen.debugTab.rawValue
         ui["manualHidden"] = screen.manualHidden
         var result: [String: Any] = [
             "phase": controller.phase.rawValue,
