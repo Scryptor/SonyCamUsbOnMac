@@ -61,6 +61,8 @@ final class CameraController {
     @ObservationIgnored private var reviewTask: Task<Void, Never>?
     @ObservationIgnored private var temperatureTask: Task<Void, Never>?
     @ObservationIgnored private var recordingModeTask: Task<Void, Never>?
+    /// Последний запрошенный режим записи — от него считаются быстрые шаги колесом.
+    @ObservationIgnored private var recordingModeTarget: RecordingMode?
 
     /// Последний кадр как пришёл с камеры (для API автоматизации).
     @ObservationIgnored private(set) var lastJPEG: Data?
@@ -68,9 +70,11 @@ final class CameraController {
     @ObservationIgnored private var device: ICCameraDevice?
     /// Как закрыть текущее подключение (USB или Wi-Fi).
     @ObservationIgnored private var closeTransport: (() async -> Void)?
-    @ObservationIgnored private let identity = PTPIPIdentity.load()
+    @ObservationIgnored private var identity = PTPIPIdentity.load()
     @ObservationIgnored private var wifiBusy = false
-    @ObservationIgnored private var wifiFailures = 0
+    @ObservationIgnored private var wifiPolicy = WiFiPolicy()
+    /// Идущая попытка подключиться по Wi-Fi — чтобы оборвать её при отмене сопряжения или «Забыть».
+    @ObservationIgnored private var connectingTransport: PTPIPTransport?
     @ObservationIgnored private var session: CameraSession?
     @ObservationIgnored private var coalescer: WriteCoalescer?
     @ObservationIgnored private var targets: [UInt16: Int64] = [:]
@@ -169,18 +173,25 @@ final class CameraController {
                                       allowed: SettingOptions.options(.movieRecordingSetting, setting).map(\.value))
     }
 
-    /// Значения для ленты. У параметров записи — режимы обоих форматов (значение — `RecordingMode.code`).
+    /// Значения для ленты. У параметров записи — режимы обоих форматов (значение — `RecordingMode.code`);
+    /// камера без свойства формата — её собственные параметры, как раньше.
     func stripOptions(_ id: SettingID) -> [SettingOption] {
-        if id == .movieRecordingSetting { return recordingModes.map { SettingOption(value: $0.code, label: $0.label) } }
+        if id == .movieRecordingSetting, !recordingModes.isEmpty {
+            return recordingModes.map { SettingOption(value: $0.code, label: $0.label) }
+        }
         return property(id).map { SettingOptions.options(id, $0) } ?? []
     }
 
     /// Текущее значение в ленте — в той же кодировке, что `stripOptions`.
     func stripCurrent(_ id: SettingID) -> Int64? {
-        guard id == .movieRecordingSetting else { return property(id)?.current.intValue }
+        guard id == .movieRecordingSetting, let mode = currentRecordingMode else { return property(id)?.current.intValue }
+        return mode.code
+    }
+
+    private var currentRecordingMode: RecordingMode? {
         guard let format = property(.movieFileFormat)?.current.intValue,
               let setting = property(.movieRecordingSetting)?.current.intValue else { return nil }
-        return RecordingMode(format: format, setting: setting).code
+        return RecordingMode(format: format, setting: setting)
     }
 
     /// Выбор в ленте: обычная настройка — запись значения, режим записи — формат и параметры вместе.
@@ -196,18 +207,29 @@ final class CameraController {
     /// сначала он, и ждём, пока камера подтвердит его и откроет нужные параметры.
     func setRecordingMode(_ mode: RecordingMode) {
         recordingModeTask?.cancel()
-        if property(.movieFileFormat)?.current.intValue == mode.format {
+        let plan = RecordingModes.plan(to: mode, confirmedFormat: property(.movieFileFormat)?.current.intValue,
+                                       requestedFormat: targets[SonyProp.movieFileFormat])
+        switch plan {
+        case .settingOnly:
+            guard isWritable(.movieRecordingSetting) else { return }
+            recordingModeTarget = mode
             request(.movieRecordingSetting, mode.setting)
             return
+        case .formatThenSetting:
+            guard isWritable(.movieFileFormat) else { return }
+            request(.movieFileFormat, mode.format)
+        case .waitForFormat:
+            break
         }
-        guard isWritable(.movieFileFormat) else { return }
-        request(.movieFileFormat, mode.format)
+        recordingModeTarget = mode
         pending.insert(.movieRecordingSetting)
         recordingModeTask = Task { [weak self] in
             for _ in 0..<50 {
                 try? await Task.sleep(for: .milliseconds(100))
                 guard let self, !Task.isCancelled else { return }
-                guard self.property(.movieFileFormat)?.current.intValue == mode.format,
+                // формат подтверждён, и ни одна запись формата не в пути (иначе параметры уйдут раньше неё)
+                guard self.targets[SonyProp.movieFileFormat] == nil,
+                      self.property(.movieFileFormat)?.current.intValue == mode.format,
                       let setting = self.property(.movieRecordingSetting),
                       SettingOptions.options(.movieRecordingSetting, setting).contains(where: { $0.value == mode.setting }),
                       self.isWritable(.movieRecordingSetting) else { continue }
@@ -224,13 +246,19 @@ final class CameraController {
 
     /// Ручная температура. Пишется, только когда камера в режиме «Цвет. темп.», — иначе сначала переключаем режим
     /// и ждём, пока камера подтвердит его.
-    func setColorTemperature(_ kelvin: Int64) {
+    @discardableResult
+    func setColorTemperature(_ kelvin: Int64) -> Bool {
         temperatureTask?.cancel()
-        if property(.whiteBalance)?.current.intValue == WhiteBalanceTemperature.manualMode {
+        // проверяем до переключения режима: иначе режим сменится, а температура не запишется
+        // свойства температуры может не быть, пока камера не в «Цвет. темп.», — тогда проверяем по обычному диапазону
+        guard WhiteBalanceTemperature.accepts(kelvin, range: property(.colorTemperature)?.range) else { return false }
+        let previous = property(.whiteBalance)?.current.intValue
+        if previous == WhiteBalanceTemperature.manualMode {
             request(.colorTemperature, kelvin)
-            return
+            return true
         }
-        guard isWritable(.whiteBalance) else { return }
+        guard isWritable(.whiteBalance),
+              property(.whiteBalance)?.settableValues.contains(WhiteBalanceTemperature.manualMode) ?? false else { return false }
         request(.whiteBalance, WhiteBalanceTemperature.manualMode)
         temperatureTask = Task { [weak self] in
             for _ in 0..<40 {
@@ -241,7 +269,10 @@ final class CameraController {
                     return
                 }
             }
+            // температура так и не стала доступной — возвращаем прежний режим баланса белого
+            if let previous, let self { self.request(.whiteBalance, previous) }
         }
+        return true
     }
 
     func request(_ id: SettingID, _ value: Int64) {
@@ -254,11 +285,15 @@ final class CameraController {
     /// Шаг по списку значений (стрелки, колесо): считаем от последнего запроса, а не от подтверждённого значения,
     /// иначе быстрые шаги упирались бы в ожидание камеры.
     func requestStep(_ id: SettingID, offset: Int) {
-        if id == .movieRecordingSetting {
-            let modes = recordingModes
-            guard let current = stripCurrent(id), let index = modes.firstIndex(where: { $0.code == current }) else { return }
-            let target = min(max(index + offset, 0), modes.count - 1)
-            if target != index { setRecordingMode(modes[target]) }
+        if id == .movieRecordingSetting, !recordingModes.isEmpty {
+            // от последнего запроса, пока его запись в пути: иначе быстрые шаги сливаются в один;
+            // запись закончилась (подтверждена или отклонена) — от того, что на камере
+            let current = currentRecordingMode
+            let inFlight = pending.contains(.movieRecordingSetting) || pending.contains(.movieFileFormat)
+            let base = inFlight ? (recordingModeTarget ?? current) : current
+            let next = RecordingModes.neighbour(of: base, in: recordingModes, offset: offset)
+                ?? (base != current ? RecordingModes.neighbour(of: current, in: recordingModes, offset: offset) : nil)
+            if let next { setRecordingMode(next) }
             return
         }
         guard let property = property(id),
@@ -513,7 +548,15 @@ final class CameraController {
         let id = ObjectIdentifier(device)
         let action = tracker.disappeared(id)
         devices[id] = nil
+        // кабель вынули, а связь идёт по Wi-Fi — её не трогаем
+        guard transportKind != .wifi else { return }
         perform(action)
+    }
+
+    /// Wi-Fi закончился, а камера на кабеле ждёт — подключаем её.
+    private func connectAttachedIfAny() {
+        guard let id = tracker.current, tracker.attached.contains(id), let device = devices[id] else { return }
+        connect(device)
     }
 
     private func perform(_ action: ConnectionTracker<ObjectIdentifier>.Action) {
@@ -538,8 +581,9 @@ final class CameraController {
     }
 
     private func connect(_ device: ICCameraDevice) {
-        // кабель важнее сети: если шёл сеанс по Wi-Fi, закрываем его
-        if transportKind == .wifi { teardown() }
+        // по Wi-Fi уже идёт сеанс: не рвём его — камера в режиме Wi-Fi видна на кабеле как накопитель (например, на
+        // зарядке) и PC Remote по USB всё равно не даст; кабельную камеру подключим, когда Wi-Fi закончится
+        guard transportKind != .wifi else { return }
         let id = ObjectIdentifier(device)
         self.device = device
         // транспорт становится делегатом устройства ещё до открытия сессии: колбэки ICC идут живому объекту
@@ -560,6 +604,9 @@ final class CameraController {
                             onReady: @escaping () -> Void, onFailure: @escaping () -> Void) {
         phase = .connecting
         transportKind = kind
+        // сеанс начался — сопряжение, если его не завершили, больше не нужно
+        isPairing = false
+        wifiStatus = nil
         let session = CameraSession(transport: transport)
         closeTransport = close
         self.session = session
@@ -584,6 +631,11 @@ final class CameraController {
                 return
             } catch SessionError.notPCRemote {
                 guard let self, !Task.isCancelled else { return }
+                // по Wi-Fi это обрыв: повтор с паузой, а не экран «не в PC Remote» поверх открытого соединения
+                if kind == .wifi {
+                    onFailure()
+                    return
+                }
                 self.deviceInfo = await session.deviceInfo
                 self.phase = .notPCRemote
             } catch {
@@ -604,75 +656,155 @@ final class CameraController {
     func cancelPairing() {
         isPairing = false
         wifiStatus = nil
+        // идущая попытка ждёт подтверждения на камере до минуты — обрываем её
+        closeConnectingTransport()
     }
 
-    /// Забыть камеру: программа перестанет подключаться к ней сама (сопряжение в камере остаётся).
+    /// Забыть камеру: новый GUID, и сопряжение в камере к программе больше не относится — сама она подключаться
+    /// не будет, пока не сопрячь заново.
     func forgetWiFiCamera() {
         Prefs.wifiHost = nil
         Prefs.wifiCameraName = nil
+        identity = PTPIPIdentity.reset()
+        wifiPolicy = WiFiPolicy()
+        wifiStatus = nil
+        closeConnectingTransport()
         if transportKind == .wifi { teardown() }
     }
 
-    /// Раз в секунду: если камеры на кабеле нет и связи нет — ищем камеру в сети и подключаемся.
+    private func closeConnectingTransport() {
+        guard let transport = connectingTransport else { return }
+        Task { await transport.close() }
+    }
+
+    /// Нужна ли ещё связь по Wi-Fi: сеанса нет (камера на кабеле не в PC Remote — тоже), Wi-Fi включён или идёт сопряжение.
+    private var wifiWanted: Bool {
+        // камера на кабеле подключается или ждёт повтора — кабель важнее сети;
+        // на кабеле, но не в PC Remote по USB (например, на зарядке в режиме Wi-Fi) — можно по сети
+        let free = (phase == .searching && transportKind == nil && tracker.attached.isEmpty)
+            || (phase == .notPCRemote && transportKind == .usb)
+        return free && (Prefs.wifiEnabled || isPairing)
+    }
+
+    /// Чем кончилась попытка подключиться по Wi-Fi.
+    private enum WiFiAttempt {
+        case connected
+        /// камера не знает программу (не сопряжена)
+        case rejected
+        /// не ответила или оборвала
+        case failed
+        /// пока ждали, связь стала не нужна или попытку отменили
+        case dropped
+    }
+
+    /// Раз в секунду: если связи нет — ищем камеру в сети и подключаемся.
     private func wifiTick() async {
-        guard (Prefs.wifiEnabled || isPairing), phase == .searching, tracker.attached.isEmpty, !wifiBusy else { return }
+        guard wifiWanted, !wifiBusy, wifiPolicy.mayAttempt(enabled: Prefs.wifiEnabled, pairing: isPairing, now: Date()) else { return }
         wifiBusy = true
         defer { wifiBusy = false }
         // сначала — последний адрес камеры: так подключение после перерыва занимает секунду, а не поиск
-        let last = isPairing ? nil : Prefs.wifiHost
-        if let last, await tryWiFi(last) { return }
-        if isPairing, wifiStatus == nil { wifiStatus = "Ищу камеру в сети…" }
-        let found = await WiFiDiscovery.search()
-        for host in found.map(\.host) where host != last {
-            guard phase == .searching, tracker.attached.isEmpty else { return }
-            if await tryWiFi(host) { return }
+        let last = isPairing || Prefs.wifiCameraName == nil ? nil : Prefs.wifiHost
+        var lastFailed = false
+        if let last {
+            switch await tryWiFi(last, discovered: false) {
+            case .connected, .dropped: return
+            case .rejected: break
+            case .failed: lastFailed = true
+            }
         }
-        if found.isEmpty, isPairing { wifiStatus = "Камеру в сети не вижу. Проверьте, что она подключена к той же сети Wi-Fi" }
+        guard wifiWanted else { return }
+        if isPairing, wifiStatus == nil { wifiStatus = "Ищу камеру в сети…" }
+        let found = await WiFiDiscovery.search().map(\.host)
+        guard wifiWanted else { return }
+        if found.isEmpty {
+            wifiPolicy.nothingFound()
+            wifiStatus = isPairing ? "Камеру в сети не вижу. Проверьте, что она подключена к той же сети Wi-Fi" : nil
+            return
+        }
+        // сопряжение могло только что оказаться недействительным (камера отказала) — смотрим заново
+        let paired = Prefs.wifiCameraName != nil
+        // не сопряжены — не стучимся (камера в режиме Pairing показала бы чужой запрос), только подсказываем
+        guard wifiPolicy.maySendInit(paired: paired, pairing: isPairing) else {
+            if wifiStatus == nil {
+                wifiStatus = "В сети есть камера (\(found[0])) — нажмите «Сопрячь с камерой…», чтобы подключаться по Wi-Fi"
+            }
+            return
+        }
+        // камера видна по последнему адресу, но не ответила — это неудача к найденной камере
+        if let last, lastFailed, found.contains(last) {
+            wifiPolicy.attemptFailed(discovered: true)
+            showStaleHintIfNeeded(last)
+        }
+        for host in found where host != last {
+            guard wifiWanted else { return }
+            switch await tryWiFi(host, discovered: true) {
+            case .connected, .dropped: return
+            case .rejected, .failed: continue
+            }
+        }
     }
 
-    /// Одна попытка подключиться к камере по адресу. true — сеанс начат.
-    private func tryWiFi(_ host: String) async -> Bool {
+    private func showStaleHintIfNeeded(_ host: String) {
+        guard wifiPolicy.showsStaleHint, !isPairing else { return }
+        wifiStatus = "Камера найдена (\(host)), но пока не отвечает — видимо, держит прошлое подключение. "
+            + "Обычно это проходит за 1–2 минуты; если нет — выключите и снова включите на камере PC Remote"
+    }
+
+    /// Одна попытка подключиться к камере по адресу. discovered — адрес найден поиском сейчас, а не взят из памяти.
+    private func tryWiFi(_ host: String, discovered: Bool) async -> WiFiAttempt {
         let transport = PTPIPTransport(host: host, identity: identity)
-        if isPairing { wifiStatus = "Камера найдена (\(host)). Включите на камере PC Remote Function → Pairing и подтвердите сопряжение" }
+        let pairing = isPairing
+        connectingTransport = transport
+        defer { if connectingTransport === transport { connectingTransport = nil } }
+        if pairing { wifiStatus = "Камера найдена (\(host)). Включите на камере PC Remote Function → Pairing и подтвердите сопряжение" }
         do {
             // при сопряжении камера ждёт подтверждения на экране — ответа ждём дольше
-            let name = try await transport.connect(initTimeout: isPairing ? .seconds(60) : .seconds(5))
-            guard phase == .searching, tracker.attached.isEmpty else {
-                await transport.close()
-                return false
-            }
+            let name = try await transport.connect(initTimeout: pairing ? .seconds(60) : .seconds(5))
+            // камера приняла программу — значит, сопряжены, даже если связь уже не нужна
             Prefs.wifiHost = host
             Prefs.wifiCameraName = name
+            // пока ждали, связь стала не нужна: подключили кабель, выключили Wi-Fi, отменили сопряжение
+            guard wifiWanted, pairing == isPairing else {
+                await transport.close()
+                return .dropped
+            }
+            // камера на кабеле не в PC Remote — та попытка не нужна, закрываем её до сеанса по Wi-Fi
+            if phase == .notPCRemote { teardown() }
             wifiDirect = PTPIP.isCameraAccessPoint(host)
-            wifiFailures = 0
-            isPairing = false
-            wifiStatus = nil
+            wifiPolicy.connected()
             connectionMessage = nil
             wifiTransport = transport
             runSession(transport: transport, kind: .wifi, close: { await transport.close() }, prepare: {},
-                       onReady: {}, onFailure: { [weak self] in self?.wifiLost() })
-            return true
+                       onReady: { [weak self] in self?.wifiPolicy.sessionReady() },
+                       onFailure: { [weak self] in self?.wifiLost() })
+            return .connected
         } catch PTPIPError.rejected {
             await transport.close()
-            wifiStatus = isPairing
-                ? "Камера найдена (\(host)). Включите на камере PC Remote Function → Pairing"
-                : "В сети есть камера (\(host)), но программа с ней не сопряжена — нажмите «Сопрячь с камерой»"
-            return false
+            guard wifiWanted else { return .dropped }
+            if pairing {
+                wifiStatus = "Камера найдена (\(host)). Включите на камере PC Remote Function → Pairing"
+            } else {
+                // камера нас больше не знает (её сбросили или сопрягали заново) — перестаём стучаться
+                Prefs.wifiCameraName = nil
+                wifiStatus = "В сети есть камера (\(host)), но программа с ней не сопряжена — нажмите «Сопрячь с камерой»"
+            }
+            return .rejected
         } catch {
             await transport.close()
-            // камера в сети, но не отвечает: обычно она ещё держит прошлое, оборванное подключение
-            wifiFailures += 1
-            if wifiFailures >= 3, !isPairing {
-                wifiStatus = "Камера найдена (\(host)), но пока не отвечает — видимо, держит прошлое подключение. "
-                    + "Обычно это проходит за 1–2 минуты; если нет — выключите и снова включите на камере PC Remote"
-            }
-            return false
+            // отменили или стало не нужно — это не неудача
+            guard wifiWanted, pairing == isPairing else { return .dropped }
+            wifiPolicy.attemptFailed(discovered: discovered)
+            showStaleHintIfNeeded(host)
+            return .failed
         }
     }
 
+    /// Сеанс по Wi-Fi оборвался: повтор с растущей паузой, а если камера ждёт на кабеле — она.
     private func wifiLost() {
         teardown()
-        connectionMessage = "Связь по Wi-Fi пропала. Ищу камеру…"
+        let seconds = wifiPolicy.sessionLost(now: Date())
+        connectionMessage = "Связь по Wi-Fi пропала. Повтор через \(seconds) с…"
+        connectAttachedIfAny()
     }
 
     private func startStreams(_ session: CameraSession, onEnded: @escaping () -> Void) {
@@ -792,6 +924,8 @@ final class CameraController {
         transportKind = nil
         wifiDirect = false
         wifiTransport = nil
+        recordingModeTask?.cancel()
+        recordingModeTarget = nil
         session = nil
         coalescer = nil
         targets = [:]

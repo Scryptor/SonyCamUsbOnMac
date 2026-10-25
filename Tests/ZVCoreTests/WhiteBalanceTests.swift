@@ -32,3 +32,17 @@ import Testing
     #expect(ValueFormatter.whiteBalanceLabel(whiteBalance: 2, colorTemperature: 7400) == "AWB")
     #expect(ValueFormatter.whiteBalanceLabel(whiteBalance: 4, colorTemperature: 7400) == "Дневной")
 }
+
+@Test func temperatureMustFitTheCameraRange() {
+    // проверяем до переключения в «Цвет. темп.»: иначе режим сменится, а температура не запишется
+    let range = PropertyRange(min: 2500, max: 9900, step: 100)
+    #expect(WhiteBalanceTemperature.accepts(7400, range: range))
+    #expect(WhiteBalanceTemperature.accepts(2500, range: range))
+    #expect(WhiteBalanceTemperature.accepts(9900, range: range))
+    #expect(!WhiteBalanceTemperature.accepts(12345, range: range))
+    #expect(!WhiteBalanceTemperature.accepts(7450, range: range))
+    // камера не сообщила диапазон — тот же, что у ZV-E10
+    #expect(WhiteBalanceTemperature.accepts(5600, range: nil))
+    #expect(!WhiteBalanceTemperature.accepts(10000, range: nil))
+}
+

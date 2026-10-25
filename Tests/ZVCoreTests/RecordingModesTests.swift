@@ -27,5 +27,31 @@ import Testing
     #expect(RecordingMode(code: mode.code) == mode)
     #expect(mode.label == "HD 100p 100M")
     #expect(RecordingModes.label(format: 8, setting: 0x21) == "4K 25p 100M")
-    #expect(RecordingModes.label(format: nil, setting: 0x21) == "—")
+    // камера без свойства формата (старые модели) — подпись параметров как раньше
+    #expect(RecordingModes.label(format: nil, setting: 0x21) == "25p 100M")
+    #expect(RecordingModes.label(format: 8, setting: nil) == "—")
 }
+
+@Test func recordingModePlanAccountsForAFormatWriteInFlight() {
+    let hd100 = RecordingMode(format: 9, setting: 0x1D)
+    let fourK60 = RecordingMode(format: 8, setting: 0x24)
+    // формат уже тот — только параметры
+    #expect(RecordingModes.plan(to: hd100, confirmedFormat: 9, requestedFormat: nil) == .settingOnly)
+    // другой формат — сначала формат
+    #expect(RecordingModes.plan(to: hd100, confirmedFormat: 8, requestedFormat: nil) == .formatThenSetting)
+    // передумали, пока камера переключается в HD: камера ещё в 4K, но формат HD уже в пути — снова формат 4K
+    #expect(RecordingModes.plan(to: fourK60, confirmedFormat: 8, requestedFormat: 9) == .formatThenSetting)
+    // нужный формат уже в пути — дождаться его, потом параметры
+    #expect(RecordingModes.plan(to: hd100, confirmedFormat: 8, requestedFormat: 9) == .waitForFormat)
+}
+
+@Test func recordingModeStepsFromTheLastRequest() {
+    let modes = RecordingModes.options(formats: [8, 9], format: 8, allowed: [0x21, 0x24])
+    // быстрые шаги колесом считаются от последнего запроса, а не от того, что камера уже подтвердила
+    let first = RecordingModes.neighbour(of: modes[0], in: modes, offset: 1)
+    #expect(first == modes[1])
+    #expect(RecordingModes.neighbour(of: first, in: modes, offset: 1) == modes[2])
+    #expect(RecordingModes.neighbour(of: modes.last, in: modes, offset: 1) == nil)
+    #expect(RecordingModes.neighbour(of: nil, in: modes, offset: 1) == nil)
+}
+

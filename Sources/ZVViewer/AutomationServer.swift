@@ -129,7 +129,7 @@ final class AutomationServer {
             guard controller.isWritable(.colorTemperature) || controller.isWritable(.whiteBalance) else {
                 return "colorTemperature is not writable now"
             }
-            controller.setColorTemperature(value)
+            guard controller.setColorTemperature(value) else { return "colorTemperature \(value) is out of range" }
         case let .request(id, value):
             guard controller.isWritable(id) else { return "\(id.rawValue) is not writable now" }
             controller.choose(id, value)
@@ -178,6 +178,8 @@ final class AutomationServer {
             }
             guard let info = ScreenState.PillInfo(rawValue: name) else { return "unknown info \(name)" }
             guard controller.phase == .ready || controller.phase == .settling else { return "camera is not connected" }
+            // подсказка о S&Q есть только в S&Q — иначе флаг висел бы без подсказки на экране
+            guard info != .slowMotion || controller.slowMotion != nil else { return "camera is not in S&Q" }
             screen.closeOverlays()
             screen.pillInfo = info
         case let .openShot(index):

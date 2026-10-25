@@ -38,7 +38,9 @@ class RecordingModesTest {
         assertEquals(mode, RecordingMode.of(mode.code))
         assertEquals("HD 100p 100M", mode.label)
         assertEquals("4K 25p 100M", RecordingModes.label(8, 0x21))
-        assertEquals("—", RecordingModes.label(null, 0x21))
+        // камера без свойства формата (старые модели) — подпись параметров как раньше
+        assertEquals("25p 100M", RecordingModes.label(null, 0x21))
+        assertEquals("—", RecordingModes.label(8, null))
     }
 
     @Test fun videoLayoutHasTheRecordingMode() {
@@ -47,5 +49,28 @@ class RecordingModesTest {
             SettingID.movieRecordingSetting).map { FnSlot.Setting(it) } + FnSlot.AllSettings, SettingCatalog.fnBottomRow(CaptureMode.video))
         assertEquals(SettingID.movieRecordingSetting, SettingCatalog.infoLine(CaptureMode.video).last())
         assertEquals(SettingID.fileFormat, SettingCatalog.infoLine(CaptureMode.photo).last())
+    }
+
+    @Test fun recordingModePlanAccountsForAFormatWriteInFlight() {
+        val hd100 = RecordingMode(9, 0x1D)
+        val fourK60 = RecordingMode(8, 0x24)
+        // формат уже тот — только параметры
+        assertEquals(RecordingModes.Plan.settingOnly, RecordingModes.plan(hd100, confirmedFormat = 9, requestedFormat = null))
+        // другой формат — сначала формат
+        assertEquals(RecordingModes.Plan.formatThenSetting, RecordingModes.plan(hd100, confirmedFormat = 8, requestedFormat = null))
+        // передумали, пока камера переключается в HD: камера ещё в 4K, но формат HD уже в пути — снова формат 4K
+        assertEquals(RecordingModes.Plan.formatThenSetting, RecordingModes.plan(fourK60, confirmedFormat = 8, requestedFormat = 9))
+        // нужный формат уже в пути — дождаться его, потом параметры
+        assertEquals(RecordingModes.Plan.waitForFormat, RecordingModes.plan(hd100, confirmedFormat = 8, requestedFormat = 9))
+    }
+
+    @Test fun recordingModeStepsFromTheLastRequest() {
+        val modes = RecordingModes.options(listOf(8, 9), 8, listOf(0x21, 0x24))
+        // быстрые шаги колесом считаются от последнего запроса, а не от того, что камера уже подтвердила
+        val first = RecordingModes.neighbour(modes[0], modes, 1)
+        assertEquals(modes[1], first)
+        assertEquals(modes[2], RecordingModes.neighbour(first, modes, 1))
+        assertEquals(null, RecordingModes.neighbour(modes.last(), modes, 1))
+        assertEquals(null, RecordingModes.neighbour(null, modes, 1))
     }
 }

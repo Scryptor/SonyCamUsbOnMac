@@ -193,7 +193,10 @@ public actor PTPIPTransport: PTPTransport {
     /// initTimeout — сколько ждать ответа на приветствие (при сопряжении камера ждёт подтверждения).
     @discardableResult
     public func connect(initTimeout: Duration = .seconds(5)) async throws -> String {
+        guard !closed else { throw TransportError.disconnected }
         let command = try await PTPIPChannel.open(host: host, port: PTPIP.port, timeout: .seconds(5))
+        // канал — в свойство сразу: close() во время ожидания (отмена сопряжения, «Забыть») должен его оборвать
+        guard adopt(command, as: .command) else { throw TransportError.disconnected }
         do {
             try await command.write(PTPIP.initCommandRequest(guid: identity.guid, name: identity.name))
             let reply = try await command.nextPacket(timeout: initTimeout)
@@ -202,19 +205,33 @@ public actor PTPIPTransport: PTPTransport {
                 throw PTPIPError.unexpectedPacket(reply.type)
             }
             let event = try await PTPIPChannel.open(host: host, port: PTPIP.port, timeout: .seconds(5))
+            guard adopt(event, as: .event) else { throw TransportError.disconnected }
             try await event.write(PTPIP.initEventRequest(connectionNumber: connectionNumber))
             let ack = try await event.nextPacket(timeout: .seconds(5))
             guard ack.type == PTPIP.PacketType.initEventAck else { throw PTPIPError.unexpectedPacket(ack.type) }
-            self.command = command
-            self.event = event
             listenForEvents(event)
             try await openSession()
             return cameraName
         } catch {
-            command.cancel()
+            // каналы уже в свойствах: close() закроет оба (если его уже вызвали — они закрыты тогда же)
             close()
             throw error
         }
+    }
+
+    private enum Slot { case command, event }
+
+    /// Запомнить открытый канал. false — транспорт закрыли, пока канал открывался: канал закрывается сразу.
+    private func adopt(_ channel: PTPIPChannel, as slot: Slot) -> Bool {
+        guard !closed else {
+            channel.cancel()
+            return false
+        }
+        switch slot {
+        case .command: command = channel
+        case .event: event = channel
+        }
+        return true
     }
 
     /// Адрес этого Mac в сети, через который идёт связь с камерой.
@@ -332,11 +349,17 @@ public struct PTPIPIdentity: Sendable {
         self.name = name
     }
 
+    private static let key = "ptpipGUID"
+
     public static func load(defaults: UserDefaults = UserDefaults(suiteName: "local.zve10viewer") ?? .standard) -> PTPIPIdentity {
-        let key = "ptpipGUID"
         if let hex = defaults.string(forKey: key), let guid = Data(hex: hex), guid.count == 16 {
             return PTPIPIdentity(guid: guid, name: "ZV-E10 Viewer")
         }
+        return reset(defaults: defaults)
+    }
+
+    /// Новый GUID: прежнее сопряжение в камере к программе больше не относится — нужно сопрячь заново.
+    public static func reset(defaults: UserDefaults = UserDefaults(suiteName: "local.zve10viewer") ?? .standard) -> PTPIPIdentity {
         let guid = Data((0..<16).map { _ in UInt8.random(in: 0...255) })
         defaults.set(guid.map { String(format: "%02x", $0) }.joined(), forKey: key)
         return PTPIPIdentity(guid: guid, name: "ZV-E10 Viewer")
@@ -348,7 +371,12 @@ public enum WiFiDiscovery {
     /// Ответы, собранные за `seconds`; одна камера — один ответ.
     /// Камера отвечает с задержкой до ~3 с, а многоадресный UDP по Wi-Fi теряется — запрос повторяем всё окно.
     public static func search(seconds: Double = 4) async -> [SSDP.Response] {
-        await Task.detached(priority: .userInitiated) { searchBlocking(seconds: seconds) }.value
+        // поиск держит поток несколько секунд — на своей очереди, а не на общем пуле Swift concurrency
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(returning: searchBlocking(seconds: seconds))
+            }
+        }
     }
 
     private static func searchBlocking(seconds: Double) -> [SSDP.Response] {

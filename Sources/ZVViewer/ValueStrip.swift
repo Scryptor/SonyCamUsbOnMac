@@ -76,7 +76,8 @@ private struct WhiteBalanceFineTune: View {
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
             Slider(value: $kelvin, in: Double(range.min)...Double(range.max), step: Double(range.step)) { editing in
-                if !editing { controller.setColorTemperature(Int64(kelvin)) }
+                // щелчок по ползунку без сдвига режим не меняет
+                if !editing, Int64(kelvin) != Int64(position) { controller.setColorTemperature(Int64(kelvin)) }
             }
             .frame(width: 160)
             .disabled(!controller.isWritable(.whiteBalance) && !controller.isWritable(.colorTemperature))

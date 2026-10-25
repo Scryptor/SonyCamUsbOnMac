@@ -186,7 +186,11 @@ private fun WhiteBalanceFineTune(controller: CameraController) {
                 kelvin, { kelvin = it }, valueRange = range.min.toFloat()..range.max.toFloat(),
                 steps = ((range.max - range.min) / range.step - 1).toInt().coerceAtLeast(0),
                 enabled = controller.isWritable(SettingID.whiteBalance) || controller.isWritable(SettingID.colorTemperature),
-                onValueChangeFinished = { controller.setColorTemperature((kelvin / range.step).roundToLong() * range.step) },
+                onValueChangeFinished = {
+                    // касание ползунка без сдвига режим не меняет
+                    val k = (kelvin / range.step).roundToLong() * range.step
+                    if (k != position.toLong()) controller.setColorTemperature(k)
+                },
             )
             if (reading !is WhiteBalanceTemperature.Reading.Manual) {
                 Text(WhiteBalanceTemperature.explanation(reading), color = Secondary, fontSize = 12.sp, lineHeight = 15.sp)

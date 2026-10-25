@@ -3,7 +3,10 @@ package local.zve10viewer
 import local.zve10viewer.settings.ValueFormatter
 import local.zve10viewer.settings.WhiteBalanceTemperature
 import local.zve10viewer.settings.WhiteBalanceTemperature.Reading
+import local.zve10viewer.sony.PropertyRange
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class WhiteBalanceTest {
@@ -38,4 +41,18 @@ class WhiteBalanceTest {
         assertEquals("AWB", ValueFormatter.whiteBalanceLabel(2, 7400))
         assertEquals("Дневной", ValueFormatter.whiteBalanceLabel(4, 7400))
     }
+
+    @Test fun temperatureMustFitTheCameraRange() {
+        // проверяем до переключения в «Цвет. темп.»: иначе режим сменится, а температура не запишется
+        val range = PropertyRange(2500, 9900, 100)
+        assertTrue(WhiteBalanceTemperature.accepts(7400, range))
+        assertTrue(WhiteBalanceTemperature.accepts(2500, range))
+        assertTrue(WhiteBalanceTemperature.accepts(9900, range))
+        assertFalse(WhiteBalanceTemperature.accepts(12345, range))
+        assertFalse(WhiteBalanceTemperature.accepts(7450, range))
+        // камера не сообщила диапазон — тот же, что у ZV-E10
+        assertTrue(WhiteBalanceTemperature.accepts(5600, null))
+        assertFalse(WhiteBalanceTemperature.accepts(10000, null))
+    }
 }
+

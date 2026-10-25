@@ -33,14 +33,20 @@ data class PtpIpIdentity(val guid: ByteArray, val name: String) {
         fun load(context: Context): PtpIpIdentity {
             val prefs = context.getSharedPreferences("zv", Context.MODE_PRIVATE)
             val stored = prefs.getString("ptpipGUID", null)?.chunked(2)?.mapNotNull { it.toIntOrNull(16)?.toByte() }
-            val guid = if (stored != null && stored.size == 16) stored.toByteArray() else {
-                ByteArray(16) { (0..255).random().toByte() }.also { created ->
-                    prefs.edit().putString("ptpipGUID", created.joinToString("") { "%02x".format(it) }).apply()
-                }
-            }
-            // латиницей: имя показывается на экране камеры при сопряжении
-            return PtpIpIdentity(guid, "ZV-E10 Viewer Android")
+            if (stored != null && stored.size == 16) return PtpIpIdentity(stored.toByteArray(), NAME)
+            return reset(context)
         }
+
+        /** Новый GUID: прежнее сопряжение в камере к программе больше не относится — нужно сопрячь заново. */
+        fun reset(context: Context): PtpIpIdentity {
+            val guid = ByteArray(16) { (0..255).random().toByte() }
+            context.getSharedPreferences("zv", Context.MODE_PRIVATE).edit()
+                .putString("ptpipGUID", guid.joinToString("") { "%02x".format(it) }).apply()
+            return PtpIpIdentity(guid, NAME)
+        }
+
+        // латиницей: имя показывается на экране камеры при сопряжении
+        private const val NAME = "ZV-E10 Viewer Android"
     }
 }
 
@@ -151,8 +157,11 @@ class PtpIpTransport private constructor(
          * Приветствие и событийный канал. Возвращает транспорт и имя камеры.
          * initTimeoutMs — сколько ждать ответа на приветствие (при сопряжении камера ждёт подтверждения).
          */
-        fun connect(host: String, identity: PtpIpIdentity, initTimeoutMs: Int = 5000, timeoutMs: Int = 8000): Pair<PtpIpTransport, String> {
-            val command = open(host)
+        /** onSocket — сокет команд сразу после соединения: закрыв его, можно оборвать ожидание (до минуты при сопряжении). */
+        fun connect(host: String, identity: PtpIpIdentity, initTimeoutMs: Int = 5000, timeoutMs: Int = 8000,
+                    onSocket: (Socket) -> Unit = {}): Pair<PtpIpTransport, String> {
+            // сокет отдаём ещё до соединения: закрыть его можно и пока идёт TCP-подключение
+            val command = open(host, onSocket)
             try {
                 command.soTimeout = initTimeoutMs
                 command.getOutputStream().write(PtpIp.initCommandRequest(identity.guid, identity.name))
@@ -183,10 +192,11 @@ class PtpIpTransport private constructor(
             }
         }
 
-        private fun open(host: String): Socket = Socket().apply {
+        private fun open(host: String, onSocket: (Socket) -> Unit = {}): Socket = Socket().apply {
             tcpNoDelay = true
             // камера может пропасть без закрытия соединения (выключили, ушла из сети)
             keepAlive = true
+            onSocket(this)
             connect(InetSocketAddress(host, PtpIp.PORT), 5000)
         }
 

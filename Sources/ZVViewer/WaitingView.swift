@@ -13,7 +13,8 @@ struct WaitingView: View {
                 .font(.title.weight(.semibold))
             HStack(alignment: .top, spacing: 48) {
                 usb
-                if kind == .searching { wifi }
+                // камера на кабеле не в PC Remote (например, на зарядке в режиме Wi-Fi) — по сети всё равно можно
+                wifi
             }
             if kind == .searching, let message = controller.connectionMessage {
                 Text(message).foregroundStyle(.secondary)

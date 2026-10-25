@@ -44,6 +44,7 @@ import androidx.compose.ui.zIndex
 import kotlin.math.roundToInt
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -71,6 +72,7 @@ import local.zve10viewer.settings.CaptureMode
 import local.zve10viewer.settings.SettingCatalog
 import local.zve10viewer.settings.SettingGroup
 import local.zve10viewer.settings.SettingID
+import local.zve10viewer.settings.ShootingMode
 import local.zve10viewer.settings.SlowQuick
 import local.zve10viewer.settings.ValueFormatter
 import local.zve10viewer.sony.SonyProp
@@ -158,6 +160,9 @@ fun App(controller: CameraController) {
 
 @Composable
 private fun WaitingScreen(controller: CameraController, notPcRemote: Boolean) {
+    // настройки (Wi-Fi, «Забыть») нужны и без камеры: иначе выключенный Wi-Fi не включить без кабеля
+    var settingsOpen by remember { mutableStateOf(false) }
+    Box(Modifier.fillMaxSize()) {
     Column(Modifier.fillMaxSize().padding(48.dp), verticalArrangement = Arrangement.Center) {
         Text(
             if (notPcRemote) "Камера подключена, но не в режиме PC Remote" else "Подключите камеру",
@@ -177,7 +182,8 @@ private fun WaitingScreen(controller: CameraController, notPcRemote: Boolean) {
                     Text("Разрешите доступ к камере в окне Android…", color = Secondary, fontSize = 17.sp, modifier = Modifier.padding(top = 8.dp))
                 }
             }
-            if (!notPcRemote) Column(Modifier.weight(1f)) {
+            // камера на кабеле не в PC Remote (например, на зарядке в режиме Wi-Fi) — по сети всё равно можно
+            Column(Modifier.weight(1f)) {
                 Text("По Wi-Fi", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(8.dp))
                 listOf(
@@ -211,11 +217,35 @@ private fun WaitingScreen(controller: CameraController, notPcRemote: Boolean) {
             Text(it, color = Secondary, fontSize = 17.sp)
         }
     }
+    Text("⚙", color = Color.White, fontSize = 22.sp, textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+        modifier = Modifier.align(Alignment.TopStart).padding(18.dp).size(44.dp)
+            .background(PanelLight, RoundedCornerShape(9.dp)).clickable { settingsOpen = true }.padding(top = 6.dp))
+    if (settingsOpen) SettingsOverlay(controller) { settingsOpen = false }
+    }
+}
+
+/** Настройки поверх экрана: касание мимо панели закрывает, касания по самой панели (и её полям) — нет. */
+@Composable
+private fun SettingsOverlay(controller: CameraController, onClose: () -> Unit) {
+    Box(
+        Modifier.fillMaxSize().background(Color(0x99000000)).pointerInput(Unit) { detectTapGestures { onClose() } },
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(Modifier.width(560.dp).fillMaxHeight(0.9f).pointerInput(Unit) { detectTapGestures { } }) {
+            SettingsPanel(controller, Modifier.fillMaxSize())
+        }
+    }
 }
 
 @Composable
 private fun LiveScreen(controller: CameraController, screen: ScreenState) {
     var hint by remember { mutableStateOf(false) }
+    // подсказка о S&Q пропадает вместе с режимом (например, MODE на камере) — закрываем и её флаг
+    LaunchedEffect(controller.shootingMode) {
+        if (controller.shootingMode != ShootingMode.slowQuick && screen.pillInfo == PillInfo.slowMotion) screen.pillInfo = null
+    }
+    // связь пропала — подсказки к ней больше нет
+    DisposableEffect(Unit) { onDispose { screen.pillInfo = null } }
     // автоскрытие: через заданное в настройках время без касаний, если не открыто меню, панель или просмотр снимка
     LaunchedEffect(Unit) {
         while (true) {
@@ -275,14 +305,7 @@ private fun LiveScreen(controller: CameraController, screen: ScreenState) {
         if (screen.allSettingsOpen) {
             AllSettingsPanel(controller, screen, Modifier.align(Alignment.Center).fillMaxWidth(0.62f).fillMaxHeight(0.78f))
         }
-        if (screen.settingsOpen) {
-            Box(
-                Modifier.fillMaxSize().background(Color(0x99000000)).pointerInput(Unit) { detectTapGestures { screen.settingsOpen = false } },
-                contentAlignment = Alignment.Center,
-            ) {
-                SettingsPanel(controller, Modifier.width(560.dp).fillMaxHeight(0.9f))
-            }
-        }
+        if (screen.settingsOpen) SettingsOverlay(controller) { screen.settingsOpen = false }
         controller.review?.let { ReviewOverlay(controller, it) }
         if (hint) {
             Text("Элементы скрыты · нажмите, чтобы показать", color = Color.White, fontSize = 16.sp,
@@ -391,7 +414,10 @@ private fun PillInfoCard(controller: CameraController, info: PillInfo) {
     val wifi = controller.transportKind == CameraController.TransportKind.wifi
     Column(
         // плотнее обычной панели: лежит поверх кнопок справа
-        Modifier.width(430.dp).background(Color(0xF71C1C1E), RoundedCornerShape(14.dp)).padding(18.dp),
+        Modifier.width(430.dp).background(Color(0xF71C1C1E), RoundedCornerShape(14.dp))
+            // касания по карточке не уходят к кнопкам под ней (переключатель режима, запись)
+            .pointerInput(Unit) { detectTapGestures { } }
+            .padding(18.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         when (info) {
@@ -461,7 +487,7 @@ private fun InfoNote(text: String, color: Color = Secondary) = Text(text, color 
 
 /** Коротко для строки состояния: «100 к/с · ×4 замедл.». */
 private fun slowMotionSummary(slow: CameraController.SlowMotion): String {
-    val capture = slow.capture ?: return "S&Q"
+    val capture = slow.capture ?: return "? к/с"
     val record = slow.record ?: return "$capture к/с"
     if (capture == record) return "$capture к/с · 1:1"
     return "$capture к/с · " + SlowQuick.speedLabel(capture, record).replace("медленнее", "замедл.").replace("быстрее", "ускор.")

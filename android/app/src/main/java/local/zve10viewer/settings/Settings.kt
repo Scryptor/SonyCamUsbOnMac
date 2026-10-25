@@ -48,8 +48,6 @@ enum class SettingGroup(val title: String, val settings: List<SettingID>) {
 enum class CaptureMode {
     photo, video;
 
-    private enum class Letter { P, A, S, M }
-
     companion object {
         fun of(exposureProgram: Long): CaptureMode {
             // 0x0007_80xx — видео, 0x0009_80xx — S&Q; всё остальное — фоторежимы
@@ -57,23 +55,11 @@ enum class CaptureMode {
             return if (family == 7L || family == 9L) video else photo
         }
 
-        private fun letter(value: Long): Letter = when (value) {
-            0x1L, 0x78053L, 0x9805CL -> Letter.M
-            0x20003L, 0x78051L, 0x9805AL -> Letter.A
-            0x30004L, 0x78052L, 0x9805BL -> Letter.S
-            else -> Letter.P  // P, авто, сюжеты
-        }
-
-        private fun code(letter: Letter, mode: CaptureMode): Long = when (mode) {
-            photo -> when (letter) { Letter.P -> 0x10002L; Letter.A -> 0x20003L; Letter.S -> 0x30004L; Letter.M -> 0x1L }
-            video -> when (letter) { Letter.P -> 0x78050L; Letter.A -> 0x78051L; Letter.S -> 0x78052L; Letter.M -> 0x78053L }
-        }
-
         /** Режим съёмки с той же буквой (P/A/S/M) в другом режиме; null — уже там или камера не даёт. */
         fun counterpart(value: Long, to: CaptureMode, settable: List<Long>): Long? {
+            // S&Q здесь — тоже видео; таблица режимов одна — в ShootingMode
             if (of(value) == to) return null
-            val target = code(letter(value), to)
-            return if (settable.contains(target)) target else null
+            return ShootingMode.counterpart(value, if (to == photo) ShootingMode.photo else ShootingMode.video, settable)
         }
     }
 }

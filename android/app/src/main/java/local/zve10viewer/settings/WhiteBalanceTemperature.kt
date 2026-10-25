@@ -50,6 +50,15 @@ object WhiteBalanceTemperature {
         Reading.Automatic -> stored ?: 5600
     }
 
+    /**
+     * Подходит ли температура камере: в диапазоне и на шаге. Проверяется до переключения в «Цвет. темп.»,
+     * иначе режим сменился бы, а температура не записалась.
+     */
+    fun accepts(kelvin: Long, range: PropertyRange?): Boolean {
+        val r = range?.takeIf { it.max > it.min && it.step > 0 } ?: fallbackRange
+        return kelvin in r.min..r.max && (kelvin - r.min) % r.step == 0L
+    }
+
     /** Пояснение к значению: откуда оно и что будет, если сдвинуть ползунок. */
     fun explanation(reading: Reading): String = when (reading) {
         is Reading.Manual -> "Температура задана вручную."

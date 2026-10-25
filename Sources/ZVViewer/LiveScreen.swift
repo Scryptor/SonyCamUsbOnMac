@@ -59,6 +59,12 @@ struct LiveScreen: View {
             screen.noteActivity()
         }
         .onContinuousHover { _ in screen.noteActivity() }
+        // подсказка о S&Q пропадает вместе с режимом (например, MODE на камере) — закрываем и её флаг
+        .onChange(of: controller.shootingMode) { _, mode in
+            if mode != .slowQuick, screen.pillInfo == .slowMotion { screen.pillInfo = nil }
+        }
+        // связь пропала — подсказки к ней больше нет
+        .onDisappear { screen.pillInfo = nil }
         .task {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(500))
@@ -339,7 +345,7 @@ private struct SlowMotionInfo: View {
     let controller: CameraController
 
     static func summary(_ slow: (capture: Int?, record: Int?)) -> String {
-        guard let capture = slow.capture else { return "S&Q" }
+        guard let capture = slow.capture else { return "? к/с" }
         guard let record = slow.record else { return "\(capture) к/с" }
         let speed = SlowQuick.speedLabel(capture: capture, record: record)
             .replacingOccurrences(of: "медленнее", with: "замедл.").replacingOccurrences(of: "быстрее", with: "ускор.")

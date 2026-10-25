@@ -48,6 +48,13 @@ public enum WhiteBalanceTemperature {
         }
     }
 
+    /// Подходит ли температура камере: в диапазоне и на шаге. Проверяется до переключения в «Цвет. темп.»,
+    /// иначе режим сменился бы, а температура не записалась.
+    public static func accepts(_ kelvin: Int64, range: PropertyRange?) -> Bool {
+        let range = range.flatMap { $0.max > $0.min && $0.step > 0 ? $0 : nil } ?? fallbackRange
+        return kelvin >= range.min && kelvin <= range.max && (kelvin - range.min) % range.step == 0
+    }
+
     /// Пояснение к значению: откуда оно и что будет, если сдвинуть ползунок.
     public static func explanation(_ reading: Reading) -> String {
         switch reading {

@@ -58,8 +58,32 @@ object RecordingModes {
     /** Система по коду `0xD242`: 25/50/100p — PAL. */
     fun isPalSetting(setting: Long): Boolean = isPal(setting)
 
-    fun label(format: Long?, setting: Long?): String =
-        if (format == null || setting == null) "—" else RecordingMode(format, setting).label
+    /** Подпись режима; у камеры без свойства формата — подпись одних параметров, как раньше. */
+    fun label(format: Long?, setting: Long?): String = when {
+        setting == null -> "—"
+        format == null -> ValueFormatter.label(SettingID.movieRecordingSetting, setting)
+        else -> RecordingMode(format, setting).label
+    }
+
+    /**
+     * Как перейти в режим. Параметры камера принимает только для текущего формата, поэтому смотрим и на формат,
+     * запись которого ещё в пути: передумали, пока камера переключается, — пишем формат снова.
+     */
+    enum class Plan { settingOnly, formatThenSetting, waitForFormat }
+
+    fun plan(to: RecordingMode, confirmedFormat: Long?, requestedFormat: Long?): Plan = when {
+        (requestedFormat ?: confirmedFormat) != to.format -> Plan.formatThenSetting
+        confirmedFormat == to.format -> Plan.settingOnly
+        else -> Plan.waitForFormat
+    }
+
+    /** Соседний режим; base — последний запрошенный, если он есть, иначе текущий. */
+    fun neighbour(base: RecordingMode?, modes: List<RecordingMode>, offset: Int): RecordingMode? {
+        val index = base?.let { modes.indexOf(it) } ?: return null
+        if (index < 0) return null
+        val target = (index + offset).coerceIn(0, modes.size - 1)
+        return if (target == index) null else modes[target]
+    }
 
     /** 4K раньше HD; внутри формата — по убыванию частоты, затем битрейта. */
     private val order = compareBy<RecordingMode>({ if (it.format == FOUR_K) 0 else 1 },
