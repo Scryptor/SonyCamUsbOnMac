@@ -1,6 +1,42 @@
-# Sony Cam Viewer
+<h1 align="center">Sony Cam Viewer</h1>
 
-Живое видео с камеры Sony по USB или по Wi-Fi и управление её настройками — **на Mac и на Android-планшете**. Замена Imaging Edge Desktop (Remote) без лишнего: открыл — сразу картинка, основные настройки в один клик. Сделано и проверено на ZV-E10, но подходит и для других камер Sony — см. [Какие камеры подойдут](#какие-камеры-подойдут).
+<p align="center">
+  <b>Живое видео с камеры Sony и пульт к ней — на Android-планшете и на Mac.</b><br>
+  По кабелю USB-C или по Wi-Fi. Открыл — сразу картинка, основные настройки в одно касание.
+</p>
+
+<p align="center">
+  <a href="https://github.com/Scryptor/SonyCamViewer/releases/latest"><img alt="Последняя версия" src="https://img.shields.io/github/v/release/Scryptor/SonyCamViewer?label=%D0%B2%D0%B5%D1%80%D1%81%D0%B8%D1%8F&color=2f81f7"></a>
+  <img alt="Android 10+" src="https://img.shields.io/badge/Android-10%2B-3ddc84?logo=android&logoColor=white">
+  <img alt="macOS 14+" src="https://img.shields.io/badge/macOS-14%2B%20%C2%B7%20Apple%20Silicon-black?logo=apple">
+</p>
+
+<p align="center">
+  <a href="https://github.com/Scryptor/SonyCamViewer/releases/latest/download/Sony-Cam-Viewer.apk"><b>⬇ Скачать для Android (APK)</b></a>
+  &nbsp;·&nbsp;
+  <a href="https://github.com/Scryptor/SonyCamViewer/releases/latest/download/Sony-Cam-Viewer.dmg"><b>⬇ Скачать для Mac (DMG)</b></a>
+</p>
+
+![Sony Cam Viewer на планшете: четыре камеры, три связаны и пишут, гистограмма, строка значений](docs/screenshots/0-overview.jpg)
+
+Замена Imaging Edge Desktop (Remote) без лишнего. Сделано и проверено на ZV-E10, но подходит и для других камер Sony — см. [Какие камеры подойдут](#какие-камеры-подойдут). Бесплатно, без рекламы и регистрации.
+
+## Главное
+
+- 📺 **Живое видео на весь экран** до 25 кадров в секунду — по USB-C, по Wi-Fi через роутер или напрямую (Wi-Fi Direct). Слабый сигнал программа переживает без разрыва.
+- 🎛 **Настройки как на дисплее камеры**: выдержка, диафрагма, ISO, баланс белого, экспокоррекция, фокус, режим записи. Касание — меню Fn поверх кадра, плюс «Все настройки» по группам.
+- 🔴 **Запись видео и фото** со спуском и автофокусом. REC с таймером и красная рамка вокруг кадра, снимки — на планшет, Mac или карту.
+- 🎥 **До 4 камер сразу**: главная на большом экране, остальные — живыми плитками. Переключение мгновенное, даже во время записи.
+- 🔗 **Связанные камеры** повторяют за главной настройки, пресеты и запись — одна кнопка на все.
+- ⭐ **Пресеты** отдельно для фото и видео — свои настройки одной кнопкой.
+- 📊 **Гистограмма**, цифровое увеличение до 8× для фокуса, галерея снимков с проверкой резкости.
+- 🧩 Без драйверов, root и сторонних библиотек. Код открыт.
+
+## Как начать
+
+1. **Скачайте** программу: [APK для Android](https://github.com/Scryptor/SonyCamViewer/releases/latest/download/Sony-Cam-Viewer.apk) или [DMG для Mac](https://github.com/Scryptor/SonyCamViewer/releases/latest/download/Sony-Cam-Viewer.dmg) — подробнее в [Установке на Mac](#установка-на-mac) и [на Android](#установка-на-android).
+2. **На камере** один раз включите PC Remote: MENU → Network → PC Remote Function → PC Remote: **On** — см. [Настройку камеры](#настройка-камеры).
+3. **Подключите** камеру кабелем USB-C — через несколько секунд появится картинка. Или [по Wi-Fi](#подключение-по-wi-fi) — без кабеля.
 
 ## Скачать
 
@@ -13,15 +49,43 @@
 
 Все версии — на странице [Releases](https://github.com/Scryptor/SonyCamViewer/releases).
 
+**Документация:** [руководство пользователя](docs/user-guide.md) · [протокол камеры](docs/protocol.md) · [устройство кода](docs/architecture.md) · [API автоматизации](docs/automation-api.md)
+
+## Как это выглядит
+
 | Mac | Android-планшет |
 |---|---|
 | ![Mac: главный экран](docs/screenshots/1-main.png) | ![Android: главный экран](docs/screenshots/6-android.png) |
 
-**Документация:** [руководство пользователя](docs/user-guide.md) · [протокол камеры](docs/protocol.md) · [устройство кода](docs/architecture.md) · [API автоматизации](docs/automation-api.md)
+| Меню Fn на Mac | Меню Fn на Android |
+|---|---|
+| ![Mac: меню Fn с балансом белого](docs/screenshots/2-fn.png) | ![Android: меню Fn с балансом белого](docs/screenshots/7-android-fn.png) |
+
+| Лента камер и группа на Mac | Лента камер и запись на планшете |
+|---|---|
+| ![Mac: три камеры на связи, две связаны с главной](docs/screenshots/9-mac-strip.png) | ![Android: четыре камеры, три связаны и пишут одновременно](docs/screenshots/12-android-group-rec.png) |
+
+| Экран ожидания на Mac | Экран ожидания на планшете |
+|---|---|
+| ![Mac: экран ожидания при первом запуске](docs/screenshots/10-mac-waiting.png) | ![Android: экран ожидания при первом запуске](docs/screenshots/11-android-waiting.png) |
+
+| Все настройки | Фоторежим |
+|---|---|
+| ![Все настройки](docs/screenshots/3-all.png) | ![Фоторежим](docs/screenshots/4-photo.png) |
+
+| Просмотр после съёмки | Пресеты на планшете |
+|---|---|
+| ![Просмотр снимка](docs/screenshots/5-review.png) | ![Android: панель пресетов](docs/screenshots/8-android-presets.png) |
+
+На скриншотах — виртуальная камера из `scripts/fake_camera.py`. В её видоискателе нарисованное кодом горное озеро, а не съёмка настоящей камеры.
 
 ## Что умеет
 
+
 На Mac и на Android одно и то же:
+
+<details>
+<summary><b>Все возможности подробно</b> — нажмите, чтобы раскрыть</summary>
 
 - **Сама находит камеру** — по кабелю USB или по Wi-Fi в домашней сети — и показывает живое видео на весь экран, до 25 кадров в секунду. Отключили кабель — подключается по Wi-Fi или ждёт камеру. См. [Подключение по Wi-Fi](#подключение-по-wi-fi).
 - **Несколько камер.**
@@ -54,23 +118,7 @@
 - **Элементы управления прячутся** сами (через 1–30 секунд, задаётся в настройках) или по команде.
 - Без драйверов и сторонних библиотек: на Mac — системные ImageCaptureCore и Network, на Android — системный USB host и обычные сокеты.
 
-| Меню Fn на Mac | Меню Fn на Android |
-|---|---|
-| ![Mac: меню Fn с балансом белого](docs/screenshots/2-fn.png) | ![Android: меню Fn с балансом белого](docs/screenshots/7-android-fn.png) |
-
-| Лента камер и группа на Mac | Экран ожидания на Mac |
-|---|---|
-| ![Mac: три камеры на связи, две связаны с главной](docs/screenshots/9-mac-strip.png) | ![Mac: экран ожидания при первом запуске](docs/screenshots/10-mac-waiting.png) |
-
-| Пресеты на планшете | Экран ожидания на планшете |
-|---|---|
-| ![Android: панель пресетов](docs/screenshots/8-android-presets.png) | ![Android: экран ожидания при первом запуске](docs/screenshots/11-android-waiting.png) |
-
-| Все настройки | Фоторежим | Просмотр после съёмки |
-|---|---|---|
-| ![Все настройки](docs/screenshots/3-all.png) | ![Фоторежим](docs/screenshots/4-photo.png) | ![Просмотр снимка](docs/screenshots/5-review.png) |
-
-На скриншотах — виртуальная камера из `scripts/fake_camera.py`. В её видоискателе нарисованное кодом горное озеро, а не съёмка настоящей камеры.
+</details>
 
 ## Какие камеры подойдут
 
