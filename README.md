@@ -6,12 +6,12 @@
 
 | | Mac | Android |
 |---|---|---|
-| **Файл** | [Sony-Cam-Viewer.dmg](https://github.com/Scryptor/SonyCamUsbOnMac/releases/latest/download/Sony-Cam-Viewer.dmg) | [Sony-Cam-Viewer.apk](https://github.com/Scryptor/SonyCamUsbOnMac/releases/latest/download/Sony-Cam-Viewer.apk) |
+| **Файл** | [Sony-Cam-Viewer.dmg](https://github.com/Scryptor/SonyCamViewer/releases/latest/download/Sony-Cam-Viewer.dmg) | [Sony-Cam-Viewer.apk](https://github.com/Scryptor/SonyCamViewer/releases/latest/download/Sony-Cam-Viewer.apk) |
 | **Что нужно** | Mac на Apple Silicon, macOS 14 или новее | Android 10 или новее, планшет или телефон с USB OTG |
 | **Камера подключается** | кабелем USB-C или по Wi-Fi через домашний роутер | кабелем USB-C или по Wi-Fi через домашний роутер |
 | **Как поставить** | [Установка на Mac](#установка-на-mac) | [Установка на Android](#установка-на-android) |
 
-Все версии — на странице [Releases](https://github.com/Scryptor/SonyCamUsbOnMac/releases).
+Все версии — на странице [Releases](https://github.com/Scryptor/SonyCamViewer/releases).
 
 | Mac | Android-планшет |
 |---|---|
@@ -83,13 +83,13 @@
 | Sony до 2020 года, например a6000, a6400, a6600, a7 III, a7R III, RX100 VI | не проверялось. Может подключиться и показать видео, но выдержку, ISO и экспокоррекцию такие камеры меняют шагами «+1 / −1», а программа пишет значения напрямую, поэтому их изменение, скорее всего, не заработает |
 | Canon, Nikon, Fujifilm, Panasonic и другие | нет: у них свои протоколы, программа ищет только камеры Sony |
 
-Попробовать на другой камере Sony безопасно: при подключении программа только передаёт управление компьютеру и не трогает настройки, пока вы сами их не поменяете. Если попробовали — расскажите в [Issues](https://github.com/Scryptor/SonyCamUsbOnMac/issues), что работает, а что нет.
+Попробовать на другой камере Sony безопасно: при подключении программа только передаёт управление компьютеру и не трогает настройки, пока вы сами их не поменяете. Если попробовали — расскажите в [Issues](https://github.com/Scryptor/SonyCamViewer/issues), что работает, а что нет.
 
 ## Установка на Mac
 
 Нужен Mac на Apple Silicon и macOS 14 или новее.
 
-1. Скачайте [Sony-Cam-Viewer.dmg](https://github.com/Scryptor/SonyCamUsbOnMac/releases/latest/download/Sony-Cam-Viewer.dmg).
+1. Скачайте [Sony-Cam-Viewer.dmg](https://github.com/Scryptor/SonyCamViewer/releases/latest/download/Sony-Cam-Viewer.dmg).
 2. Откройте его и перетащите «Sony Cam Viewer» в «Программы». До версии 0.5.1 программа называлась ZV-E10 Viewer: если она стоит, после установки удалите её — настройки и пресеты у них общие и сохранятся.
 3. Программа не подписана сертификатом разработчика Apple, поэтому при первом запуске macOS её не откроет. Чтобы открыть:
    - попробуйте запустить программу и закройте предупреждение;
@@ -109,7 +109,7 @@
 
 Нужен Android 10 или новее и планшет или телефон, к которому по USB можно подключать устройства (USB host, OTG): это умеет почти любой современный. Проверено на Redmi Pad Pro с Android 14.
 
-1. Скачайте [Sony-Cam-Viewer.apk](https://github.com/Scryptor/SonyCamUsbOnMac/releases/latest/download/Sony-Cam-Viewer.apk) прямо на планшет и откройте его. Android попросит разрешить установку из этого источника — разрешите.
+1. Скачайте [Sony-Cam-Viewer.apk](https://github.com/Scryptor/SonyCamViewer/releases/latest/download/Sony-Cam-Viewer.apk) прямо на планшет и откройте его. Android попросит разрешить установку из этого источника — разрешите.
 2. [Настройте камеру](#настройка-камеры) и подключите её к планшету кабелем USB-C.
 3. Android спросит, дать ли программе доступ к камере, — нажмите «ОК». Если в окне есть галочка «всегда открывать при подключении» — отметьте её: тогда программа будет запускаться сама, как только вы подключите камеру.
 

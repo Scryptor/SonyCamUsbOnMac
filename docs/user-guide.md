@@ -31,7 +31,7 @@ Sony Cam Viewer показывает живое видео с камеры Sony 
 
 ## Установка
 
-1. Скачайте `Sony-Cam-Viewer.dmg` со страницы [Releases](https://github.com/Scryptor/SonyCamUsbOnMac/releases/latest).
+1. Скачайте `Sony-Cam-Viewer.dmg` со страницы [Releases](https://github.com/Scryptor/SonyCamViewer/releases/latest).
 2. Откройте образ и перетащите «Sony Cam Viewer» в «Программы».
 3. Программа не подписана сертификатом разработчика Apple, поэтому при первом запуске macOS её не откроет:
    - попробуйте запустить программу и закройте предупреждение;
