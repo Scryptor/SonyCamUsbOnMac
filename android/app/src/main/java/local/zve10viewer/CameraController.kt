@@ -282,6 +282,8 @@ class CameraController(private val context: Context, private val scope: Coroutin
     private var recordingToggle = RecordingToggle()
     /** Нажатие записи, которое ещё идёт в камеру. */
     private var recordingCall: Job? = null
+    /** Код, которым камера отклонила последнее нажатие записи, если запись так и не сменилась, — для сообщения. */
+    private var recordingRefusal: Int? = null
     var review by mutableStateOf<Review?>(null)
         private set
     /** Снимки и стоп-кадры этой сессии, новые сначала. */
@@ -699,37 +701,58 @@ class CameraController(private val context: Context, private val scope: Coroutin
         val toggle = recordingToggle
         if (!toggle.press(isRecording, System.currentTimeMillis())) return
         recordingRequest = toggle.request
+        recordingRefusal = null
         feedback(FeedbackEvent.Accepted(FeedbackTarget.record))
         // связанные — к тому же состоянию, что будет на главной, и сразу, а не после неё
         val target = !isRecording
+        journal("запись: нажатие — ${if (target) "запуск" else "остановка"}")
         linkedSides.forEach { side ->
             scope.launch { if (!side.setRecording(target)) groupFailed(side, GroupFailures.RECORDING) }
         }
         recordingCall = scope.launch {
+            val pressed = System.currentTimeMillis()
+            var refusal: Int? = null
+            val took = { "${System.currentTimeMillis() - pressed} мс" }
             val recording = try {
-                session.toggleRecording()
+                session.toggleRecording().also { journal("запись: камера приняла нажатие, ${if (it) "пишет" else "не пишет"} (${took()})") }
             } catch (e: CancellationException) {
                 throw e
+            } catch (e: SessionException.RecordButtonRefused) {
+                journal("запись: камера ответила 0x%04X на «%s», %s (%s)".format(e.code, if (e.release) "отпустить" else "нажать",
+                    if (e.recording) "пишет" else "не пишет", took()))
+                // отклонила, а запись всё же сменилась — это и есть исход; не сменилась — отказ с её кодом
+                if (e.recording == target) {
+                    e.recording
+                } else {
+                    refusal = e.code
+                    null
+                }
             } catch (e: Exception) {
                 Log.w(TAG, "запись: камера не приняла нажатие", e)
+                journal("запись: нажатие не прошло: ${e.message} (${took()})")
                 null
             }
             // сеанс сменился, пока ждали, — это нажатие уже ни к чему не относится
-            if (toggle === recordingToggle) recordingOutcome(toggle.completed(recording))
+            if (toggle === recordingToggle) {
+                recordingRefusal = refusal
+                recordingOutcome(toggle.completed(recording, System.currentTimeMillis()))
+            }
         }
     }
 
-    /** Чем кончился запрос записи: событие для экрана, при отказе — сообщение. */
+    /** Чем кончился запрос записи или сама запись: событие для экрана, при отказе — сообщение. */
     private fun recordingOutcome(outcome: RecordingToggle.Outcome?) {
         recordingRequest = recordingToggle.request
         when (outcome) {
-            null -> Unit
+            null -> return
             RecordingToggle.Outcome.Started -> feedback(FeedbackEvent.RecordingStarted)
             RecordingToggle.Outcome.Stopped -> feedback(FeedbackEvent.RecordingStopped)
-            is RecordingToggle.Outcome.Failed -> {
-                feedback(FeedbackEvent.Failed(FeedbackTarget.record))
-                showStatus(if (outcome.request == RecordingToggle.Request.starting) "Камера не начала запись" else "Камера не остановила запись")
-            }
+            is RecordingToggle.Outcome.Failed, RecordingToggle.Outcome.Aborted -> feedback(FeedbackEvent.Failed(FeedbackTarget.record))
+            RecordingToggle.Outcome.StoppedByCamera -> Unit
+        }
+        RecordingToggle.message(outcome, recordingRefusal)?.let { message ->
+            showStatus(message)
+            journal("запись: $message")
         }
     }
 
@@ -2429,10 +2452,13 @@ class CameraController(private val context: Context, private val scope: Coroutin
             }
         }
         val recording = snapshot[SonyProp.MOVIE_RECORDING_STATE]?.current?.intValue == 1L
+        if (recording != (recordingStartedAt != null)) journal(if (recording) "запись: камера пишет" else "запись: камера не пишет")
         if (recording && recordingStartedAt == null) recordingStartedAt = System.currentTimeMillis()
         if (!recording) recordingStartedAt = null
-        // подтверждение нажатия записи — по свойству; запись с кнопки самой камеры исходом не считается
-        if (snapshot.containsKey(SonyProp.MOVIE_RECORDING_STATE)) recordingOutcome(recordingToggle.observe(recording))
+        // подтверждение нажатия записи и конец записи — по свойству; начало записи с кнопки самой камеры исходом не считается
+        if (snapshot.containsKey(SonyProp.MOVIE_RECORDING_STATE)) {
+            recordingOutcome(recordingToggle.observe(recording, System.currentTimeMillis()))
+        }
         for ((code, target) in targets.toMap()) {
             if (snapshot[code]?.current?.intValue == target) clearTarget(code)
         }

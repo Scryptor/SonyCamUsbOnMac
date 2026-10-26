@@ -66,6 +66,10 @@ class GroupFollower(private val session: CameraSession, scope: CoroutineScope, p
             session.toggleRecording() == on
         } catch (e: CancellationException) {
             throw e
+        } catch (e: SessionException.RecordButtonRefused) {
+            // камера отклонила нажатие, а запись всё же сменилась — дело сделано
+            Log.d(TAG, "запись: ${e.message}")
+            e.recording == on
         } catch (e: Exception) {
             Log.d(TAG, "запись не переключилась: ${e.message}")
             false

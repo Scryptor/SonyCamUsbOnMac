@@ -10,7 +10,8 @@ Wi-Fi: высокое — 1024×576, дополнено до ~72 КБ; низк�
 - запись в свойства (0x9205) меняет их текущее значение — режим фото/видео, «куда сохранять» и т. п.;
 - спуск (S1 0xD2C1, S2 0xD2C2 через 0x9207): фокус находится за 0,15 с, через 0,4 с после S2 в памяти камеры
   появляется снимок (ObjectInMemory 0xD215 > 0x8000): JPEG, при FileFormat 0xD253 = 2 — ещё и ARW;
-- кнопка записи (0xD2C8): через 0,8 с (--record-delay) MovieRecordingState 0xD21D меняется 0 ↔ 1;
+- кнопка записи (0xD2C8): через 0,8 с (--record-delay) MovieRecordingState 0xD21D меняется 0 ↔ 1; как камера
+  отвечает на нажатие и отпускание и не бросает ли запись сама — --record (сценарии в RECORD_SCENARIOS);
 - цветовая температура 0xD20F открыта только в режиме баланса белого «Цвет. темп.», как у настоящей камеры.
 
 Несколько камер сразу (scripts/fake_cameras.py) различаются: --name, --serial (по нему программа отличает камеры),
@@ -21,7 +22,7 @@ Wi-Fi: высокое — 1024×576, дополнено до ~72 КБ; низк�
   scripts/fake_camera.py [--listen 127.0.0.1:15740] [--photo снимок.jpg] [--rate байт/с] [--ignore-record]
                          [--name ZV-E10] [--serial …] [--mark zoom|pan|flip|flop|rotate] [--picture кадр.jpg]
                          [--battery 0–100] [--mode photo|video] [--ssdp] [--busy] [--pairing] [--reject iso,…]
-                         [--record-delay с]
+                         [--record-delay с] [--record сценарий]
   ZV_PTPIP_HOST=127.0.0.1 …/ZVViewer --automation        # Mac
   am start … --es ptpipHost <IP Mac>                       # планшет: --listen <IP Mac>:15740
   scripts/badnet.py --camera 127.0.0.1:25740 …             # или через прокси: --listen 127.0.0.1:25740
@@ -35,7 +36,7 @@ ASSETS = os.path.join(ROOT, "scripts/assets")
 VIEWS = {"zoom": "viewfinder-zoom.jpg", "pan": "viewfinder-pan.jpg"}      # другие планы той же сцены
 NAME = "ZV-E10"
 FRAME_PERIOD = 0.040
-OK, ACCESS_DENIED, INVALID_HANDLE = 0x2001, 0x200F, 0x2009
+OK, ACCESS_DENIED, INVALID_HANDLE, DEVICE_BUSY = 0x2001, 0x200F, 0x2009, 0x2019
 LIVE_VIEW, CAPTURED = 0xFFFFC002, 0xFFFFC001
 PROPERTY_CHANGED = 0xC203
 S1, S2, MOVIE_REC = 0xD2C1, 0xD2C2, 0xD2C8
@@ -48,6 +49,18 @@ SSDP_ST = "urn:schemas-sony-com:service:DigitalImaging:1"
 MARKS = {"flip": ["-f", "horizontal"], "flop": ["-f", "vertical"], "rotate": ["-r", "180"]}
 # --reject: запись в эти свойства камера принимает, а значение не меняет — как настоящая, когда не может
 REJECTABLE = {"iso": 0xD21E, "shutter": 0xD20D, "aperture": 0x5007, "whiteBalance": 0x5005, "exposureProgram": 0x500E}
+# --record: как камера отвечает на кнопку записи — «нажать» (2) и «отпустить» (1) — и не бросает ли запись сама
+RECORD_SCENARIOS = {
+    "normal": "запись начинается и останавливается через --record-delay",
+    "blip-fast": "начинает и через 30 мс сама бросает запись — быстрее, чем программа перечитывает свойства",
+    "blip-slow": "начинает и через 1,5 с сама бросает запись",
+    "stop-later": "начинает и через 5 с сама останавливает запись — как при полной карте или перегреве",
+    "press-busy": "на «нажать» отвечает 0x2019 Device Busy и ничего не делает",
+    "press-busy-blip": "на «нажать» отвечает 0x2019, но запись всё равно начинается и через 0,4 с обрывается",
+    "press-slow": "на «нажать» отвечает через 3 с (занята), потом начинает запись",
+    "release-busy": "«нажать» — как обычно, на «отпустить» отвечает 0x2019; запись идёт",
+    "release-busy-blip": "на «отпустить» отвечает 0x2019, запись начинается и через 0,4 с обрывается",
+}
 # размеры значений по типу PTP: INT8…UINT128
 SIZES = {1: 1, 2: 1, 3: 2, 4: 2, 5: 4, 6: 4, 7: 8, 8: 8, 9: 16, 10: 16}
 FORMATS = {1: "<b", 2: "<B", 3: "<h", 4: "<H", 5: "<i", 6: "<I", 7: "<q", 8: "<Q"}
@@ -240,6 +253,10 @@ class Camera:
         self.rate = args.rate
         self.ignore_record = args.ignore_record
         self.record_delay = args.record_delay
+        self.record_scenario = args.record
+        self.reply_delay = 0.0                              # ответ на текущую операцию — через столько секунд
+        # ноль часов журнала; FAKE_CAMERA_CLOCK — time.monotonic() того, кто запустил, чтобы сверять по одним часам
+        self.started = float(os.environ.get("FAKE_CAMERA_CLOCK") or time.monotonic())
         self.name = args.name
         self.busy = args.busy
         self.pairing = args.pairing
@@ -280,8 +297,12 @@ class Camera:
     def later(self, seconds, fn):
         asyncio.get_running_loop().call_later(seconds, fn)
 
+    def log(self, text):
+        """С секундами от запуска: по ним сверяется порядок с тем, что видела программа."""
+        print(f"{time.monotonic() - self.started:8.3f}  {text}", flush=True)
+
     def control(self, code, value):
-        loop_print = lambda text: print(text, flush=True)
+        """Команда 0x9207; возвращает код ответа."""
         if code == S1 and value == 2:
             self.later(0.15, lambda: self.changed(FOCUS_FOUND, 2))
         elif code == S1 and value == 1:
@@ -290,11 +311,45 @@ class Camera:
             self.later(0.4, self.shoot)
         elif code == MOVIE_REC and value == 2:
             if self.ignore_record:
-                loop_print("кнопка записи — не реагирую (--ignore-record)")
-                return
-            target = 0 if self.props.get(RECORDING) == 1 else 1
-            self.later(self.record_delay, lambda: (self.changed(RECORDING, target),
-                                     loop_print(f"запись {'началась' if target else 'остановлена'}")))
+                self.log("кнопка записи — не реагирую (--ignore-record)")
+                return OK
+            return self.record_press()
+        elif code == MOVIE_REC and value == 1:
+            return self.record_release()
+        return OK
+
+    def record_press(self):
+        scenario = self.record_scenario
+        target = 0 if self.props.get(RECORDING) == 1 else 1
+        if scenario == "press-busy":
+            self.log("«нажать» запись → 0x2019, ничего не делаю")
+            return DEVICE_BUSY
+        delay = self.record_delay
+        if scenario == "press-slow":
+            self.reply_delay = 3.0
+            delay += 3.0
+        self.later(delay, lambda: self.set_recording(target))
+        if target == 1 and scenario in ("blip-fast", "blip-slow", "stop-later", "press-busy-blip", "release-busy-blip"):
+            lasts = {"blip-fast": 0.03, "blip-slow": 1.5, "stop-later": 5.0}.get(scenario, 0.4)
+            self.later(delay + lasts, lambda: self.set_recording(0, "сама остановила"))
+        if scenario == "press-busy-blip":
+            self.log("«нажать» запись → 0x2019, но запись начнётся")
+            return DEVICE_BUSY
+        self.log("«нажать» запись" + (" — отвечу через 3 с" if self.reply_delay else ""))
+        return OK
+
+    def record_release(self):
+        if self.record_scenario in ("release-busy", "release-busy-blip"):
+            self.log("«отпустить» запись → 0x2019")
+            return DEVICE_BUSY
+        self.log("«отпустить» запись")
+        return OK
+
+    def set_recording(self, value, why=""):
+        if self.props.get(RECORDING) == value:
+            return
+        self.changed(RECORDING, value)
+        self.log(f"запись {'началась' if value else 'остановлена'}" + (f" — {why}" if why else ""))
 
     def shoot(self):
         self.number += 1
@@ -373,6 +428,9 @@ async def serve(cam, r, w):
                         if p2 == 12:
                             break
                 reply, rc = respond(cam, code, params, out)
+                if cam.reply_delay:                          # камера занята: ответ — позже, канал команд ждёт
+                    delay, cam.reply_delay = cam.reply_delay, 0.0
+                    await asyncio.sleep(delay)
                 if reply is not None:
                     await send_data(cam, w, tid, reply, limited=code == 0x1009 and params[:1] == [CAPTURED])
                     if code == 0x1009 and params[:1] == [CAPTURED]:
@@ -408,7 +466,8 @@ def respond(cam, code, params, out):
     if code == 0x9205 and params and out:
         if params[0] == 0xD26A:
             cam.quality = 1 if out[0] == 1 else 2
-            print(f"качество превью → {'низкое' if cam.quality == 1 else 'высокое'}", flush=True)
+            cam.log(f"качество превью → {'низкое' if cam.quality == 1 else 'высокое'}"
+                    + (" (идёт запись)" if cam.props.get(RECORDING) == 1 else ""))
         elif params[0] in cam.reject:
             print(f"запись 0x{params[0]:04X} — не меняю (--reject)", flush=True)
         elif not cam.props.enabled(params[0]):
@@ -421,7 +480,7 @@ def respond(cam, code, params, out):
                 cam.props.enable(COLOR_TEMP, cam.props.get(WHITE_BALANCE) == MANUAL_WB)
                 cam.changed(COLOR_TEMP)
     if code == 0x9207 and params and len(out) >= 2:
-        cam.control(params[0], struct.unpack_from("<H", out)[0])
+        return None, cam.control(params[0], struct.unpack_from("<H", out)[0])
     return None, OK
 
 
@@ -432,6 +491,8 @@ async def main():
     ap.add_argument("--rate", type=int, default=0, help="скорость отдачи снимка, байт/с (0 — без ограничения)")
     ap.add_argument("--ignore-record", action="store_true", help="не реагировать на кнопку записи")
     ap.add_argument("--record-delay", type=float, default=0.8, help="через сколько секунд запись начинается и останавливается")
+    ap.add_argument("--record", choices=list(RECORD_SCENARIOS), default="normal",
+                    help="как камера отвечает на кнопку записи: " + "; ".join(f"{k} — {v}" for k, v in RECORD_SCENARIOS.items()))
     ap.add_argument("--name", default=NAME, help="имя камеры в ответе на приветствие")
     ap.add_argument("--serial", help="серийный номер в DeviceInfo (по нему программа отличает камеры)")
     ap.add_argument("--mark", choices=sorted(set(MARKS) | set(VIEWS)),
@@ -452,7 +513,7 @@ async def main():
                                                                   sock=ssdp_socket())
     extras = [f"№ …{a.serial[-4:]}" if a.serial else "", a.mark or "", f"батарея {a.battery}%" if a.battery is not None else "",
               a.mode or "", "SSDP" if a.ssdp else "", "занята" if a.busy else "", "сопряжение" if a.pairing else "",
-              f"не меняет {a.reject}" if a.reject else ""]
+              f"не меняет {a.reject}" if a.reject else "", f"запись: {a.record}" if a.record != "normal" else ""]
     print(f"поддельная {cam.name}: {a.listen}, кадр {len(cam.frames[2]) // 1024} / {len(cam.frames[1]) // 1024} КБ, "
           f"снимок {len(cam.photo) // 1024} КБ" + "".join(f", {e}" for e in extras if e), flush=True)
     async with server:

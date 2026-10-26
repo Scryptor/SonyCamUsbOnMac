@@ -65,6 +65,9 @@ public enum SessionError: Error, Equatable {
     case notPCRemote
     case noExtendedInfo
     case operationFailed(operation: UInt16, code: UInt16)
+    /// Камера отклонила нажатие (release: false) или отпускание кнопки записи; recording — идёт ли запись после
+    /// ожидания: камера бывает занята, а запись всё же начинает.
+    case recordButtonRefused(release: Bool, code: UInt16, recording: Bool)
     case notReady
     case notWritable(UInt16)
     case valueNotAllowed(UInt16, Int64)

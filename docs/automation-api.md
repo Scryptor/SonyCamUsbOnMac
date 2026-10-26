@@ -79,6 +79,7 @@ open "/Applications/Sony Cam Viewer.app" --args --automation
 | `capturing` | bool | идёт съёмка фото |
 | `capture` | объект или `null` | где снимок: `phase` — `focusing`, `exposing` (камера отработала спуск) или `downloading`; у загрузки ещё `file`, `files`, `received`, `expected` (байты; `expected` — `null`, если размер неизвестен) и `caption` — подпись на кнопке, например «Загрузка 42 %» |
 | `recordingRequest` | строка или `null` | запуск (`starting`) или остановка (`stopping`) записи с кнопки, пока камера не подтвердила; через 6 с без ответа — снова `null` и сообщение в `status` |
+| `journal` | массив строк | последние 30 записей журнала панели отладки, старые первыми: связь, качество превью, нажатия записи с ответом камеры |
 | `feedback` | массив | последние события отклика (до 8, новые в конце) — для отладки анимаций: `accepted(…)`, `shutterFired`, `frameGrabbed(…)`, `shotAdded(…)`, `recordingStarted`, `recordingStopped`, `failed(…)` |
 | `fps` | число | кадров превью в секунду за последние 2 с |
 | `frameGapMs` | число | самая долгая пауза между кадрами превью за последние 10 с, мс |

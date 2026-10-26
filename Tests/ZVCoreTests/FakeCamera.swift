@@ -36,6 +36,7 @@ final class FakeCamera: PTPTransport, @unchecked Sendable {
     private var _liveViewReplies: [PTPReply] = []
     private var _disconnectOnNext: UInt16?
     private var _busyOnNextPress: UInt16?
+    private var _busyOnNextRelease: UInt16?
     private var _capturedFiles: [(String, Data)] = []
     private var memory: [(String, Data)] = []
     /// Снятое, но ещё не появившееся в памяти: камера обрабатывает снимок столько перечитываний свойств.
@@ -92,6 +93,11 @@ final class FakeCamera: PTPTransport, @unchecked Sendable {
         get { locked { _busyOnNextPress } }
         set { locked { _busyOnNextPress = newValue } }
     }
+    /// Следующее отпускание этой кнопки (значение 1) камера отклонит с DeviceBusy, но само действие выполнит.
+    var busyOnNextRelease: UInt16? {
+        get { locked { _busyOnNextRelease } }
+        set { locked { _busyOnNextRelease = newValue } }
+    }
 
     func emit(_ event: PTPEvent) { eventContinuation.yield(event) }
 
@@ -138,6 +144,10 @@ final class FakeCamera: PTPTransport, @unchecked Sendable {
                 if params.first == UInt32(SonyProp.movieRecButton), outData == Data([0x01, 0x00]),
                    let i = props.firstIndex(where: { $0.code == SonyProp.movieRecordingState }) {
                     props[i].current = props[i].current == 0 ? 1 : 0
+                }
+                if let busy = _busyOnNextRelease, params.first == UInt32(busy), outData == Data([0x01, 0x00]) {
+                    _busyOnNextRelease = nil
+                    return PTPReply(code: PTPResponseCode.deviceBusy)
                 }
                 // отпускание спуска — снимок готов в памяти камеры
                 if params.first == UInt32(SonyProp.shutterFullPress), outData == Data([0x01, 0x00]), !_capturedFiles.isEmpty {

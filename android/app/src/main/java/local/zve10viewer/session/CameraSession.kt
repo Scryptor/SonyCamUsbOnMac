@@ -33,6 +33,12 @@ sealed class SessionException(message: String) : Exception(message) {
     class NoExtendedInfo : SessionException("камера не отдала список команд Sony")
     class OperationFailed(val operation: Int, val code: Int) :
         SessionException("операция 0x%04X: ответ 0x%04X".format(operation, code))
+    /**
+     * Камера отклонила нажатие (release = false) или отпускание кнопки записи; recording — идёт ли запись после
+     * ожидания: камера бывает занята, а запись всё же начинает.
+     */
+    class RecordButtonRefused(val release: Boolean, val code: Int, val recording: Boolean) :
+        SessionException("кнопка записи: «%s» — ответ 0x%04X".format(if (release) "отпустить" else "нажать", code))
     class NotReady : SessionException("камера ещё не готова")
     class NotWritable(val code: Int) : SessionException("свойство 0x%04X сейчас не меняется".format(code))
     class ValueNotAllowed(val code: Int, val value: Long) : SessionException("значение $value не допускается")
@@ -171,13 +177,22 @@ class CameraSession(private val transport: PtpTransport, private val timing: Ses
         return if (actual == value) SetResult.Confirmed else SetResult.NotApplied(actual)
     }
 
-    /** Нажимает и отпускает кнопку записи; возвращает, идёт ли запись после этого. */
+    /**
+     * Нажимает и отпускает кнопку записи; возвращает, идёт ли запись после этого. Отклонила камера нажатие или
+     * отпускание — RecordButtonRefused с кодом и тем, идёт ли запись после ожидания.
+     */
     suspend fun toggleRecording(): Boolean {
         if (!isReady) throw SessionException.NotReady()
         val before = _properties.value[SonyProp.MOVIE_RECORDING_STATE]?.current?.intValue
         val button = listOf(SonyProp.MOVIE_REC_BUTTON.toLong())
-        call(SonyOp.CONTROL_DEVICE, button, PRESS)
-        call(SonyOp.CONTROL_DEVICE, button, RELEASE)
+        for ((value, release) in listOf(PRESS to false, RELEASE to true)) {
+            val reply = raw(SonyOp.CONTROL_DEVICE, button, value)
+            // камера отклонила (бывает «занята» 0x2019), а запись при этом может и пойти — ждём, потом ошибка
+            if (!reply.isOK) {
+                val after = waitFor(SonyProp.MOVIE_RECORDING_STATE) { it != before }
+                throw SessionException.RecordButtonRefused(release, reply.code, recording = after == 1L)
+            }
+        }
         val after = waitFor(SonyProp.MOVIE_RECORDING_STATE) { it != before }
         return after == 1L
     }

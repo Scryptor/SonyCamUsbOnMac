@@ -78,13 +78,20 @@ public actor CameraSession {
         return actual == value ? .confirmed : .notApplied(actual: actual)
     }
 
-    /// Нажимает и отпускает кнопку записи; возвращает, идёт ли запись после этого.
+    /// Нажимает и отпускает кнопку записи; возвращает, идёт ли запись после этого. Отклонила камера нажатие или
+    /// отпускание (бывает «занята» 0x2019) — всё равно ждём, сменится ли состояние: запись при этом может и пойти;
+    /// потом — ошибка с кодом и тем, что вышло.
     public func toggleRecording() async throws -> Bool {
         guard isReady else { throw SessionError.notReady }
         let before = properties[SonyProp.movieRecordingState]?.current.intValue
         let button = [UInt32(SonyProp.movieRecButton)]
-        try await call(SonyOp.controlDevice, button, outData: PTPValue.encode(2, type: PTPType.uint16))
-        try await call(SonyOp.controlDevice, button, outData: PTPValue.encode(1, type: PTPType.uint16))
+        for (value, release) in [(Int64(2), false), (1, true)] {
+            let reply = try await rawSend(SonyOp.controlDevice, button, outData: PTPValue.encode(value, type: PTPType.uint16))
+            guard reply.isOK else {
+                let after = try await waitFor(SonyProp.movieRecordingState) { $0 != before }
+                throw SessionError.recordButtonRefused(release: release, code: reply.code, recording: after == 1)
+            }
+        }
         let after = try await waitFor(SonyProp.movieRecordingState) { $0 != before }
         return after == 1
     }

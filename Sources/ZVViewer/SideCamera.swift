@@ -192,7 +192,14 @@ final class SideCamera: Identifiable {
             if await session.properties[SonyProp.movieRecordingState]?.current.intValue == (on ? 1 : 0) {
                 done = true
             } else {
-                done = (try? await session.toggleRecording()) == on
+                do {
+                    done = try await session.toggleRecording() == on
+                } catch let SessionError.recordButtonRefused(_, _, recording) {
+                    // камера отклонила нажатие, а запись всё же сменилась — дело сделано
+                    done = recording == on
+                } catch {
+                    done = false
+                }
             }
         }
         await recordGate.release()

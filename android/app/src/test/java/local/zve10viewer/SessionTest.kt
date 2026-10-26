@@ -34,6 +34,7 @@ import local.zve10viewer.sony.SonyOp
 import local.zve10viewer.sony.SonyProp
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -228,6 +229,36 @@ class SessionTest {
         session.close()
     }
 
+    @Test fun refusedRecordPressReportsCodeAndState() = runTest {
+        // камера ответила «занята» и ничего не сделала: ошибка — с кодом и состоянием после ожидания
+        val camera = FakeCamera().apply { busyOnNextPress = SonyProp.MOVIE_REC_BUTTON }
+        val session = ready(camera, this)
+        try {
+            session.toggleRecording()
+            fail("ожидали отказ кнопки записи")
+        } catch (e: SessionException.RecordButtonRefused) {
+            assertFalse(e.release)
+            assertEquals(PtpResponseCode.DEVICE_BUSY, e.code)
+            assertFalse(e.recording)
+        }
+        assertEquals(1, camera.sent.count { it.first == SonyOp.CONTROL_DEVICE })
+        session.close()
+    }
+
+    @Test fun refusedRecordReleaseStillSeesRecording() = runTest {
+        // «отпустить» отклонено, а запись пошла — ошибка говорит, что камера пишет
+        val camera = FakeCamera().apply { busyOnNextRelease = SonyProp.MOVIE_REC_BUTTON }
+        val session = ready(camera, this)
+        try {
+            session.toggleRecording()
+            fail("ожидали отказ кнопки записи")
+        } catch (e: SessionException.RecordButtonRefused) {
+            assertTrue(e.release)
+            assertTrue(e.recording)
+        }
+        session.close()
+    }
+
     @Test fun coalescerWritesFirstAndLastOnly() = runTest {
         val written = mutableListOf<Long>()
         val gate = CompletableDeferred<Unit>()
@@ -334,6 +365,8 @@ class FakeCamera : PtpTransport {
     var applyWrites = true
     val ignored = mutableSetOf<Int>()
     var busyOnNextPress: Int? = null
+    /** Следующее отпускание этой кнопки камера отклонит с DeviceBusy, но само действие выполнит. */
+    var busyOnNextRelease: Int? = null
     var capturedFiles: List<Pair<String, ByteArray>> = emptyList()
     private var memory = ArrayDeque<Pair<String, ByteArray>>()
     override val events: Flow<PtpEvent> = emptyFlow()
@@ -371,6 +404,10 @@ class FakeCamera : PtpTransport {
                 }
                 if (!press && button == SonyProp.MOVIE_REC_BUTTON) {
                     prop(SonyProp.MOVIE_RECORDING_STATE)!!.let { it.current = 1 - it.current }
+                }
+                if (!press && busyOnNextRelease == button) {
+                    busyOnNextRelease = null
+                    return PtpReply(PtpResponseCode.DEVICE_BUSY)
                 }
                 if (!press && button == SonyProp.SHUTTER_FULL_PRESS && capturedFiles.isNotEmpty()) {
                     // как у камеры: новые файлы встают в очередь за теми, что ещё не забрали

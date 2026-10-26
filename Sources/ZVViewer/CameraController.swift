@@ -96,6 +96,8 @@ final class CameraController {
     @ObservationIgnored var viewZoomFactor = 1.0
     /// Вызов кнопки записи ещё не вернулся.
     @ObservationIgnored private var recordCallInFlight = false
+    /// Код, которым камера отклонила последнее нажатие записи, если запись так и не сменилась, — для сообщения.
+    @ObservationIgnored private var recordingRefusal: UInt16?
     /// Есть ли кадр: меняется, только когда кадры появились или пропали (меню «Вид» не перестраивается 25 раз в секунду).
     private(set) var hasFrame = false
     /// Опрос доли загрузки снимка, 10 раз в секунду.
@@ -492,35 +494,54 @@ final class CameraController {
         }
         guard recordingToggle.press(recording: isRecording, at: Date()) else { return }
         recordCallInFlight = true
+        recordingRefusal = nil
         emit(.accepted(.record))
         // связанные — к тому же состоянию, что будет на главной, и сразу, а не после неё
         let target = !isRecording
+        note("запись: нажатие — \(target ? "запуск" : "остановка")")
         for side in linkedSides {
             Task { [weak self] in
                 if await !side.setRecording(target) { self?.groupFailed(side, "запись") }
             }
         }
         Task { [weak self] in
-            let recording = try? await session.toggleRecording()
+            let pressed = Date()
+            var recording: Bool?
+            var refusal: UInt16?
+            let report: String
+            do {
+                let result = try await session.toggleRecording()
+                recording = result
+                report = "камера приняла нажатие, \(result ? "пишет" : "не пишет")"
+            } catch let SessionError.recordButtonRefused(release, code, after) {
+                // отклонила, а запись всё же сменилась — это и есть исход; не сменилась — отказ с её кодом
+                if after == target { recording = after } else { refusal = code }
+                report = String(format: "камера ответила 0x%04X на «%@», %@", code, release ? "отпустить" : "нажать",
+                                after ? "пишет" : "не пишет")
+            } catch {
+                report = "нажатие не прошло: \(error)"
+            }
             guard let self else { return }
+            self.note("запись: \(report) (\(Int(Date().timeIntervalSince(pressed) * 1000)) мс)")
             self.recordCallInFlight = false
             if let recording { self.isRecording = recording }
-            self.finishRecordingRequest(self.recordingToggle.completed(recording: recording))
+            self.recordingRefusal = refusal
+            self.finishRecordingRequest(self.recordingToggle.completed(recording: recording, at: Date()))
         }
     }
 
-    /// Камера подтвердила запуск или остановку записи — или не подтвердила за 6 с.
+    /// Камера подтвердила запуск или остановку записи — или не подтвердила за 6 с, или запись кончилась сама.
     private func finishRecordingRequest(_ outcome: RecordingToggle.Outcome?) {
+        guard let outcome else { return }
         switch outcome {
         case .started: emit(.recordingStarted)
         case .stopped: emit(.recordingStopped)
-        case .failed(.starting):
-            emit(.failed(.record))
-            showStatus("Камера не начала запись")
-        case .failed(.stopping):
-            emit(.failed(.record))
-            showStatus("Камера не остановила запись")
-        case nil: break
+        case .failed, .aborted: emit(.failed(.record))
+        case .stoppedByCamera: break
+        }
+        if let message = RecordingToggle.message(outcome, refusal: recordingRefusal) {
+            showStatus(message)
+            note("запись: \(message)")
         }
     }
 
@@ -1955,10 +1976,11 @@ final class CameraController {
         properties = snapshot
         followPresetMode()
         let recording = snapshot[SonyProp.movieRecordingState]?.current.intValue == 1
+        if recording != (recordingStartedAt != nil) { note(recording ? "запись: камера пишет" : "запись: камера не пишет") }
         if recording, recordingStartedAt == nil { recordingStartedAt = Date() }
         if !recording { recordingStartedAt = nil }
         isRecording = recording
-        finishRecordingRequest(recordingToggle.observe(recording: recording))
+        finishRecordingRequest(recordingToggle.observe(recording: recording, at: Date()))
         for (code, target) in targets where snapshot[code]?.current.intValue == target {
             clearTarget(code)
         }

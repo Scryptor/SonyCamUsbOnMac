@@ -54,6 +54,31 @@ private func wb(_ current: Int64 = 2) -> FakeCamera.Prop {
     #expect(presses.map(\.outData) == [Data([0x02, 0x00]), Data([0x01, 0x00])])
 }
 
+private func recordingState() -> FakeCamera.Prop {
+    .init(code: SonyProp.movieRecordingState, type: PTPType.uint8, getSet: 0, enabled: 2, current: 0, values: [0, 1, 2])
+}
+
+@Test func toggleRecordingRefusedPressReportsCodeAndState() async throws {
+    // камера ответила «занята» и ничего не сделала: ошибка — с кодом и состоянием после ожидания
+    let cam = FakeCamera(props: [recordingState()])
+    cam.busyOnNextPress = SonyProp.movieRecButton
+    let s = try await readySession(cam)
+    await #expect(throws: SessionError.recordButtonRefused(release: false, code: 0x2019, recording: false)) {
+        try await s.toggleRecording()
+    }
+    #expect(cam.sent.filter { $0.op == 0x9207 }.count == 1)
+}
+
+@Test func toggleRecordingRefusedReleaseStillSeesRecording() async throws {
+    // «отпустить» отклонено, а запись пошла — ошибка говорит, что камера пишет
+    let cam = FakeCamera(props: [recordingState()])
+    cam.busyOnNextRelease = SonyProp.movieRecButton
+    let s = try await readySession(cam)
+    await #expect(throws: SessionError.recordButtonRefused(release: true, code: 0x2019, recording: true)) {
+        try await s.toggleRecording()
+    }
+}
+
 @Test func liveViewRetriesUntilFrame() async throws {
     let cam = FakeCamera(props: [])
     cam.liveViewReplies = [PTPReply(code: 0x200F), PTPReply(code: 0x2009),
