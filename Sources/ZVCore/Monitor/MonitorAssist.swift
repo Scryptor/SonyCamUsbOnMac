@@ -51,6 +51,20 @@ public struct MonitorAssist: Codable, Equatable, Sendable {
         }
     }
 
+    /// Наложение кадра: эталонный кадр поверх живого с этой непрозрачностью — повторить композицию.
+    public enum Overlay: String, Codable, CaseIterable, Sendable {
+        case off, p25 = "25", p50 = "50", p75 = "75"
+
+        public var opacity: Double? {
+            switch self {
+            case .off: return nil
+            case .p25: return 0.25
+            case .p50: return 0.5
+            case .p75: return 0.75
+            }
+        }
+    }
+
     public var zebra = Zebra.off
     public var falseColor = false
     public var peaking = Peaking.off
@@ -59,6 +73,7 @@ public struct MonitorAssist: Codable, Equatable, Sendable {
     public var center = false
     public var frameMarker = FrameMarker.off
     public var safeZone = SafeZone.off
+    public var overlay = Overlay.off
     /// Последнее включённое значение каждого инструмента — к нему возвращает повторное касание выбранной плитки.
     public var lastOn: [String: String] = [:]
 
@@ -73,7 +88,7 @@ public struct MonitorAssist: Codable, Equatable, Sendable {
     public var hasMarkers: Bool { grid != .off || center || frameMarker != .off || safeZone != .off }
 
     /// Включено хоть что-то.
-    public var isActive: Bool { needsRaster || hasMarkers }
+    public var isActive: Bool { needsRaster || hasMarkers || overlay != .off }
 
     public init(from decoder: Decoder) throws {
         // новые инструменты в старых настройках — выключены
@@ -86,6 +101,7 @@ public struct MonitorAssist: Codable, Equatable, Sendable {
         center = (try? c.decode(Bool.self, forKey: .center)) ?? false
         frameMarker = (try? c.decode(FrameMarker.self, forKey: .frameMarker)) ?? .off
         safeZone = (try? c.decode(SafeZone.self, forKey: .safeZone)) ?? .off
+        overlay = (try? c.decode(Overlay.self, forKey: .overlay)) ?? .off
         lastOn = (try? c.decode([String: String].self, forKey: .lastOn)) ?? [:]
     }
 
@@ -100,6 +116,7 @@ public struct MonitorAssist: Codable, Equatable, Sendable {
         case .center: return center ? "on" : "off"
         case .frameMarker: return frameMarker.rawValue
         case .safeZone: return safeZone.rawValue
+        case .overlay: return overlay.rawValue
         }
     }
 
@@ -115,6 +132,7 @@ public struct MonitorAssist: Codable, Equatable, Sendable {
         case .center: guard let v = Self.flag(value) else { return false }; center = v
         case .frameMarker: guard let v = FrameMarker(rawValue: value) else { return false }; frameMarker = v
         case .safeZone: guard let v = SafeZone(rawValue: value) else { return false }; safeZone = v
+        case .overlay: guard let v = Overlay(rawValue: value) else { return false }; overlay = v
         }
         if value != "off" { lastOn[tool.rawValue] = value }
         return true
@@ -143,6 +161,11 @@ public struct MonitorAssist: Codable, Equatable, Sendable {
         }
     }
 
+    /// Горит ли плитка инструмента: включён. Цвет пикинга «выкл» не бывает — он горит вместе с пикингом.
+    public func isOn(_ tool: MonitorTool) -> Bool {
+        tool == .peakingColor ? peaking != .off : value(tool) != "off"
+    }
+
     /// Подпись значения на плитке: «95 %», «Выкл», «Красный».
     public func label(_ tool: MonitorTool) -> String {
         let v = value(tool)
@@ -160,7 +183,7 @@ public struct MonitorAssist: Codable, Equatable, Sendable {
 
 /// Плитки меню «Монитор» — по порядку на экране.
 public enum MonitorTool: String, CaseIterable, Sendable {
-    case zebra, falseColor, peaking, peakingColor, grid, center, frameMarker, safeZone
+    case zebra, falseColor, peaking, peakingColor, grid, center, frameMarker, safeZone, overlay
 
     public var title: String {
         switch self {
@@ -172,6 +195,7 @@ public enum MonitorTool: String, CaseIterable, Sendable {
         case .center: return "Центр"
         case .frameMarker: return "Рамка"
         case .safeZone: return "Безоп. зона"
+        case .overlay: return "Наложение"
         }
     }
 
@@ -191,6 +215,7 @@ public enum MonitorTool: String, CaseIterable, Sendable {
         case .frameMarker:
             return [o("off", "Выкл"), o("9:16", "9:16"), o("4:5", "4:5"), o("1:1", "1:1"), o("4:3", "4:3"), o("2.39:1", "2.39:1")]
         case .safeZone: return [o("off", "Выкл"), o("90", "90 %"), o("80", "80 %")]
+        case .overlay: return [o("off", "Выкл"), o("25", "25 %"), o("50", "50 %"), o("75", "75 %")]
         }
     }
 
@@ -208,6 +233,9 @@ public enum MonitorTool: String, CaseIterable, Sendable {
         case .center: return "Крестик в центре кадра."
         case .frameMarker: return "Рамка другого формата: что войдёт в вертикальное видео (9:16), пост (4:5, 1:1) или кино (2.39:1)."
         case .safeZone: return "Безопасная зона: 90 % или 80 % кадра (или рамки) — внутри неё надписи не обрежутся."
+        case .overlay:
+            return "Эталонный кадр полупрозрачно поверх живого — повторить композицию. Эталон — текущий кадр («Новый кадр») "
+                + "или снимок из галереи («Наложить на кадр»)."
         }
     }
 }

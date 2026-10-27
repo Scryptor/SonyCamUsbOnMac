@@ -136,4 +136,9 @@ import Testing
     #expect(try decode(#"{"action":"toggleAssist","name":"falseColor"}"#) == .toggleAssist("falseColor"))
     #expect(try decode(#"{"action":"assistOff"}"#) == .assistOff)
     #expect(throws: (any Error).self) { try decode(#"{"action":"setAssist","name":"zebra"}"#) }
+    #expect(try decode(#"{"action":"toggleWaveform"}"#) == .toggleWaveform)
+    #expect(try decode(#"{"action":"waveformMode","mode":"parade"}"#) == .waveformMode("parade"))
+    #expect(try decode(#"{"action":"moveWaveform","x":1,"y":0}"#) == .moveWaveform(x: 1, y: 0))
+    #expect(try decode(#"{"action":"referenceFromFrame"}"#) == .referenceFromFrame)
+    #expect(try decode(#"{"action":"referenceFromShot","index":1}"#) == .referenceFromShot(1))
 }

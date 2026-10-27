@@ -29,6 +29,10 @@ final class CameraController {
     private(set) var assistOverlay: AssistOverlay?
     /// Что считать для помощи в кадре: инструменты и видимая часть кадра. Читается из потока кадров.
     @ObservationIgnored let assistInput = AssistInput()
+    /// Волновая форма последнего кадра; nil — выключена.
+    private(set) var waveform: WaveformTrace?
+    /// Эталонный кадр для наложения: текущий кадр или снимок из галереи. Хранится в файле — переживает перезапуск.
+    private(set) var reference: ReferenceFrame?
     private(set) var fps: Double = 0
     /// fps для строки состояния: обновляется дважды в секунду, а не с каждым кадром.
     private(set) var shownFPS = 0
@@ -1990,10 +1994,10 @@ final class CameraController {
             for await sample in frames {
                 guard let image = Self.decode(sample.jpeg) else { continue }
                 let levels = Self.histogramLevels(of: image)
-                // помощь в кадре — по тому же кадру и вместе с ним: подсветка не отстаёт от картинки
-                let overlay = AssistOverlay.render(image, levels: levels, input: assistInput.current)
+                // помощь в кадре и волновая форма — по тому же кадру и вместе с ним: подсветка не отстаёт от картинки
+                let tools = FrameTools.analyze(image, levels: levels, input: assistInput.current)
                 guard !Task.isCancelled else { break }
-                await self?.show(image, sample: sample, levels: levels, overlay: overlay)
+                await self?.show(image, sample: sample, levels: levels, tools: tools)
             }
         })
     }
@@ -2013,9 +2017,10 @@ final class CameraController {
         }
     }
 
-    private func show(_ image: CGImage, sample: LiveViewSample, levels: [Int], overlay: AssistOverlay?) {
+    private func show(_ image: CGImage, sample: LiveViewSample, levels: [Int], tools: FrameTools.Result) {
         frame = image
-        assistOverlay = overlay
+        assistOverlay = tools.overlay
+        waveform = tools.waveform
         if !hasFrame { hasFrame = true }
         lastJPEG = sample.jpeg
         let now = Date()
@@ -2187,6 +2192,7 @@ final class CameraController {
         histogram = []
         histogramStats = nil
         assistOverlay = nil
+        waveform = nil
         fps = 0
         shownFPS = 0
         frameGapMs = 0
@@ -2269,10 +2275,55 @@ final class CameraController {
         assistOverlay = nil
     }
 
+    /// Волновую форму выключили — и её тоже.
+    func clearWaveform() {
+        waveform = nil
+    }
+
+    /// Эталон для наложения есть или будет: в памяти, иначе из файла прошлого раза, иначе — текущий кадр.
+    func ensureReference() {
+        guard reference == nil else { return }
+        if let saved = ReferenceFrame.load() {
+            reference = saved
+        } else {
+            takeReferenceFromFrame()
+        }
+    }
+
+    /// Эталон — текущий кадр превью.
+    @discardableResult
+    func takeReferenceFromFrame() -> Bool {
+        guard let jpeg = lastJPEG, let image = Self.decode(jpeg) else { return false }
+        let source = "кадр \(Self.clock.string(from: Date()))"
+        reference = ReferenceFrame(image: image, source: source)
+        ReferenceFrame.save(jpeg: jpeg, source: source)
+        showStatus("Эталон для наложения — текущий кадр")
+        return true
+    }
+
+    /// Эталон — снимок из галереи: JPEG (у RAW+JPEG — он), уменьшенный до 2048 точек по длинной стороне.
+    func takeReference(from shot: Shot) {
+        let urls = shot.urls
+        Task { [weak self] in
+            guard let made = await ReferenceFrame.make(from: urls) else {
+                self?.showStatus("Этот снимок не открылся как эталон")
+                return
+            }
+            self?.reference = made
+            self?.showStatus("Эталон для наложения — \(made.source)")
+        }
+    }
+
+    private static let clock: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        return f
+    }()
+
     /// Последний кадр с камеры, байт.
     var lastFrameBytes: Int? { recentFrames.last?.bytes }
 
-    nonisolated private static func decode(_ jpeg: Data) -> CGImage? {
+    nonisolated static func decode(_ jpeg: Data) -> CGImage? {
         guard let source = CGImageSourceCreateWithData(jpeg as CFData, nil) else { return nil }
         return CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary)
     }

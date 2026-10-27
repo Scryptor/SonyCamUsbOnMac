@@ -47,6 +47,12 @@ struct LiveScreen: View {
         .onChange(of: screen.assist, initial: true) { _, assist in
             controller.assistInput.setAssist(assist)
             if !assist.needsRaster { controller.clearAssistOverlay() }
+            // наложение включили — эталон нужен: прошлый из файла или текущий кадр
+            if assist.overlay != .off { controller.ensureReference() }
+        }
+        .onChange(of: screen.waveformOn ? screen.waveformMode : nil, initial: true) { _, mode in
+            controller.assistInput.setWaveform(mode)
+            if mode == nil { controller.clearWaveform() }
         }
         .task {
             while !Task.isCancelled {
@@ -145,6 +151,9 @@ struct LiveScreen: View {
             if screen.histogramOn, !controller.histogram.isEmpty, controller.review == nil, screen.galleryShot == nil {
                 FloatingHistogram(controller: controller, screen: screen, view: size)
             }
+            if screen.waveformOn, let trace = controller.waveform, controller.review == nil, screen.galleryShot == nil {
+                FloatingWaveform(controller: controller, screen: screen, trace: trace, view: size)
+            }
             if showControls {
                 controls.transition(.opacity)
             } else if screen.statusBarPinned {
@@ -229,7 +238,9 @@ struct LiveScreen: View {
         if let frame = controller.frame {
             let frameSize = CGSize(width: frame.width, height: frame.height)
             ZoomableVideo(screen: screen, frame: frame, size: size, dimmed: controller.linkIndicator.dimsPicture,
-                          overlay: screen.assist.needsRaster ? controller.assistOverlay : nil, assistInput: controller.assistInput)
+                          overlay: screen.assist.needsRaster ? controller.assistOverlay : nil, assistInput: controller.assistInput,
+                          reference: screen.assist.overlay.opacity.flatMap { _ in controller.reference?.image },
+                          referenceOpacity: screen.assist.overlay.opacity ?? 0)
                 .onAppear { zoomScroll.viewSize = size }
                 .onChange(of: size) { _, size in zoomScroll.viewSize = size }
             if screen.assist.hasMarkers {
@@ -283,7 +294,7 @@ struct LiveScreen: View {
                     if screen.fnOpen {
                         FnMenu(controller: controller, screen: screen)
                     } else if screen.assistOpen {
-                        AssistMenu(screen: screen)
+                        AssistMenu(controller: controller, screen: screen)
                     } else if !screen.allSettingsOpen {
                         InfoLine(controller: controller) { screen.openFn($0) }
                     }

@@ -350,6 +350,18 @@ final class AutomationServer {
             screen.toggleAssist(tool)
         case .assistOff:
             screen.turnOffAssist()
+        case .toggleWaveform:
+            screen.toggleWaveform()
+        case let .waveformMode(name):
+            guard let mode = Waveform.Mode(rawValue: name) else { return "mode: luma | parade" }
+            screen.setWaveformMode(mode)
+        case let .moveWaveform(x, y):
+            screen.placeWaveform(FloatingPlacement(x: min(max(x, 0), 1), y: min(max(y, 0), 1)))
+        case .referenceFromFrame:
+            guard controller.takeReferenceFromFrame() else { return "no frame" }
+        case let .referenceFromShot(index):
+            guard controller.shots.indices.contains(index) else { return "no shot \(index)" }
+            controller.takeReference(from: controller.shots[index])
         }
         return nil
     }
@@ -478,6 +490,11 @@ final class AutomationServer {
             "selected": screen.assistSelected.rawValue,
             "values": Dictionary(uniqueKeysWithValues: MonitorTool.allCases.map { ($0.rawValue, screen.assist.value($0)) }),
         ] as [String: Any]
+        ui["waveform"] = [
+            "on": screen.waveformOn,
+            "mode": screen.waveformMode.rawValue,
+            "position": screen.waveformPlacement.map { ["x": $0.x, "y": $0.y] } ?? NSNull(),
+        ] as [String: Any]
         ui["presetsWindow"] = screen.presetsWindowOpen ? ["selected": screen.presetsSelected ?? NSNull()] as [String: Any] : NSNull()
         var result: [String: Any] = [
             "phase": controller.phase.rawValue,
@@ -489,6 +506,13 @@ final class AutomationServer {
             "shootingMode": controller.shootingMode.rawValue,
             "slowMotion": controller.slowMotion.map { ["captureFps": $0.capture ?? NSNull(), "recordFps": $0.record ?? NSNull()] as [String: Any] } ?? NSNull(),
             "histogramBins": controller.histogram.count,
+            "waveform": controller.waveform.map { trace -> [String: Any] in
+                let range = trace.counts.levelRange
+                return ["mode": trace.counts.mode.rawValue, "columns": trace.counts.columns, "white": trace.white,
+                        "low": range?.low ?? NSNull(), "high": range?.high ?? NSNull()]
+            } ?? NSNull(),
+            "reference": controller.reference.map { ["source": $0.source, "width": $0.image.width, "height": $0.image.height] as [String: Any] }
+                ?? NSNull(),
             "assistOverlay": controller.assistOverlay.map { overlay -> [String: Any] in
                 ["width": overlay.image.width, "height": overlay.image.height,
                  "region": ["x": overlay.region.minX, "y": overlay.region.minY, "width": overlay.region.width,

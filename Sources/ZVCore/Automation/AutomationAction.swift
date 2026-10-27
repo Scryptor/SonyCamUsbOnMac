@@ -86,6 +86,13 @@ public enum AutomationAction: Equatable, Sendable, Decodable {
     case setAssist(String, String)
     case toggleAssist(String)
     case assistOff
+    /// Волновая форма: включить или выключить, какая («luma» — яркость, «parade» — RGB), куда поставить (доли свободного места).
+    case toggleWaveform
+    case waveformMode(String)
+    case moveWaveform(x: Double, y: Double)
+    /// Эталон для наложения: текущий кадр или снимок сеанса (номер в `shots`).
+    case referenceFromFrame
+    case referenceFromShot(Int)
 
     private enum Keys: String, CodingKey {
         case action, key, setting, offset, value, group, name, index, confirm, mode, x, y, factor, included, from, to, id, linked, onto
@@ -168,6 +175,11 @@ public enum AutomationAction: Equatable, Sendable, Decodable {
             self = .setAssist(try c.decode(String.self, forKey: .name), value)
         case "toggleAssist": self = .toggleAssist(try c.decode(String.self, forKey: .name))
         case "assistOff": self = .assistOff
+        case "toggleWaveform": self = .toggleWaveform
+        case "waveformMode": self = .waveformMode(try c.decode(String.self, forKey: .mode))
+        case "moveWaveform": self = .moveWaveform(x: try c.decode(Double.self, forKey: .x), y: try c.decode(Double.self, forKey: .y))
+        case "referenceFromFrame": self = .referenceFromFrame
+        case "referenceFromShot": self = .referenceFromShot(try c.decodeIfPresent(Int.self, forKey: .index) ?? 0)
         default:
             throw DecodingError.dataCorruptedError(forKey: .action, in: c, debugDescription: "неизвестная команда \(action)")
         }

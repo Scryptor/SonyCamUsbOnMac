@@ -1,7 +1,7 @@
 import SwiftUI
 import ZVCore
 
-/// Слева сверху: кнопки гистограммы, монитора и строки состояния, пресеты (кнопка со списком), «☆+» — сохранить настройки
+/// Слева сверху: кнопки гистограммы, волновой формы, монитора и строки состояния, пресеты (кнопка со списком), «☆+» — сохранить настройки
 /// (текущий пресет изменён — в него или новым), и настройки; справа от них — сообщение программы.
 struct TopBar: View {
     let controller: CameraController
@@ -28,6 +28,16 @@ struct TopBar: View {
                 .buttonStyle(.plain)
                 .help("Гистограмма")
                 .accessibilityLabel("Гистограмма")
+
+                Button(action: screen.toggleWaveform) {
+                    TopBarIconView(icon: .waveform)
+                        .frame(width: 30, height: 26)
+                        .background(screen.waveformOn ? Color.accentColor : Color.white.opacity(0.08),
+                                    in: RoundedRectangle(cornerRadius: 7))
+                }
+                .buttonStyle(.plain)
+                .help("Волновая форма: яркость или RGB-парад")
+                .accessibilityLabel("Волновая форма")
 
                 // зебра, false color, пикинг и маркеры — меню внизу, на месте строки значений
                 Button(action: screen.toggleAssistMenu) {
@@ -218,13 +228,16 @@ struct SettingsButton: View {
     }
 }
 
-/// Гистограмма поверх кадра, которую можно утащить мышью куда угодно. Видна, пока включена, — и когда остальные
-/// элементы скрыты, и при открытом меню Fn: там она нужнее всего. Место запоминается долями свободного места
-/// (переживает смену размера окна); у края прилипает к отступу.
-struct FloatingHistogram: View {
-    let controller: CameraController
-    let screen: ScreenState
+/// Панель поверх кадра, которую можно утащить мышью куда угодно: гистограмма, волновая форма. Видна, пока включена, — и
+/// когда остальные элементы скрыты, и при открытом меню Fn: там она нужнее всего. Место запоминается долями свободного
+/// места (переживает смену размера окна); у края прилипает к отступу.
+struct FloatingPanel<Content: View>: View {
     let view: CGSize
+    let placement: FloatingPlacement?
+    let place: (FloatingPlacement) -> Void
+    /// Где стоит, пока её не перетаскивали, — по размеру панели.
+    let restingDefault: (CGSize) -> CGPoint
+    @ViewBuilder let content: () -> Content
     @State private var panel = CGSize(width: 280, height: 150)
     @State private var dragStart: CGPoint?
     @State private var dragOrigin: CGPoint?
@@ -233,7 +246,7 @@ struct FloatingHistogram: View {
 
     var body: some View {
         let origin = dragOrigin ?? restingOrigin
-        HistogramView(bins: controller.histogram, stats: controller.histogramStats)
+        content()
             .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
                 if size.width > 0, size.height > 0 { panel = size }
             }
@@ -254,7 +267,7 @@ struct FloatingHistogram: View {
                     .onEnded { _ in
                         guard let dropped = dragOrigin else { return }
                         withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                            screen.placeHistogram(FloatingPlacement.dropped(at: dropped, panel: panel, view: view))
+                            place(FloatingPlacement.dropped(at: dropped, panel: panel, view: view))
                             dragOrigin = nil
                         }
                         dragStart = nil
@@ -277,9 +290,99 @@ struct FloatingHistogram: View {
             .position(x: origin.x + panel.width / 2, y: origin.y + panel.height / 2)
     }
 
-    /// По умолчанию — слева внизу, над лентой снимков и строкой значений.
     private var restingOrigin: CGPoint {
-        if let placement = screen.histogramPlacement { return placement.origin(panel: panel, view: view) }
-        return CGPoint(x: FloatingPlacement.margin, y: max(FloatingPlacement.margin, view.height - panel.height - 134))
+        if let placement { return placement.origin(panel: panel, view: view) }
+        return restingDefault(panel)
+    }
+}
+
+/// Гистограмма поверх кадра; по умолчанию — слева внизу, над лентой снимков и строкой значений.
+struct FloatingHistogram: View {
+    let controller: CameraController
+    let screen: ScreenState
+    let view: CGSize
+
+    var body: some View {
+        FloatingPanel(view: view, placement: screen.histogramPlacement, place: screen.placeHistogram) { (panel: CGSize) -> CGPoint in
+            let margin = CGFloat(FloatingPlacement.margin)
+            return CGPoint(x: margin, y: max(margin, view.height - panel.height - 134))
+        } content: {
+            HistogramView(bins: controller.histogram, stats: controller.histogramStats)
+        }
+    }
+}
+
+/// Волновая форма поверх кадра; по умолчанию — справа внизу, над строкой значений.
+struct FloatingWaveform: View {
+    let controller: CameraController
+    let screen: ScreenState
+    let trace: WaveformTrace
+    let view: CGSize
+
+    var body: some View {
+        FloatingPanel(view: view, placement: screen.waveformPlacement, place: screen.placeWaveform) { (panel: CGSize) -> CGPoint in
+            let margin = CGFloat(FloatingPlacement.margin)
+            return CGPoint(x: max(margin, view.width - panel.width - margin), y: max(margin, view.height - panel.height - 134))
+        } content: {
+            WaveformView(trace: trace, mode: screen.waveformMode, onMode: screen.setWaveformMode)
+        }
+    }
+}
+
+/// Волновая форма: по горизонтали — кадр слева направо, по вертикали — яркость, снизу чёрное. Линии — 0, 50 и 100 %
+/// (белое превью: в видео 234, в фото 255); что выше 100 % — пересвет. Под графиком — переключатель «Яркость / RGB».
+struct WaveformView: View {
+    let trace: WaveformTrace
+    let mode: Waveform.Mode
+    let onMode: (Waveform.Mode) -> Void
+
+    var body: some View {
+        VStack(spacing: 6) {
+            graph.frame(height: 104)
+            HStack(spacing: 4) {
+                Text("Волновая форма").font(.system(size: 10.5)).foregroundStyle(.white.opacity(0.6))
+                Spacer()
+                ForEach(Waveform.Mode.allCases, id: \.self) { item in
+                    Button(item.title) { onMode(item) }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 10.5, weight: item == mode ? .bold : .regular))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2)
+                        .foregroundStyle(item == mode ? Color.black : Color.white)
+                        .background(item == mode ? Color.white : Color.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 5))
+                }
+            }
+        }
+        .frame(width: 264)
+        .padding(8)
+        .background(.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 10))
+        .help("Волновая форма: по горизонтали — кадр слева направо, по вертикали — яркость его точек. Линии — 0, 50 и 100 % "
+            + "белого превью; выше 100 % — пересвет. RGB — красный, зелёный и синий по отдельности.")
+    }
+
+    private var graph: some View {
+        Canvas { context, size in
+            func y(_ level: Double) -> CGFloat { size.height * (1 - CGFloat(level) / 256) }
+            if let image = trace.image {
+                context.draw(Image(decorative: image, scale: 1), in: CGRect(origin: .zero, size: size))
+            }
+            for (fraction, dash) in [(1.0, [CGFloat]()), (0.5, [3, 3]), (0.0, [])] {
+                let level = Double(trace.white) * fraction + 0.5
+                var line = Path()
+                line.move(to: CGPoint(x: 0, y: y(level)))
+                line.addLine(to: CGPoint(x: size.width, y: y(level)))
+                context.stroke(line, with: .color(.white.opacity(fraction == 0.5 ? 0.3 : 0.45)), style: StrokeStyle(lineWidth: 1, dash: dash))
+                context.draw(Text("\(Int(fraction * 100))").font(.system(size: 8)).foregroundColor(.white.opacity(0.55)),
+                             at: CGPoint(x: 2, y: max(5, min(size.height - 5, y(level) - 6))), anchor: .leading)
+            }
+            if mode == .parade {
+                for third in [1.0 / 3, 2.0 / 3] {
+                    var line = Path()
+                    line.move(to: CGPoint(x: size.width * third, y: 0))
+                    line.addLine(to: CGPoint(x: size.width * third, y: size.height))
+                    context.stroke(line, with: .color(.white.opacity(0.3)), style: StrokeStyle(lineWidth: 1))
+                }
+            }
+        }
     }
 }

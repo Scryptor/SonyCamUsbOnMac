@@ -14,6 +14,11 @@ final class AssistInput: Sendable {
         var factor = 1.0
         /// В видео белое в превью — 234, в фото — 255.
         var video = true
+        /// Волновая форма: какая; nil — выключена.
+        var waveform: Waveform.Mode?
+
+        /// Нужны ли точки кадра: для растра или волновой формы.
+        var needsPixels: Bool { assist.needsRaster || waveform != nil }
     }
 
     private let state = OSAllocatedUnfairLock(initialState: State())
@@ -30,6 +35,64 @@ final class AssistInput: Sendable {
     }
 
     func setVideo(_ video: Bool) { state.withLock { $0.video = video } }
+
+    func setWaveform(_ mode: Waveform.Mode?) { state.withLock { $0.waveform = mode } }
+}
+
+/// Что считается по точкам кадра в потоке кадров: растр помощи и волновая форма. Кадр раскладывается в точки один раз.
+enum FrameTools {
+    struct Result {
+        var overlay: AssistOverlay?
+        var waveform: WaveformTrace?
+    }
+
+    nonisolated static func analyze(_ frame: CGImage, levels: [Int], input: AssistInput.State) -> Result {
+        guard input.needsPixels else { return Result() }
+        let width = frame.width, height = frame.height, bytesPerRow = width * 4
+        var rgba = [UInt8](repeating: 0, count: bytesPerRow * height)
+        let drawn = rgba.withUnsafeMutableBytes { buffer -> Bool in
+            guard let context = CGContext(data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                                          bytesPerRow: bytesPerRow, space: CGColorSpaceCreateDeviceRGB(),
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            context.interpolationQuality = .none
+            context.draw(frame, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard drawn else { return Result() }
+        // шкала — как у гистограммы: от чёрного до белого превью
+        let white = LumaStats.whiteLevel(levels: levels, video: input.video)
+        var result = Result()
+        if input.assist.needsRaster {
+            result.overlay = AssistOverlay.render(rgba: rgba, width: width, height: height, white: white, input: input)
+        }
+        if let mode = input.waveform {
+            result.waveform = WaveformTrace(Waveform.counts(rgba: rgba, width: width, height: height, bytesPerRow: bytesPerRow,
+                                                            mode: mode), white: white)
+        }
+        return result
+    }
+
+    static func image(rgba: [UInt8], width: Int, height: Int) -> CGImage? {
+        guard let provider = CGDataProvider(data: Data(rgba) as CFData) else { return nil }
+        return CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4,
+                       space: CGColorSpaceCreateDeviceRGB(),
+                       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                       provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent)
+    }
+}
+
+/// Волновая форма кадра: картинка следа и что по ней видно.
+struct WaveformTrace {
+    let image: CGImage?
+    let counts: Waveform.Counts
+    /// Белый уровень превью: на этой высоте — линия 100 %.
+    let white: Int
+
+    init(_ counts: Waveform.Counts, white: Int) {
+        self.counts = counts
+        self.white = white
+        image = FrameTools.image(rgba: Waveform.image(counts), width: counts.columns, height: Waveform.rows)
+    }
 }
 
 /// Растр зебры, false color и пикинга поверх видимой части кадра.
@@ -41,35 +104,16 @@ struct AssistOverlay {
     let zebraShare: Double
     let peakingShare: Double
 
-    /// Растр по кадру: яркость всего кадра, видимая часть — в размер растра, зебра, false color и пикинг.
-    /// nil — эти инструменты выключены.
-    nonisolated static func render(_ frame: CGImage, levels: [Int], input: AssistInput.State) -> AssistOverlay? {
-        guard input.assist.needsRaster else { return nil }
-        let width = frame.width, height = frame.height, bytesPerRow = width * 4
-        var rgba = [UInt8](repeating: 0, count: bytesPerRow * height)
-        let drawn = rgba.withUnsafeMutableBytes { buffer -> Bool in
-            guard let context = CGContext(data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 8,
-                                          bytesPerRow: bytesPerRow, space: CGColorSpaceCreateDeviceRGB(),
-                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
-            context.interpolationQuality = .none
-            context.draw(frame, in: CGRect(x: 0, y: 0, width: width, height: height))
-            return true
-        }
-        guard drawn else { return nil }
-        let luma = AssistRaster.luma(rgba: rgba, width: width, height: height, bytesPerRow: bytesPerRow)
+    /// Растр по точкам кадра: яркость всего кадра, видимая часть — в размер растра, зебра, false color и пикинг.
+    nonisolated static func render(rgba: [UInt8], width: Int, height: Int, white: Int, input: AssistInput.State) -> AssistOverlay? {
+        let luma = AssistRaster.luma(rgba: rgba, width: width, height: height, bytesPerRow: width * 4)
         let v = input.visible
         let plan = AssistRaster.plan(frameWidth: width, frameHeight: height, visible: (v.minX, v.minY, v.width, v.height),
                                      factor: input.factor)
         let part = AssistRaster.resample(luma, width: width, height: height, plan: plan)
-        // шкала — как у гистограммы: от чёрного до белого превью
-        let white = LumaStats.whiteLevel(levels: levels, video: input.video)
         guard let out = AssistRaster.render(luma: part, width: plan.width, height: plan.height, scale: plan.scale,
                                             white: white, assist: input.assist),
-              let provider = CGDataProvider(data: Data(out.pixels) as CFData),
-              let image = CGImage(width: out.width, height: out.height, bitsPerComponent: 8, bitsPerPixel: 32,
-                                  bytesPerRow: out.width * 4, space: CGColorSpaceCreateDeviceRGB(),
-                                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
-                                  provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent)
+              let image = FrameTools.image(rgba: out.pixels, width: out.width, height: out.height)
         else { return nil }
         let r = plan.region
         return AssistOverlay(image: image,
@@ -159,6 +203,7 @@ struct FalseColorLegend: View {
 /// Меню «Монитор»: лента значений выбранного инструмента и под ней подсказка, ниже — плитки инструментов, как в меню Fn.
 /// Касание плитки выбирает её, касание выбранной — включает или выключает.
 struct AssistMenu: View {
+    let controller: CameraController
     let screen: ScreenState
 
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 6), count: 5)
@@ -179,6 +224,20 @@ struct AssistMenu: View {
                             .background(current ? Color.white : Color.clear, in: RoundedRectangle(cornerRadius: 7))
                     }
                 }
+                if tool == .overlay {
+                    // эталон: откуда он и как взять новый
+                    HStack(spacing: 10) {
+                        Text(controller.reference.map { "Эталон: \($0.source)" } ?? "Эталона пока нет")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        Button("Новый кадр") {
+                            controller.takeReferenceFromFrame()
+                            if screen.assist.overlay == .off { screen.toggleAssist(.overlay) }
+                        }
+                        .disabled(controller.frame == nil)
+                        .help("Эталон — текущий кадр. Снимок из галереи — кнопкой «Наложить на кадр» в галерее")
+                    }
+                }
                 Text(tool.help)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -192,7 +251,7 @@ struct AssistMenu: View {
                 ForEach(MonitorTool.allCases, id: \.self) { tool in
                     Button { screen.tapAssistTile(tool) } label: {
                         AssistTile(title: tool.title, value: screen.assist.label(tool),
-                                   isOn: screen.assist.value(tool) != "off", isSelected: tool == screen.assistSelected)
+                                   isOn: screen.assist.isOn(tool), isSelected: tool == screen.assistSelected)
                     }
                     .buttonStyle(.plain)
                     .help(tool.help)

@@ -57,6 +57,11 @@ final class ScreenState {
     /// Где гистограмма: доли свободного места; nil — на месте по умолчанию, слева внизу над лентой снимков.
     private(set) var histogramPlacement: FloatingPlacement?
 
+    /// Волновая форма: включена ли, какая (яркость или RGB-парад) и где; nil — на месте по умолчанию, справа внизу.
+    private(set) var waveformOn: Bool
+    private(set) var waveformMode: Waveform.Mode
+    private(set) var waveformPlacement: FloatingPlacement?
+
     /// Открытая галерея: какой снимок на экране; nil — закрыта. По id, а не по номеру: новый снимок её не сбивает.
     var galleryShot: UUID?
     /// Снимок в галерее увеличен: стрелки не листают.
@@ -188,6 +193,21 @@ final class ScreenState {
         if let data = try? JSONEncoder().encode(next) { defaults.set(data, forKey: "monitorAssist") }
     }
 
+    func toggleWaveform() {
+        waveformOn.toggle()
+        defaults.set(waveformOn, forKey: "waveformOn")
+    }
+
+    func setWaveformMode(_ mode: Waveform.Mode) {
+        waveformMode = mode
+        defaults.set(mode.rawValue, forKey: "waveformMode")
+    }
+
+    func placeWaveform(_ placement: FloatingPlacement) {
+        waveformPlacement = placement
+        if let data = try? JSONEncoder().encode(placement) { defaults.set(data, forKey: "waveformPlacement") }
+    }
+
     func placeHistogram(_ placement: FloatingPlacement) {
         histogramPlacement = placement
         if let data = try? JSONEncoder().encode(placement) { defaults.set(data, forKey: "histogramPlacement") }
@@ -253,6 +273,9 @@ final class ScreenState {
         statusBarPinned = defaults.object(forKey: "statusBarPinned") as? Bool ?? true
         histogramPlacement = defaults.data(forKey: "histogramPlacement").flatMap { try? JSONDecoder().decode(FloatingPlacement.self, from: $0) }
         assist = defaults.data(forKey: "monitorAssist").flatMap { try? JSONDecoder().decode(MonitorAssist.self, from: $0) } ?? MonitorAssist()
+        waveformOn = defaults.bool(forKey: "waveformOn")
+        waveformMode = defaults.string(forKey: "waveformMode").flatMap(Waveform.Mode.init(rawValue:)) ?? .luma
+        waveformPlacement = defaults.data(forKey: "waveformPlacement").flatMap { try? JSONDecoder().decode(FloatingPlacement.self, from: $0) }
     }
 
     func toggleFn() {

@@ -33,6 +33,10 @@ import Testing
     #expect(assist.label(.zebra) == "Выкл")
     #expect(assist.label(.safeZone) == "80 %")
     #expect(assist.falseColor)
+    // цвет пикинга горит вместе с пикингом
+    #expect(assist.isOn(.peakingColor))
+    #expect(!MonitorAssist().isOn(.peakingColor))
+    #expect(!assist.isOn(.zebra))
 }
 
 @Test func monitorAssistToggleRemembersLastValue() {
@@ -53,8 +57,22 @@ import Testing
     #expect(assist.peakingColor == .red)
 }
 
+@Test func monitorAssistOverlayIsAToolWithOpacity() {
+    var assist = MonitorAssist()
+    assist.set(.overlay, "50")
+    #expect(assist.isActive)
+    #expect(!assist.needsRaster && !assist.hasMarkers)
+    #expect(assist.overlay.opacity == 0.5)
+    #expect(assist.label(.overlay) == "50 %")
+    assist.toggle(.overlay)
+    #expect(assist.overlay == .off)
+    assist.toggle(.overlay)
+    #expect(assist.overlay == .p50)
+}
+
 @Test func monitorAssistTurnsEverythingOffButKeepsMemory() {
     var assist = MonitorAssist()
+    assist.set(.overlay, "75")
     assist.set(.peaking, "low")
     assist.set(.peakingColor, "white")
     assist.set(.grid, "thirds")
@@ -261,4 +279,59 @@ private func step(width: Int, height: Int, edge: Int, left: UInt8, right: UInt8)
     let stepY = (horizontals[1] - horizontals[0]) * frame.height
     #expect(abs(stepX - stepY) < 0.01)
     #expect(verticals.contains(0.5))
+}
+
+// MARK: - Волновая форма
+
+/// Кадр RGBA: слева половина одного цвета, справа — другого.
+private func halves(width: Int, height: Int, left: (UInt8, UInt8, UInt8), right: (UInt8, UInt8, UInt8)) -> [UInt8] {
+    var rgba = [UInt8](repeating: 255, count: width * height * 4)
+    for y in 0..<height {
+        for x in 0..<width {
+            let (r, g, b) = x < width / 2 ? left : right
+            let i = (y * width + x) * 4
+            rgba[i] = r; rgba[i + 1] = g; rgba[i + 2] = b
+        }
+    }
+    return rgba
+}
+
+@Test func waveformPutsEachColumnAtItsBrightness() {
+    let rgba = halves(width: 512, height: 10, left: (0, 0, 0), right: (200, 200, 200))
+    let w = Waveform.counts(rgba: rgba, width: 512, height: 10, bytesPerRow: 512 * 4, mode: .luma)
+    #expect(w.columns == Waveform.lumaColumns)
+    #expect(w.samplesPerColumn == 20)
+    // левая половина — внизу (чёрное), правая — на уровне 200 (строка 100)
+    #expect(w.count(column: 0, row: 0) == 20)
+    #expect(w.count(column: 255, row: 100) == 20)
+    #expect(w.count(column: 255, row: 0) == 0)
+    #expect(w.counts.reduce(0, +) == 5120)
+    #expect(w.levelRange?.low == 0)
+    #expect(w.levelRange?.high == 201)
+}
+
+@Test func waveformParadeSplitsChannels() {
+    let rgba = halves(width: 256, height: 4, left: (255, 0, 0), right: (0, 0, 255))
+    let w = Waveform.counts(rgba: rgba, width: 256, height: 4, bytesPerRow: 256 * 4, mode: .parade)
+    #expect(w.columns == Waveform.paradeColumns * 3)
+    let p = Waveform.paradeColumns
+    // красный: слева сверху, справа внизу; синий — наоборот; зелёный — весь внизу
+    #expect(w.count(column: 0, row: 127) == 8)
+    #expect(w.count(column: p - 1, row: 0) == 8)
+    #expect(w.count(column: 2 * p, row: 0) == 8)
+    #expect(w.count(column: 3 * p - 1, row: 127) == 8)
+    #expect((p..<(2 * p)).allSatisfy { w.count(column: $0, row: 0) == 8 })
+}
+
+@Test func waveformImageIsBrightWhereColumnsAreDense() {
+    let rgba = halves(width: 512, height: 10, left: (0, 0, 0), right: (200, 200, 200))
+    let w = Waveform.counts(rgba: rgba, width: 512, height: 10, bytesPerRow: 512 * 4, mode: .luma)
+    let pixels = Waveform.image(w)
+    #expect(pixels.count == w.columns * Waveform.rows * 4)
+    // строки картинки — сверху вниз: чёрное — в последней строке
+    let bottom = ((Waveform.rows - 1) * w.columns + 0) * 4
+    #expect(pixels[bottom + 3] == 255)
+    #expect(pixels[3] == 0)
+    #expect(Waveform.intensity(0, samplesPerColumn: 100) == 0)
+    #expect(Waveform.intensity(1, samplesPerColumn: 10_000) >= 0.18)
 }

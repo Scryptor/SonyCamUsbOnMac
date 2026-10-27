@@ -15,6 +15,9 @@ struct ZoomableVideo: View {
     var overlay: AssistOverlay?
     /// Куда сообщать, какая часть кадра видна: растр помощи считается по ней.
     var assistInput: AssistInput?
+    /// Эталонный кадр поверх живого — повторить композицию — и с какой непрозрачностью.
+    var reference: CGImage?
+    var referenceOpacity = 0.0
     @State private var pinchBase: ViewZoom?
     @State private var panBase: ViewZoom?
     /// С какой точки начался жест: прерванный жест не доходит до onEnded, и новый узнаётся по другой точке.
@@ -42,6 +45,19 @@ struct ZoomableVideo: View {
                     .resizable()
                     .frame(width: area.width, height: area.height)
                     .position(x: area.midX, y: area.midY)
+            }
+            if let reference, referenceOpacity > 0 {
+                // заполняет кадр, лишнее обрезано по краю кадра
+                let fill = ReferenceFrame.fillRect(image: CGSize(width: reference.width, height: reference.height), in: rect)
+                Image(decorative: reference, scale: 1)
+                    .resizable()
+                    .interpolation(.medium)
+                    .frame(width: fill.width, height: fill.height)
+                    .position(x: fill.midX, y: fill.midY)
+                    .opacity(referenceOpacity)
+                    .mask {
+                        Rectangle().frame(width: rect.width, height: rect.height).position(x: rect.midX, y: rect.midY)
+                    }
             }
             if let overlay {
                 let area = CGRect(x: rect.minX + overlay.region.minX * rect.width, y: rect.minY + overlay.region.minY * rect.height,

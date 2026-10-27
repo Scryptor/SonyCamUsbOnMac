@@ -1,10 +1,10 @@
 import SwiftUI
 
 /// Значки верхней панели — нарисованы сами, одинаково с планшетом: значок повторяет то, что включает. Гистограмма —
-/// столбики с пунктиром на третях, монитор — кадр с полосами зебры, строка состояния — точка, Wi-Fi и батарея,
+/// столбики с пунктиром на третях, волновая форма — след яркости над шкалой, монитор — кадр с полосами зебры, строка состояния — точка, Wi-Fi и батарея,
 /// сохранить пресет — звезда с плюсом, настройки — шестерёнка. Геометрия — в квадрате 52×52, как кнопка планшета, и масштабируется под кнопку.
 enum TopBarIcon {
-    case histogram, monitor, statusBar, savePreset, settings
+    case histogram, waveform, monitor, statusBar, savePreset, settings
 }
 
 struct TopBarIconView: View {
@@ -39,6 +39,22 @@ struct TopBarIconView: View {
                 thirds.addLine(to: CGPoint(x: x, y: 35))
             }
             context.stroke(thirds, with: .color(.white.opacity(0.55)), style: StrokeStyle(lineWidth: 1, dash: [2, 2]))
+        case .waveform:
+            // шкала: низ и линия 100 % пунктиром; между ними — след яркости слева направо
+            var scale = Path()
+            scale.move(to: CGPoint(x: 15, y: 35))
+            scale.addLine(to: CGPoint(x: 37, y: 35))
+            context.stroke(scale, with: .color(.white.opacity(0.55)), style: StrokeStyle(lineWidth: 1))
+            var top = Path()
+            top.move(to: CGPoint(x: 15, y: 17))
+            top.addLine(to: CGPoint(x: 37, y: 17))
+            context.stroke(top, with: .color(.white.opacity(0.55)), style: StrokeStyle(lineWidth: 1, dash: [2, 2]))
+            var trace = Path()
+            trace.move(to: CGPoint(x: 15, y: 30))
+            trace.addCurve(to: CGPoint(x: 24, y: 22), control1: CGPoint(x: 18, y: 31), control2: CGPoint(x: 20, y: 22))
+            trace.addCurve(to: CGPoint(x: 31, y: 27), control1: CGPoint(x: 27, y: 22), control2: CGPoint(x: 28, y: 28))
+            trace.addCurve(to: CGPoint(x: 37, y: 20), control1: CGPoint(x: 34, y: 26), control2: CGPoint(x: 35, y: 20))
+            context.stroke(trace, with: white, style: round(2))
         case .monitor:
             let frame = CGRect(x: 15, y: 18, width: 22, height: 16)
             context.stroke(Path(roundedRect: frame, cornerRadius: 2.5), with: white, style: round(1.8))
