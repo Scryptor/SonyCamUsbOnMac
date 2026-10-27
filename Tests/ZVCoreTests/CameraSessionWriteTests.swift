@@ -44,18 +44,54 @@ private func wb(_ current: Int64 = 2) -> FakeCamera.Prop {
     #expect(!cam.sent.contains { $0.op == 0x9205 && $0.params == [0x5005] })
 }
 
-@Test func toggleRecordingPressesThenReleases() async throws {
-    let cam = FakeCamera(props: [.init(code: SonyProp.movieRecordingState, type: PTPType.uint8,
-                                       getSet: 0, enabled: 2, current: 0, values: [0, 1, 2])])
-    let s = try await readySession(cam)
-    #expect(try await s.toggleRecording())
-    let presses = cam.sent.filter { $0.op == 0x9207 }
-    #expect(presses.map(\.params) == [[0xD2C8], [0xD2C8]])
-    #expect(presses.map(\.outData) == [Data([0x02, 0x00]), Data([0x01, 0x00])])
-}
-
 private func recordingState() -> FakeCamera.Prop {
     .init(code: SonyProp.movieRecordingState, type: PTPType.uint8, getSet: 0, enabled: 2, current: 0, values: [0, 1, 2])
+}
+
+/// Что ушло камере кнопкой записи: 2 — «нажать», 1 — «отпустить».
+private func recordButton(_ cam: FakeCamera) -> [UInt8] {
+    cam.sent.filter { $0.op == 0x9207 && $0.params == [0xD2C8] }.compactMap { $0.outData?.first }
+}
+
+@Test func toggleRecordingStartsWithPressOnly() async throws {
+    // 0xD2C8 — «как удержание кнопки»: «отпустить» сразу за «нажать» камера иногда успевает выполнить — и запись
+    // обрывается через полсекунды после старта
+    let cam = FakeCamera(props: [recordingState()])
+    let s = try await readySession(cam)
+    #expect(try await s.toggleRecording())
+    #expect(recordButton(cam) == [2])
+}
+
+@Test func toggleRecordingStopsOurRecordingWithReleaseOnly() async throws {
+    let cam = FakeCamera(props: [recordingState()])
+    let s = try await readySession(cam)
+    _ = try await s.toggleRecording()
+    let recording = try await s.toggleRecording()
+    #expect(!recording)
+    #expect(recordButton(cam) == [2, 1])
+}
+
+@Test func toggleRecordingStopsCameraStartedRecordingWithPressAndRelease() async throws {
+    // запись начали кнопкой на камере: наша кнопка не нажата — нажать и отпустить, как раньше
+    let cam = FakeCamera(props: [recordingState()])
+    let s = try await readySession(cam)
+    cam.setCurrent(SonyProp.movieRecordingState, 1)
+    try await s.refresh()
+    let recording = try await s.toggleRecording()
+    #expect(!recording)
+    #expect(recordButton(cam) == [2, 1])
+}
+
+@Test func toggleRecordingReleasesBeforeStartingAgain() async throws {
+    // начали мы, а остановила камера сама: кнопка у нас ещё «нажата» — сначала отпустить, потом нажать
+    let cam = FakeCamera(props: [recordingState()])
+    let s = try await readySession(cam)
+    _ = try await s.toggleRecording()
+    cam.setCurrent(SonyProp.movieRecordingState, 0)
+    try await s.refresh()
+    let recording = try await s.toggleRecording()
+    #expect(recording)
+    #expect(recordButton(cam) == [2, 1, 2])
 }
 
 @Test func toggleRecordingRefusedPressReportsCodeAndState() async throws {
@@ -66,17 +102,21 @@ private func recordingState() -> FakeCamera.Prop {
     await #expect(throws: SessionError.recordButtonRefused(release: false, code: 0x2019, recording: false)) {
         try await s.toggleRecording()
     }
-    #expect(cam.sent.filter { $0.op == 0x9207 }.count == 1)
+    #expect(recordButton(cam) == [2])
 }
 
-@Test func toggleRecordingRefusedReleaseStillSeesRecording() async throws {
-    // «отпустить» отклонено, а запись пошла — ошибка говорит, что камера пишет
+@Test func toggleRecordingRefusedReleaseKeepsRecording() async throws {
+    // «отпустить» на остановке отклонено — камера пишет дальше, и следующая остановка снова отпускает
     let cam = FakeCamera(props: [recordingState()])
-    cam.busyOnNextRelease = SonyProp.movieRecButton
     let s = try await readySession(cam)
+    _ = try await s.toggleRecording()
+    cam.busyOnNextRelease = SonyProp.movieRecButton
     await #expect(throws: SessionError.recordButtonRefused(release: true, code: 0x2019, recording: true)) {
         try await s.toggleRecording()
     }
+    let recording = try await s.toggleRecording()
+    #expect(!recording)
+    #expect(recordButton(cam) == [2, 1, 1])
 }
 
 @Test func liveViewRetriesUntilFrame() async throws {

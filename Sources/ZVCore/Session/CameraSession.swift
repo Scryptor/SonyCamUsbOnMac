@@ -17,6 +17,8 @@ public actor CameraSession {
     private var eventTask: Task<Void, Never>?
     private var refreshRunning = false
     private var refreshWanted = false
+    /// Кнопка записи у нас «нажата»: мы начали запись и ещё не отпустили (0xD2C8 — удержание, см. toggleRecording).
+    private var recordButtonHeld = false
 
     public init(transport: PTPTransport, timing: SessionTiming = .standard) {
         self.transport = transport
@@ -78,19 +80,31 @@ public actor CameraSession {
         return actual == value ? .confirmed : .notApplied(actual: actual)
     }
 
-    /// Нажимает и отпускает кнопку записи; возвращает, идёт ли запись после этого. Отклонила камера нажатие или
-    /// отпускание (бывает «занята» 0x2019) — всё равно ждём, сменится ли состояние: запись при этом может и пойти;
-    /// потом — ошибка с кодом и тем, что вышло.
+    /// Кнопка записи; возвращает, идёт ли запись после этого. 0xD2C8 у Sony — «как удержание кнопки»: нажатие
+    /// начинает запись, отпускание останавливает. Поэтому запуск — только «нажать», остановка нашей записи — только
+    /// «отпустить»: «отпустить» сразу за «нажать» камера иногда успевает выполнить, и запись обрывается через
+    /// полсекунды после старта. Запись, начатую кнопкой на камере, останавливаем «нажать и отпустить»; кнопку, оставшуюся
+    /// «нажатой» после записи, которую камера остановила сама, перед новым запуском отпускаем. Отклонила камера шаг
+    /// (бывает «занята» 0x2019) — всё равно ждём, сменится ли состояние: запись при этом может и пойти; потом —
+    /// ошибка с кодом и тем, что вышло.
     public func toggleRecording() async throws -> Bool {
         guard isReady else { throw SessionError.notReady }
         let before = properties[SonyProp.movieRecordingState]?.current.intValue
+        let steps: [(value: Int64, release: Bool)]
+        switch (before == 1, recordButtonHeld) {
+        case (true, true): steps = [(1, true)]
+        case (true, false): steps = [(2, false), (1, true)]
+        case (false, true): steps = [(1, true), (2, false)]
+        case (false, false): steps = [(2, false)]
+        }
         let button = [UInt32(SonyProp.movieRecButton)]
-        for (value, release) in [(Int64(2), false), (1, true)] {
-            let reply = try await rawSend(SonyOp.controlDevice, button, outData: PTPValue.encode(value, type: PTPType.uint16))
+        for step in steps {
+            let reply = try await rawSend(SonyOp.controlDevice, button, outData: PTPValue.encode(step.value, type: PTPType.uint16))
             guard reply.isOK else {
                 let after = try await waitFor(SonyProp.movieRecordingState) { $0 != before }
-                throw SessionError.recordButtonRefused(release: release, code: reply.code, recording: after == 1)
+                throw SessionError.recordButtonRefused(release: step.release, code: reply.code, recording: after == 1)
             }
+            recordButtonHeld = !step.release
         }
         let after = try await waitFor(SonyProp.movieRecordingState) { $0 != before }
         return after == 1

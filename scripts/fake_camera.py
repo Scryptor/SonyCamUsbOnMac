@@ -10,7 +10,8 @@ Wi-Fi: высокое — 1024×576, дополнено до ~72 КБ; низк�
 - запись в свойства (0x9205) меняет их текущее значение — режим фото/видео, «куда сохранять» и т. п.;
 - спуск (S1 0xD2C1, S2 0xD2C2 через 0x9207): фокус находится за 0,15 с, через 0,4 с после S2 в памяти камеры
   появляется снимок (ObjectInMemory 0xD215 > 0x8000): JPEG, при FileFormat 0xD253 = 2 — ещё и ARW;
-- кнопка записи (0xD2C8): через 0,8 с (--record-delay) MovieRecordingState 0xD21D меняется 0 ↔ 1; как камера
+- кнопка записи (0xD2C8) — как у ZV-E10, «удержание»: «нажать» начинает запись, «отпустить» останавливает, каждое —
+  через 0,8 с (--record-delay), по MovieRecordingState 0xD21D; «отпустить» во время старта камера пропускает. Как она
   отвечает на нажатие и отпускание и не бросает ли запись сама — --record (сценарии в RECORD_SCENARIOS);
 - цветовая температура 0xD20F открыта только в режиме баланса белого «Цвет. темп.», как у настоящей камеры.
 
@@ -60,6 +61,8 @@ RECORD_SCENARIOS = {
     "press-slow": "на «нажать» отвечает через 3 с (занята), потом начинает запись",
     "release-busy": "«нажать» — как обычно, на «отпустить» отвечает 0x2019; запись идёт",
     "release-busy-blip": "на «отпустить» отвечает 0x2019, запись начинается и через 0,4 с обрывается",
+    "release-race": "«отпустить», пришедшее во время старта, выполняет, как только запись пойдёт: запись начинается и "
+                    "через полсекунды останавливается — так настоящая ZV-E10 делает примерно в каждом четвёртом случае",
 }
 # размеры значений по типу PTP: INT8…UINT128
 SIZES = {1: 1, 2: 1, 3: 2, 4: 2, 5: 4, 6: 4, 7: 8, 8: 8, 9: 16, 10: 16}
@@ -255,6 +258,8 @@ class Camera:
         self.record_delay = args.record_delay
         self.record_scenario = args.record
         self.reply_delay = 0.0                              # ответ на текущую операцию — через столько секунд
+        self.starting = False                               # «нажать» пришло, запись ещё не пошла
+        self.release_after_start = False                    # release-race: «отпустить» выполнить, как запись пойдёт
         # ноль часов журнала; FAKE_CAMERA_CLOCK — time.monotonic() того, кто запустил, чтобы сверять по одним часам
         self.started = float(os.environ.get("FAKE_CAMERA_CLOCK") or time.monotonic())
         self.name = args.name
@@ -319,17 +324,21 @@ class Camera:
         return OK
 
     def record_press(self):
+        """«Нажать» 0xD2C8 — как у ZV-E10, удержание кнопки: не пишет — начать (через --record-delay); пишет — ничего."""
         scenario = self.record_scenario
-        target = 0 if self.props.get(RECORDING) == 1 else 1
         if scenario == "press-busy":
             self.log("«нажать» запись → 0x2019, ничего не делаю")
             return DEVICE_BUSY
+        if self.props.get(RECORDING) == 1 or self.starting:
+            self.log("«нажать» запись — уже пишу, ничего")
+            return OK
         delay = self.record_delay
         if scenario == "press-slow":
             self.reply_delay = 3.0
             delay += 3.0
-        self.later(delay, lambda: self.set_recording(target))
-        if target == 1 and scenario in ("blip-fast", "blip-slow", "stop-later", "press-busy-blip", "release-busy-blip"):
+        self.starting = True
+        self.later(delay, self.started_recording)
+        if scenario in ("blip-fast", "blip-slow", "stop-later", "press-busy-blip", "release-busy-blip"):
             lasts = {"blip-fast": 0.03, "blip-slow": 1.5, "stop-later": 5.0}.get(scenario, 0.4)
             self.later(delay + lasts, lambda: self.set_recording(0, "сама остановила"))
         if scenario == "press-busy-blip":
@@ -338,11 +347,30 @@ class Camera:
         self.log("«нажать» запись" + (" — отвечу через 3 с" if self.reply_delay else ""))
         return OK
 
+    def started_recording(self):
+        self.starting = False
+        self.set_recording(1)
+        if self.release_after_start:
+            self.release_after_start = False
+            self.later(0.5, lambda: self.set_recording(0, "«отпустить», пришедшее во время старта"))
+
     def record_release(self):
+        """«Отпустить»: пишет — остановить (через --record-delay); во время старта камера обычно пропускает."""
         if self.record_scenario in ("release-busy", "release-busy-blip"):
             self.log("«отпустить» запись → 0x2019")
             return DEVICE_BUSY
-        self.log("«отпустить» запись")
+        if self.starting:
+            if self.record_scenario == "release-race":
+                self.release_after_start = True
+                self.log("«отпустить» во время старта — выполню, как только запись пойдёт")
+            else:
+                self.log("«отпустить» во время старта — пропускаю")
+            return OK
+        if self.props.get(RECORDING) == 1:
+            self.later(self.record_delay, lambda: self.set_recording(0))
+            self.log("«отпустить» запись — останавливаю")
+        else:
+            self.log("«отпустить» запись — не пишу, ничего")
         return OK
 
     def set_recording(self, value, why=""):

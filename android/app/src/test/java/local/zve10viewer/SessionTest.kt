@@ -229,6 +229,53 @@ class SessionTest {
         session.close()
     }
 
+    /** Что ушло камере кнопкой записи: 2 — «нажать», 1 — «отпустить». */
+    private fun recordButton(camera: FakeCamera): List<Int> =
+        camera.sent.filter { it.first == SonyOp.CONTROL_DEVICE && it.second == listOf(SonyProp.MOVIE_REC_BUTTON.toLong()) }
+            .map { it.third!![0].toInt() }
+
+    @Test fun recordingStartsWithPressOnly() = runTest {
+        // 0xD2C8 — «как удержание кнопки»: «отпустить» сразу за «нажать» камера иногда успевает выполнить — и запись
+        // обрывается через полсекунды после старта
+        val camera = FakeCamera()
+        val session = ready(camera, this)
+        assertTrue(session.toggleRecording())
+        assertEquals(listOf(2), recordButton(camera))
+        session.close()
+    }
+
+    @Test fun ourRecordingStopsWithReleaseOnly() = runTest {
+        val camera = FakeCamera()
+        val session = ready(camera, this)
+        session.toggleRecording()
+        assertFalse(session.toggleRecording())
+        assertEquals(listOf(2, 1), recordButton(camera))
+        session.close()
+    }
+
+    @Test fun cameraStartedRecordingStopsWithPressAndRelease() = runTest {
+        // запись начали кнопкой на камере: наша кнопка не нажата — нажать и отпустить, как раньше
+        val camera = FakeCamera()
+        val session = ready(camera, this)
+        camera.setRecording(1)
+        session.refresh()
+        assertFalse(session.toggleRecording())
+        assertEquals(listOf(2, 1), recordButton(camera))
+        session.close()
+    }
+
+    @Test fun releasesBeforeStartingAgain() = runTest {
+        // начали мы, а остановила камера сама: кнопка у нас ещё «нажата» — сначала отпустить, потом нажать
+        val camera = FakeCamera()
+        val session = ready(camera, this)
+        session.toggleRecording()
+        camera.setRecording(0)
+        session.refresh()
+        assertTrue(session.toggleRecording())
+        assertEquals(listOf(2, 1, 2), recordButton(camera))
+        session.close()
+    }
+
     @Test fun refusedRecordPressReportsCodeAndState() = runTest {
         // камера ответила «занята» и ничего не сделала: ошибка — с кодом и состоянием после ожидания
         val camera = FakeCamera().apply { busyOnNextPress = SonyProp.MOVIE_REC_BUTTON }
@@ -241,14 +288,16 @@ class SessionTest {
             assertEquals(PtpResponseCode.DEVICE_BUSY, e.code)
             assertFalse(e.recording)
         }
-        assertEquals(1, camera.sent.count { it.first == SonyOp.CONTROL_DEVICE })
+        assertEquals(listOf(2), recordButton(camera))
         session.close()
     }
 
-    @Test fun refusedRecordReleaseStillSeesRecording() = runTest {
-        // «отпустить» отклонено, а запись пошла — ошибка говорит, что камера пишет
-        val camera = FakeCamera().apply { busyOnNextRelease = SonyProp.MOVIE_REC_BUTTON }
+    @Test fun refusedRecordReleaseKeepsRecording() = runTest {
+        // «отпустить» на остановке отклонено — камера пишет дальше, и следующая остановка снова отпускает
+        val camera = FakeCamera()
         val session = ready(camera, this)
+        session.toggleRecording()
+        camera.busyOnNextRelease = SonyProp.MOVIE_REC_BUTTON
         try {
             session.toggleRecording()
             fail("ожидали отказ кнопки записи")
@@ -256,6 +305,8 @@ class SessionTest {
             assertTrue(e.release)
             assertTrue(e.recording)
         }
+        assertFalse(session.toggleRecording())
+        assertEquals(listOf(2, 1, 1), recordButton(camera))
         session.close()
     }
 
@@ -365,13 +416,18 @@ class FakeCamera : PtpTransport {
     var applyWrites = true
     val ignored = mutableSetOf<Int>()
     var busyOnNextPress: Int? = null
-    /** Следующее отпускание этой кнопки камера отклонит с DeviceBusy, но само действие выполнит. */
+    /** Следующее отпускание этой кнопки камера отклонит с DeviceBusy и ничего не сделает. */
     var busyOnNextRelease: Int? = null
     var capturedFiles: List<Pair<String, ByteArray>> = emptyList()
     private var memory = ArrayDeque<Pair<String, ByteArray>>()
     override val events: Flow<PtpEvent> = emptyFlow()
 
     private fun prop(code: Int) = props.firstOrNull { it.code == code }
+
+    /** Запись начали или остановили на самой камере. */
+    fun setRecording(value: Long) {
+        prop(SonyProp.MOVIE_RECORDING_STATE)!!.current = value
+    }
 
     /** Сколько объектов сейчас в памяти камеры. */
     val objectsInMemory: Int get() = memory.size
@@ -402,12 +458,13 @@ class FakeCamera : PtpTransport {
                     busyOnNextPress = null
                     return PtpReply(PtpResponseCode.DEVICE_BUSY)
                 }
-                if (!press && button == SonyProp.MOVIE_REC_BUTTON) {
-                    prop(SonyProp.MOVIE_RECORDING_STATE)!!.let { it.current = 1 - it.current }
-                }
                 if (!press && busyOnNextRelease == button) {
                     busyOnNextRelease = null
                     return PtpReply(PtpResponseCode.DEVICE_BUSY)
+                }
+                // кнопка записи 0xD2C8 — «как удержание»: нажатие начинает запись, отпускание останавливает
+                if (button == SonyProp.MOVIE_REC_BUTTON) {
+                    prop(SonyProp.MOVIE_RECORDING_STATE)!!.let { if (press) it.current = 1 else it.current = 0 }
                 }
                 if (!press && button == SonyProp.SHUTTER_FULL_PRESS && capturedFiles.isNotEmpty()) {
                     // как у камеры: новые файлы встают в очередь за теми, что ещё не забрали

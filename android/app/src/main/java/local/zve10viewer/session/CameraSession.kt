@@ -113,6 +113,8 @@ class CameraSession(private val transport: PtpTransport, private val timing: Ses
     /** Завершается, когда сеанс закрыт (камеру отключили или связь оборвалась). */
     val ended = CompletableDeferred<Unit>()
     private var eventJob: Job? = null
+    /** Кнопка записи у нас «нажата»: мы начали запись и ещё не отпустили (0xD2C8 — удержание, см. toggleRecording). */
+    private var recordButtonHeld = false
 
     /** Рукопожатие Sony, передача приоритета компьютеру и первое чтение свойств. */
     suspend fun start(scope: CoroutineScope) {
@@ -178,20 +180,31 @@ class CameraSession(private val transport: PtpTransport, private val timing: Ses
     }
 
     /**
-     * Нажимает и отпускает кнопку записи; возвращает, идёт ли запись после этого. Отклонила камера нажатие или
-     * отпускание — RecordButtonRefused с кодом и тем, идёт ли запись после ожидания.
+     * Кнопка записи; возвращает, идёт ли запись после этого. 0xD2C8 у Sony — «как удержание кнопки»: нажатие начинает
+     * запись, отпускание останавливает. Поэтому запуск — только «нажать», остановка нашей записи — только «отпустить»:
+     * «отпустить» сразу за «нажать» камера иногда успевает выполнить, и запись обрывается через полсекунды после старта.
+     * Запись, начатую кнопкой на камере, останавливаем «нажать и отпустить»; кнопку, оставшуюся «нажатой» после записи,
+     * которую камера остановила сама, перед новым запуском отпускаем. Отклонила камера шаг — RecordButtonRefused с
+     * кодом и тем, идёт ли запись после ожидания.
      */
     suspend fun toggleRecording(): Boolean {
         if (!isReady) throw SessionException.NotReady()
         val before = _properties.value[SonyProp.MOVIE_RECORDING_STATE]?.current?.intValue
+        val steps = when {
+            before == 1L && recordButtonHeld -> listOf(RELEASE to true)
+            before == 1L -> listOf(PRESS to false, RELEASE to true)
+            recordButtonHeld -> listOf(RELEASE to true, PRESS to false)
+            else -> listOf(PRESS to false)
+        }
         val button = listOf(SonyProp.MOVIE_REC_BUTTON.toLong())
-        for ((value, release) in listOf(PRESS to false, RELEASE to true)) {
+        for ((value, release) in steps) {
             val reply = raw(SonyOp.CONTROL_DEVICE, button, value)
             // камера отклонила (бывает «занята» 0x2019), а запись при этом может и пойти — ждём, потом ошибка
             if (!reply.isOK) {
                 val after = waitFor(SonyProp.MOVIE_RECORDING_STATE) { it != before }
                 throw SessionException.RecordButtonRefused(release, reply.code, recording = after == 1L)
             }
+            recordButtonHeld = !release
         }
         val after = waitFor(SonyProp.MOVIE_RECORDING_STATE) { it != before }
         return after == 1L

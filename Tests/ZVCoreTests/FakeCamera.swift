@@ -93,7 +93,7 @@ final class FakeCamera: PTPTransport, @unchecked Sendable {
         get { locked { _busyOnNextPress } }
         set { locked { _busyOnNextPress = newValue } }
     }
-    /// Следующее отпускание этой кнопки (значение 1) камера отклонит с DeviceBusy, но само действие выполнит.
+    /// Следующее отпускание этой кнопки (значение 1) камера отклонит с DeviceBusy и ничего не сделает.
     var busyOnNextRelease: UInt16? {
         get { locked { _busyOnNextRelease } }
         set { locked { _busyOnNextRelease = newValue } }
@@ -140,14 +140,15 @@ final class FakeCamera: PTPTransport, @unchecked Sendable {
                     _busyOnNextPress = nil
                     return PTPReply(code: PTPResponseCode.deviceBusy)
                 }
-                // отпускание кнопки записи переключает состояние записи
-                if params.first == UInt32(SonyProp.movieRecButton), outData == Data([0x01, 0x00]),
-                   let i = props.firstIndex(where: { $0.code == SonyProp.movieRecordingState }) {
-                    props[i].current = props[i].current == 0 ? 1 : 0
-                }
                 if let busy = _busyOnNextRelease, params.first == UInt32(busy), outData == Data([0x01, 0x00]) {
                     _busyOnNextRelease = nil
                     return PTPReply(code: PTPResponseCode.deviceBusy)
+                }
+                // кнопка записи 0xD2C8 — «как удержание»: нажатие начинает запись, отпускание останавливает
+                if params.first == UInt32(SonyProp.movieRecButton),
+                   let i = props.firstIndex(where: { $0.code == SonyProp.movieRecordingState }) {
+                    if outData == Data([0x02, 0x00]), props[i].current == 0 { props[i].current = 1 }
+                    if outData == Data([0x01, 0x00]), props[i].current == 1 { props[i].current = 0 }
                 }
                 // отпускание спуска — снимок готов в памяти камеры
                 if params.first == UInt32(SonyProp.shutterFullPress), outData == Data([0x01, 0x00]), !_capturedFiles.isEmpty {
