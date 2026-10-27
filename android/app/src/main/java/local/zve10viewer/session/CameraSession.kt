@@ -1,5 +1,7 @@
 package local.zve10viewer.session
 
+import local.zve10viewer.monitor.FocusFrame
+import local.zve10viewer.sony.SonyExtInfo
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -72,6 +74,8 @@ class LiveViewSample(
     val shortReplyMs: Double?,
     /** Сколько раз камера ответила «кадр не готов» перед этим кадром. */
     val waits: Int,
+    /** Рамки фокуса этого кадра: где камера фокусирует. */
+    val focusFrames: List<FocusFrame> = emptyList(),
 ) {
     /** Сколько байт пришло в ответе камеры. */
     val bytes: Int get() = data.size
@@ -104,6 +108,9 @@ class CameraSession(private val transport: PtpTransport, private val timing: Ses
     @Volatile var deviceInfo: DeviceInfo? = null
         private set
     @Volatile var isReady = false
+        private set
+    /** Команды 0x9207, которые камера назвала в GetExtDeviceInfo: по ним видно, умеет ли она фокус касанием, зум и т. п. */
+    @Volatile var controlCodes: Set<Int> = emptySet()
         private set
 
     private val _properties = MutableStateFlow<Map<Int, SonyProperty>>(emptyMap())
@@ -143,8 +150,10 @@ class CameraSession(private val transport: PtpTransport, private val timing: Ses
         call(SonyOp.CONNECT, listOf(2L, 0L, 0L))
         var hasExtInfo = false
         for (attempt in 1..20) {
-            if (call(SonyOp.GET_EXT_DEVICE_INFO, listOf(Sony.PROTOCOL_VERSION, 1L)).data.isNotEmpty()) {
+            val ext = call(SonyOp.GET_EXT_DEVICE_INFO, listOf(Sony.PROTOCOL_VERSION, 1L)).data
+            if (ext.isNotEmpty()) {
                 hasExtInfo = true
+                controlCodes = SonyExtInfo.parse(ext)?.controlCodes?.toSet().orEmpty()
                 break
             }
             if (attempt < 20) delay(100)
@@ -229,7 +238,7 @@ class CameraSession(private val transport: PtpTransport, private val timing: Ses
                     LiveViewFrame.locate(reply.data)?.let { span ->
                         lastLiveViewWaits = waits
                         return LiveViewSample(reply.data, span.offset, span.length, reply.elapsedNanos / 1e6,
-                            shortest?.let { it / 1e6 }, waits)
+                            shortest?.let { it / 1e6 }, waits, FocusFrame.fromLiveView(reply.data))
                     }
                     delay(20)
                 }
@@ -349,6 +358,16 @@ class CameraSession(private val transport: PtpTransport, private val timing: Ses
             // поток событий закончился — камера отключена
             close()
         }
+    }
+
+    /** Команда управления 0x9207 со значением своего типа (точка AF, зум, Near/Far); отдаёт код ответа камеры. */
+    suspend fun control(code: Int, value: Long, type: Int): Int =
+        raw(SonyOp.CONTROL_DEVICE, listOf(code.toLong()), PtpValue.encode(value, type)).code
+
+    /** Кнопка 0x9207: нажать и отпустить (снять касание и т. п.); отдаёт код ответа на отпускание. */
+    suspend fun pressButton(code: Int): Int {
+        control(code, 2, PtpType.UINT16)
+        return control(code, 1, PtpType.UINT16)
     }
 
     /** Отправка без проверки кода ответа; разрыв связи закрывает сеанс. */

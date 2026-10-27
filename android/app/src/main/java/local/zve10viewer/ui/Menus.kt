@@ -348,7 +348,10 @@ fun AllSettingsPanel(controller: CameraController, screen: ScreenState, modifier
 @Composable
 fun RightColumn(controller: CameraController, feedback: FeedbackState, modifier: Modifier) {
     Column(modifier, horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        // зум — над переключателем режима, как рычажок зума камеры над кнопками
+        if (controller.zoomAvailable) ZoomRocker(controller)
         ModeSwitch(controller)
+        if (controller.touchFocusSupported) TouchFocusButton(controller)
         if (controller.mode == CaptureMode.photo) {
             ShutterButton(controller, feedback)
         } else {

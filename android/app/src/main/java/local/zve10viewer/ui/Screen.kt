@@ -112,6 +112,7 @@ import local.zve10viewer.monitor.MonitorTool
 import local.zve10viewer.monitor.Waveform
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.animation.core.LinearEasing
 
 val Panel = Color(0xD91C1C1E)
 val PanelLight = Color(0x1FFFFFFF)
@@ -447,13 +448,15 @@ private fun LiveScreen(controller: CameraController, screen: ScreenState) {
                 }
             },
     ) {
-        Video(controller, screen, feedback, Modifier.fillMaxSize()) {
+        Video(controller, screen, feedback, Modifier.fillMaxSize()) { point ->
             when {
                 screen.overlayOpen -> screen.closeOverlays()
                 screen.revealTap || screen.manualHidden -> {
                     screen.revealTap = false
                     screen.manualHidden = false
                 }
+                // фокус касанием: касание кадра ставит туда фокус, элементы не прячет
+                controller.touchFocusOn && point != null -> controller.touchFocus(point.x.toDouble(), point.y.toDouble())
                 else -> {
                     screen.manualHidden = true
                     hint = true
@@ -545,10 +548,10 @@ private fun LiveScreen(controller: CameraController, screen: ScreenState) {
 
 /**
  * Видео с цифровым увеличением: щипок двумя пальцами, сдвиг при увеличении (с инерцией), касание — onTap (прячет и
- * возвращает элементы). Кадр — бикубически (AGSL, Android 13+), рамка записи — по краю видимой картинки.
+ * возвращает элементы; с фокусом касанием — точка кадра, доли, или null мимо кадра). Кадр — бикубически (AGSL, Android 13+), рамка записи — по краю видимой картинки.
  */
 @Composable
-private fun Video(controller: CameraController, screen: ScreenState, feedback: FeedbackState, modifier: Modifier, onTap: () -> Unit) {
+private fun Video(controller: CameraController, screen: ScreenState, feedback: FeedbackState, modifier: Modifier, onTap: (Offset?) -> Unit) {
     var viewSize by remember { mutableStateOf(Size.Zero) }
     val scope = rememberCoroutineScope()
     val renderer = remember { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) BicubicRenderer() else null }
@@ -568,7 +571,13 @@ private fun Video(controller: CameraController, screen: ScreenState, feedback: F
                 setZoom = { screen.zoom = it },
                 frame = { latestFrame },
                 onStart = { screen.zoomMotion?.cancel() },
-                onTap = { latestTap() },
+                onTap = { at ->
+                    // точка кадра под пальцем — с увеличением; мимо кадра — null
+                    val f = latestFrame
+                    val rect = f?.let { screen.zoom.imageRect(Size(size.width.toFloat(), size.height.toFloat()), it) }
+                    latestTap(rect?.takeIf { it.width > 0f && it.height > 0f && it.contains(at) }
+                        ?.let { Offset((at.x - it.left) / it.width, (at.y - it.top) / it.height) })
+                },
                 onLimit = { feedback.haptic(HapticEvent.zoomLimit) },
                 onEnd = { velocity ->
                     val f = latestFrame ?: return@zoomGestures
@@ -587,6 +596,15 @@ private fun Video(controller: CameraController, screen: ScreenState, feedback: F
             val assist = controller.assist
             val overlay = if (assist.needsRaster) controller.assistOverlay else null
             val reference = assist.overlay.opacity?.let { opacity -> controller.reference?.let { it to opacity } }
+            // отметка касания сжимается и гаснет за секунду
+            val mark = controller.touchMark
+            val markProgress = remember { Animatable(1f) }
+            LaunchedEffect(mark) {
+                if (mark == null) markProgress.snapTo(1f) else {
+                    markProgress.snapTo(0f)
+                    markProgress.animateTo(1f, tween(1000, easing = LinearEasing))
+                }
+            }
             Canvas(Modifier.fillMaxSize()) {
                 val rect = screen.zoom.imageRect(size, frameSize)
                 drawFrame(frame, rect, if (dimmed) 0.55f else 1f, if (bicubic) renderer else null)
@@ -600,6 +618,8 @@ private fun Video(controller: CameraController, screen: ScreenState, feedback: F
                         filterQuality = FilterQuality.Low)
                 }
                 if (assist.hasMarkers) drawAssistMarkers(assist, frameSize, rect)
+                // рамки фокуса камеры и отметка касания — пока фокус касанием включён
+                if (controller.touchFocusOn) drawFocusFrames(controller.focusFrames, rect, mark?.first, markProgress.value)
             }
             // растр помощи считается по видимой части кадра
             SideEffect {
@@ -697,7 +717,12 @@ private fun Controls(controller: CameraController, screen: ScreenState, feedback
                 DisposableEffect(Unit) { onDispose { screen.fnMenuRect = null } }
                 Box(Modifier.onGloballyPositioned { screen.fnMenuRect = it.boundsInRoot() }) { AssistMenu(controller, screen) }
             } else if (!screen.allSettingsOpen) {
-                InfoLine(controller) { screen.openFn(it) }
+                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    // слежение от касания — снять; ручной фокус — шкала фокуса над строкой значений
+                    if (controller.touchCancelAvailable && controller.touchFocusOn) CancelTouchChip(controller)
+                    if (controller.focusDriveAvailable) FocusScale(controller)
+                    InfoLine(controller) { screen.openFn(it) }
+                }
             }
         }
     }

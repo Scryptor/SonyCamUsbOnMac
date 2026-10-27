@@ -138,7 +138,7 @@ fun DrawScope.drawFrame(frame: ImageBitmap, rect: Rect, alpha: Float, renderer: 
 
 /**
  * Жесты увеличения над видео. zoom/setZoom — увеличение экрана; frame — размер кадра (null — кадров нет); onTap —
- * касание без сдвига одним пальцем; onLimit — упёрлись в 8× или вернулись к 1×; onEnd — жест кончился (или прервался):
+ * касание без сдвига одним пальцем (где коснулись — в точках экрана); onLimit — упёрлись в 8× или вернулись к 1×; onEnd — жест кончился (или прервался):
  * пружиной в пределы или с инерцией дальше.
  */
 suspend fun PointerInputScope.zoomGestures(
@@ -146,7 +146,7 @@ suspend fun PointerInputScope.zoomGestures(
     setZoom: (ViewZoom) -> Unit,
     frame: () -> Size?,
     onStart: () -> Unit,
-    onTap: () -> Unit,
+    onTap: (Offset) -> Unit,
     onLimit: () -> Unit,
     onEnd: (Velocity) -> Unit,
 ) {
@@ -193,7 +193,7 @@ suspend fun PointerInputScope.zoomGestures(
             // прерванный жест тоже доводим: увеличение не застревает между 0,87× и 1×
             if (transforming) onEnd(if (finished && !multi) tracker.calculateVelocity() else Velocity.Zero)
         }
-        if (!transforming && !multi && moved.getDistance() <= slop) onTap()
+        if (!transforming && !multi && moved.getDistance() <= slop) onTap(down.position)
     }
 }
 

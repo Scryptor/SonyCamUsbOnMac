@@ -58,6 +58,54 @@ object SonyProp {
     const val SHUTTER_HALF_PRESS = 0xD2C1
     const val SHUTTER_FULL_PRESS = 0xD2C2
     const val MOVIE_REC_BUTTON = 0xD2C8
+
+    // фокус и зум с экрана (Sony Camera Control PTP 3 Reference)
+    /** Near/Far — доступна ли перефокусировка ближе/дальше (0x01 — да; у ZV-E10 — в MF). */
+    const val NEAR_FAR_ENABLED = 0xD235
+    /** Положение фокуса 0…100 (UINT8), только чтение. */
+    const val FOCAL_POSITION = 0xD24C
+    /** Можно ли управлять зумом (0x01 — да): объектив с приводом или Clear Image Zoom. */
+    const val ZOOM_ENABLED = 0xD25B
+    /** Масштаб зума ×1000 (UINT32): 1000 — ×1,0. */
+    const val ZOOM_SCALE = 0xD25C
+    /** Шкала зума (UINT32): биты 31–24 — сколько отрезков, 23–16 — в каком, 15–0 — где в нём (0…100). */
+    const val ZOOM_BAR = 0xD25D
+    /** Что делает касание экрана камеры: 0x03 — фокус, 0x04 — слежение. */
+    const val TOUCH_FUNCTION = 0xD283
+    /** Можно ли «коснуться» экрана камеры командой (0x01 — да) и снять это касание. */
+    const val REMOTE_TOUCH_ENABLED = 0xD284
+    const val REMOTE_TOUCH_CANCEL_ENABLED = 0xD285
+}
+
+/** Команды управления 0x9207 (Control Device) — кроме кнопок спуска и записи; тип значения — свой у каждой. */
+object SonyControl {
+    /** Ближе (−) / дальше (+) на 1…7 шагов, INT16; только при Near/Far Enable 0xD235 = 1. */
+    const val NEAR_FAR = 0xD2D1
+    /** Точка AF: (x shl 16) or y в сетке 640×480, UINT32; двигает рамку в зонах «Точка» и «Зона». */
+    const val AF_AREA_POSITION = 0xD2DC
+    /** Зум, INT8: 1 — к теле, −1 — к широкому, 0 — стоп; едет, пока не придёт стоп. */
+    const val ZOOM_OPERATION = 0xD2DD
+    /** Касание экрана камеры в точке (x shl 16) or y сетки 640×480, UINT32: фокус или слежение — как настроено в камере. */
+    const val REMOTE_TOUCH = 0xD2E4
+    /** Снять касание (слежение), кнопка UINT16: нажать и отпустить. */
+    const val REMOTE_TOUCH_CANCEL = 0xD2E5
+}
+
+/** Ответ Sony GetExtDeviceInfo (0x9202): версия протокола, коды свойств и коды команд управления. */
+class SonyExtInfo(val version: Int, val propertyCodes: List<Int>, val controlCodes: List<Int>) {
+    companion object {
+        fun parse(data: ByteArray): SonyExtInfo? = runCatching {
+            fun u16(at: Int) = (data[at].toInt() and 0xFF) or ((data[at + 1].toInt() and 0xFF) shl 8)
+            fun u32(at: Int) = u16(at) or (u16(at + 2) shl 16)
+            fun list(at: Int): Pair<List<Int>, Int> {
+                val count = u32(at)
+                return List(count) { u16(at + 4 + it * 2) } to at + 4 + count * 2
+            }
+            val (properties, next) = list(2)
+            val controls = if (next < data.size) list(next).first else emptyList()
+            SonyExtInfo(u16(0), properties, controls)
+        }.getOrNull()
+    }
 }
 
 object Sony {

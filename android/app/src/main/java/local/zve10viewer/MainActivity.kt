@@ -39,6 +39,7 @@ class MainActivity : ComponentActivity() {
                 addAction(ACTION_DEBUG_ZOOM)
                 addAction(ACTION_DEBUG_GALLERY)
                 addAction(ACTION_DEBUG_ASSIST)
+                addAction(ACTION_DEBUG_LENS)
             }, ContextCompat.RECEIVER_EXPORTED)
         }
         setContent { App(controller) }
@@ -59,6 +60,7 @@ class MainActivity : ComponentActivity() {
                     intent.getFloatExtra("y", 0.5f).toDouble(),
                     if (intent.hasExtra("bicubic")) intent.getBooleanExtra("bicubic", true) else null))
                 ACTION_DEBUG_GALLERY -> controller.debugCommand(CameraController.DebugCommand.Gallery(intent.getIntExtra("index", -1)))
+                ACTION_DEBUG_LENS -> debugLens(intent)
                 ACTION_DEBUG_ASSIST -> controller.debugCommand(CameraController.DebugCommand.Assist(
                     intent.getStringExtra("tool"), intent.getStringExtra("value"), intent.getBooleanExtra("off", false),
                     if (intent.hasExtra("menu")) intent.getBooleanExtra("menu", false) else null,
@@ -66,6 +68,25 @@ class MainActivity : ComponentActivity() {
                     if (intent.hasExtra("shot")) intent.getIntExtra("shot", 0) else null))
             }
         }
+    }
+
+    /**
+     * Фокус и зум с экрана: `… -a local.zve10viewer.DEBUG_LENS --ez touch true|false` — режим «фокус касанием»,
+     * `--ef x 0.3 --ef y 0.4` — фокус в эту точку кадра, `--ez cancel true` — снять слежение, `--es zoom tele|wide|stop`,
+     * `--ei focus -7` — шкала фокуса. Что вышло — в logcat с тегом ZVLens.
+     */
+    private fun debugLens(intent: Intent) {
+        if (intent.hasExtra("touch") && intent.getBooleanExtra("touch", false) != controller.touchFocusOn) controller.toggleTouchFocus()
+        if (intent.hasExtra("x") && intent.hasExtra("y")) {
+            controller.touchFocus(intent.getFloatExtra("x", 0.5f).toDouble(), intent.getFloatExtra("y", 0.5f).toDouble())
+        }
+        if (intent.getBooleanExtra("cancel", false)) controller.cancelTouch()
+        when (intent.getStringExtra("zoom")) {
+            "tele" -> controller.zoom(1)
+            "wide" -> controller.zoom(-1)
+            "stop" -> controller.zoom(0)
+        }
+        if (intent.hasExtra("focus")) controller.focusStep(intent.getIntExtra("focus", 0))
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -116,5 +137,6 @@ class MainActivity : ComponentActivity() {
         const val ACTION_DEBUG_ZOOM = "local.zve10viewer.DEBUG_ZOOM"
         const val ACTION_DEBUG_GALLERY = "local.zve10viewer.DEBUG_GALLERY"
         const val ACTION_DEBUG_ASSIST = "local.zve10viewer.DEBUG_ASSIST"
+        const val ACTION_DEBUG_LENS = "local.zve10viewer.DEBUG_LENS"
     }
 }

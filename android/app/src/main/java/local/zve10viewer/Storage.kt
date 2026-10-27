@@ -67,6 +67,11 @@ class Prefs(context: Context) {
         get() = prefs.getString("monitorAssist", null)
         set(value) = prefs.edit().putString("monitorAssist", value).apply()
 
+    /** Фокус касанием: касание кадра ставит туда фокус. */
+    var touchFocusOn: Boolean
+        get() = prefs.getBoolean("touchFocusOn", false)
+        set(value) = prefs.edit().putBoolean("touchFocusOn", value).apply()
+
     var waveformOn: Boolean
         get() = prefs.getBoolean("waveformOn", false)
         set(value) = prefs.edit().putBoolean("waveformOn", value).apply()

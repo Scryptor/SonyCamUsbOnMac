@@ -62,6 +62,7 @@ import local.zve10viewer.ptp.PtpIp
 import local.zve10viewer.ptp.PtpIpRefused
 import local.zve10viewer.ptp.PtpIpRejected
 import local.zve10viewer.ptp.PtpTransport
+import local.zve10viewer.ptp.PtpResponseCode
 import local.zve10viewer.ptp.PtpType
 import local.zve10viewer.ptp.PtpValue
 import local.zve10viewer.ptp.Ssdp
@@ -90,6 +91,11 @@ import local.zve10viewer.monitor.AssistRaster
 import local.zve10viewer.monitor.MonitorAssist
 import local.zve10viewer.monitor.MonitorTool
 import local.zve10viewer.monitor.Waveform
+import local.zve10viewer.monitor.FocusDrive
+import local.zve10viewer.monitor.FocusFrame
+import local.zve10viewer.monitor.PowerZoom
+import local.zve10viewer.monitor.TouchFocus
+import local.zve10viewer.sony.SonyControl
 import local.zve10viewer.settings.Preset
 import local.zve10viewer.settings.PresetCatalog
 import local.zve10viewer.settings.PresetChange
@@ -275,6 +281,25 @@ class CameraController(private val context: Context, private val scope: Coroutin
         private set
 
     class Reference(val image: ImageBitmap, val source: String)
+
+    /** Команды 0x9207, которые знает камера на связи: по ним видно, есть ли фокус касанием, зум, Near/Far. */
+    var controlCodes by mutableStateOf<Set<Int>>(emptySet())
+        private set
+    /** Рамки фокуса последнего кадра: где камера фокусирует. */
+    var focusFrames by mutableStateOf<List<FocusFrame>>(emptyList())
+        private set
+    /** Куда коснулись для фокуса (доли кадра) и когда, мс, — для отметки на кадре. */
+    var touchMark by mutableStateOf<Pair<androidx.compose.ui.geometry.Offset, Long>?>(null)
+        private set
+    /** Зум едет: 1 — к теле, −1 — к широкому; 0 — стоит. */
+    var zoomDirection by mutableStateOf(0)
+        private set
+    /** Фокус касанием: горит — касание кадра ставит туда фокус, а на кадре видны рамки фокуса камеры. */
+    var touchFocusOn by mutableStateOf(prefs.touchFocusOn)
+        private set
+    /** Единиц Near/Far, которые ещё надо отправить: шкалу тянут быстрее, чем камера отвечает. */
+    private var focusUnits = 0
+    private var focusDriving = false
     /** Красная рамка во время записи — как её рисовать (настройка ⚙). */
     var tallyStyle by mutableStateOf(prefs.tallyStyle)
         private set
@@ -892,6 +917,100 @@ class CameraController(private val context: Context, private val scope: Coroutin
         if (!next.needsRaster) assistOverlay = null
         // наложение включили — эталон нужен: прошлый из файла или текущий кадр
         if (next.overlay != MonitorAssist.Overlay.off) ensureReference()
+    }
+
+    fun toggleTouchFocus() {
+        touchFocusOn = !touchFocusOn
+        prefs.touchFocusOn = touchFocusOn
+    }
+
+    private fun value(code: Int): Long? = properties[code]?.current?.intValue
+
+    /** Как сейчас ставится фокус касанием; null — никак (ручной фокус, камера не умеет). */
+    val touchFocusMethod: TouchFocus.Method?
+        get() = TouchFocus.method(value(SonyProp.FOCUS_MODE), value(SonyProp.FOCUS_AREA), value(SonyProp.REMOTE_TOUCH_ENABLED), controlCodes)
+
+    /** Камера вообще умеет фокус касанием (кнопка есть, даже если сейчас ручной фокус). */
+    val touchFocusSupported: Boolean
+        get() = SonyControl.AF_AREA_POSITION in controlCodes || SonyControl.REMOTE_TOUCH in controlCodes
+
+    /** Слежение от касания можно снять. */
+    val touchCancelAvailable: Boolean
+        get() = value(SonyProp.REMOTE_TOUCH_CANCEL_ENABLED) == 1L && SonyControl.REMOTE_TOUCH_CANCEL in controlCodes
+
+    val zoomAvailable: Boolean get() = PowerZoom.isAvailable(value(SonyProp.ZOOM_ENABLED), controlCodes)
+
+    /** Шкала зума; null — камера её не отдаёт. */
+    val zoomBar: PowerZoom.Bar?
+        get() = value(SonyProp.ZOOM_BAR)?.let(PowerZoom.Bar::of)?.takeIf { it.boxes > 0 }
+
+    /** Масштаб зума подписью («×1,2»); на ×1,0 — null: подпись не нужна. */
+    val zoomScaleLabel: String?
+        get() = value(SonyProp.ZOOM_SCALE)?.takeIf { it > 1000 }?.let(PowerZoom::label)
+
+    val focusDriveAvailable: Boolean get() = FocusDrive.isAvailable(value(SonyProp.NEAR_FAR_ENABLED), controlCodes)
+
+    /** Где фокус, 0…100 (0 — ближе всего); null — камера не отдаёт. */
+    val focalPosition: Int?
+        get() = properties[SonyProp.FOCAL_POSITION]?.takeIf { it.enabled != 0 }?.current?.intValue?.toInt()
+
+    /** Фокус в точку кадра (доли 0…1): точка AF или касание экрана камеры. false — сейчас нельзя. */
+    fun touchFocus(x: Double, y: Double): Boolean {
+        val session = session ?: return false
+        if (phase != Phase.ready) return false
+        val method = touchFocusMethod ?: run {
+            showStatus(TouchFocus.refusal(value(SonyProp.FOCUS_MODE)))
+            return false
+        }
+        touchMark = androidx.compose.ui.geometry.Offset(x.toFloat(), y.toFloat()) to System.currentTimeMillis()
+        val code = if (method == TouchFocus.Method.areaPosition) SonyControl.AF_AREA_POSITION else SonyControl.REMOTE_TOUCH
+        val encoded = TouchFocus.encode(x, y)
+        journal("фокус касанием: ${if (method == TouchFocus.Method.areaPosition) "точка AF" else "касание экрана камеры"} " +
+            "(${encoded shr 16}, ${encoded and 0xFFFF})")
+        scope.launch {
+            val reply = runCatching { session.control(code, encoded, PtpType.UINT32) }.getOrNull()
+            if (reply != PtpResponseCode.OK) showStatus("Камера не поставила фокус в эту точку")
+        }
+        return true
+    }
+
+    /** Снять слежение, начатое касанием. */
+    fun cancelTouch() {
+        val session = session ?: return
+        if (phase != Phase.ready || !touchCancelAvailable) return
+        touchMark = null
+        scope.launch { runCatching { session.pressButton(SonyControl.REMOTE_TOUCH_CANCEL) } }
+    }
+
+    /** Зум: 1 — к теле, −1 — к широкому, пока не придёт 0. Повтор того же направления ничего не шлёт. */
+    fun zoom(direction: Int) {
+        val dir = direction.coerceIn(-1, 1)
+        val session = session ?: return
+        if (dir == zoomDirection) return
+        if (dir != 0 && (phase != Phase.ready || !zoomAvailable)) return
+        zoomDirection = dir
+        journal("зум: " + if (dir > 0) "к теле" else if (dir < 0) "к широкому" else "стоп")
+        scope.launch { runCatching { session.control(SonyControl.ZOOM_OPERATION, dir.toLong(), PtpType.INT8) } }
+    }
+
+    /** Перефокусировка на столько единиц Near/Far (отрицательное — ближе): по одной команде за раз, остальное копится. */
+    fun focusStep(units: Int) {
+        val session = session ?: return
+        if (units == 0 || phase != Phase.ready || !focusDriveAvailable) return
+        focusUnits += units
+        if (focusDriving) return
+        focusDriving = true
+        scope.launch {
+            try {
+                while (focusUnits != 0 && this@CameraController.session === session) {
+                    val next = FocusDrive.commands(focusUnits).firstOrNull() ?: break
+                    focusUnits -= next.toInt()
+                    runCatching { session.control(SonyControl.NEAR_FAR, next, PtpType.INT16) }
+                }
+            } finally {
+                focusDriving = false
+            }
+        }
     }
 
     fun toggleWaveform() {
@@ -2528,6 +2647,8 @@ class CameraController(private val context: Context, private val scope: Coroutin
     }
 
     private fun startStreams(session: CameraSession, onEnded: () -> Unit) {
+        // какие команды знает камера — из её ответа на рукопожатие
+        controlCodes = session.controlCodes
         jobs += scope.launch {
             session.properties.collect { apply(it) }
         }
@@ -2659,6 +2780,22 @@ class CameraController(private val context: Context, private val scope: Coroutin
         frameLog.clear()
     }
 
+    /** Фокус и зум в журнале logcat (тег ZVLens), когда что-то поменялось, — для проверок по adb. */
+    private var lensLogged = ""
+
+    private fun noteLens() {
+        val frames = focusFrames.joinToString(" ") {
+            "%s(%.3f %.3f%s)".format(java.util.Locale.ROOT, it.kind.name, it.rect.center.x, it.rect.center.y, if (it.focused) " ✓" else "")
+        }
+        val line = "касание: ${touchFocusMethod?.name ?: "нет"}${if (touchFocusOn) " вкл" else ""}, снять: $touchCancelAvailable, " +
+            "рамки: [$frames], зум: ${if (zoomAvailable) "есть" else "нет"} $zoomDirection ${zoomBar?.let { "${it.box}/${it.boxes} ${it.position}" } ?: "—"}, " +
+            "шкала фокуса: ${if (focusDriveAvailable) "есть" else "нет"} ${focalPosition ?: "—"}"
+        if (line != lensLogged) {
+            lensLogged = line
+            Log.i("ZVLens", line)
+        }
+    }
+
     /** Растр помощи в журнале logcat (тег ZVAssist) раз в 2 с: размер, часть кадра, зебра и пикинг — для проверок по adb. */
     private var assistLoggedAt = 0L
 
@@ -2688,6 +2825,8 @@ class CameraController(private val context: Context, private val scope: Coroutin
         if (from !== session) return
         measure(sample)
         frameBitmap = bitmap
+        if (focusFrames != sample.focusFrames) focusFrames = sample.focusFrames
+        noteLens()
         assistOverlay = if (assist.needsRaster) analysis?.overlay else null
         waveform = if (waveformOn) analysis?.waveform else null
         noteAssist(analysis?.overlay)
@@ -2954,6 +3093,11 @@ class CameraController(private val context: Context, private val scope: Coroutin
         histogramStats = null
         assistOverlay = null
         waveform = null
+        controlCodes = emptySet()
+        focusFrames = emptyList()
+        touchMark = null
+        zoomDirection = 0
+        focusUnits = 0
         frameTimes.clear()
         frameGaps.clear()
         lastFrameAt = 0L
