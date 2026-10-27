@@ -89,6 +89,7 @@ import local.zve10viewer.settings.LumaStats
 import local.zve10viewer.monitor.AssistRaster
 import local.zve10viewer.monitor.MonitorAssist
 import local.zve10viewer.monitor.MonitorTool
+import local.zve10viewer.monitor.Waveform
 import local.zve10viewer.settings.Preset
 import local.zve10viewer.settings.PresetCatalog
 import local.zve10viewer.settings.PresetChange
@@ -253,6 +254,27 @@ class CameraController(private val context: Context, private val scope: Coroutin
     /** Инструменты и фото / видео — для потока кадров (белое в превью: в видео 234, в фото 255). */
     @Volatile private var assistForFrames = assist
     @Volatile private var assistVideo = true
+
+    /** Волновая форма: включена ли, какая (яркость или RGB-парад) и где; место null — по умолчанию, справа внизу. */
+    var waveformOn by mutableStateOf(prefs.waveformOn)
+        private set
+    var waveformMode by mutableStateOf(prefs.waveformMode)
+        private set
+    var waveformPlacement by mutableStateOf(prefs.waveformPlacement)
+        private set
+    /** Волновая форма последнего кадра; null — выключена. */
+    var waveform by mutableStateOf<WaveformTrace?>(null)
+        private set
+    @Volatile private var waveformForFrames: Waveform.Mode? = if (waveformOn) waveformMode else null
+
+    /** Волновая форма кадра: картинка следа, что по ней видно и белый уровень превью (на нём — линия 100 %). */
+    class WaveformTrace(val image: ImageBitmap, val counts: Waveform.Counts, val white: Int)
+
+    /** Эталонный кадр для наложения: текущий кадр или снимок из галереи. Хранится в файле — переживает перезапуск. */
+    var reference by mutableStateOf<Reference?>(null)
+        private set
+
+    class Reference(val image: ImageBitmap, val source: String)
     /** Красная рамка во время записи — как её рисовать (настройка ⚙). */
     var tallyStyle by mutableStateOf(prefs.tallyStyle)
         private set
@@ -393,9 +415,15 @@ class CameraController(private val context: Context, private val scope: Coroutin
         data class Gallery(val index: Int) : DebugCommand()
         /**
          * Монитор: tool + value — значение инструмента, tool без value — включить или выключить его, off — выключить всё,
-         * menu — открыть меню (на инструменте tool) или закрыть.
+         * menu — открыть меню (на инструменте tool) или закрыть; waveform, reference и shot — волновая форма и эталон.
          */
-        data class Assist(val tool: String?, val value: String?, val off: Boolean, val menu: Boolean?) : DebugCommand()
+        data class Assist(val tool: String?, val value: String?, val off: Boolean, val menu: Boolean?,
+                          /** Волновая форма: «luma», «parade» или «off». */
+                          val waveform: String? = null,
+                          /** Эталон для наложения — текущий кадр. */
+                          val reference: Boolean = false,
+                          /** Эталон — снимок с этим местом в ленте. */
+                          val shot: Int? = null) : DebugCommand()
     }
 
     private val debugCommandFlow = MutableSharedFlow<DebugCommand>(extraBufferCapacity = 8)
@@ -862,6 +890,75 @@ class CameraController(private val context: Context, private val scope: Coroutin
         prefs.monitorAssist = next.toJson()
         // растровые выключили — старый растр не показываем, даже если новых кадров нет
         if (!next.needsRaster) assistOverlay = null
+        // наложение включили — эталон нужен: прошлый из файла или текущий кадр
+        if (next.overlay != MonitorAssist.Overlay.off) ensureReference()
+    }
+
+    fun toggleWaveform() {
+        waveformOn = !waveformOn
+        prefs.waveformOn = waveformOn
+        waveformForFrames = if (waveformOn) waveformMode else null
+        if (!waveformOn) waveform = null
+    }
+
+    fun chooseWaveformMode(mode: Waveform.Mode) {
+        waveformMode = mode
+        prefs.waveformMode = mode
+        if (waveformOn) waveformForFrames = mode
+    }
+
+    fun placeWaveform(placement: FloatingPlacement) {
+        waveformPlacement = placement
+        prefs.waveformPlacement = placement
+    }
+
+    /** Файл эталона — в данных программы: снимок, из которого его взяли, можно и удалить. */
+    private val referenceFile get() = java.io.File(context.filesDir, "reference.jpg")
+
+    /** Эталон для наложения есть или будет: в памяти, иначе из файла прошлого раза, иначе — текущий кадр. */
+    fun ensureReference() {
+        if (reference != null) return
+        scope.launch {
+            val saved = withContext(Dispatchers.IO) {
+                referenceFile.takeIf { it.exists() }?.readBytes()?.let { MediaSaver.decode(it, REFERENCE_SIDE) }
+            }
+            if (reference != null) return@launch
+            if (saved != null) reference = Reference(saved.asImageBitmap(), prefs.referenceSource ?: "эталон")
+            else takeReferenceFromFrame()
+        }
+    }
+
+    /** Эталон — текущий кадр превью. */
+    fun takeReferenceFromFrame(): Boolean {
+        val sample = lastSample ?: return false
+        val source = "кадр " + java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.ROOT).format(java.util.Date())
+        scope.launch {
+            val jpeg = withContext(Dispatchers.Default) { sample.jpeg() }
+            val image = withContext(Dispatchers.Default) { MediaSaver.decode(jpeg, REFERENCE_SIDE) } ?: return@launch
+            reference = Reference(image.asImageBitmap(), source)
+            prefs.referenceSource = source
+            withContext(Dispatchers.IO) { runCatching { referenceFile.writeBytes(jpeg) } }
+            showStatus("Эталон для наложения — текущий кадр")
+        }
+        return true
+    }
+
+    /** Эталон — снимок из галереи: JPEG (у RAW+JPEG — он), уменьшенный до 2048 точек по длинной стороне. */
+    fun takeReference(shot: Shot) {
+        val file = shot.jpeg
+        scope.launch {
+            val image = file?.let { withContext(Dispatchers.IO) { saver.decode(it.uri, REFERENCE_SIDE, hardware = false) } }
+            if (image == null) {
+                showStatus("Этот снимок не открылся как эталон")
+                return@launch
+            }
+            reference = Reference(image.asImageBitmap(), file.name)
+            prefs.referenceSource = file.name
+            withContext(Dispatchers.IO) {
+                runCatching { referenceFile.outputStream().use { image.compress(Bitmap.CompressFormat.JPEG, 90, it) } }
+            }
+            showStatus("Эталон для наложения — ${file.name}")
+        }
     }
 
     fun toggleHistogram() {
@@ -2487,12 +2584,14 @@ class CameraController(private val context: Context, private val scope: Coroutin
             for (sample in frames) {
                 val bitmap = pool.decode(sample.data, sample.jpegOffset, sample.jpegLength) ?: continue
                 val levels = if (histogramOn) (sampler ?: HistogramSampler().also { sampler = it }).levels(bitmap) else null
-                // помощь в кадре — по тому же кадру и вместе с ним: подсветка не отстаёт от картинки
+                // помощь в кадре и волновая форма — по тому же кадру и вместе с ним: подсветка не отстаёт от картинки
                 val tools = assistForFrames
-                val overlay = if (tools.needsRaster) {
-                    (assistSampler ?: AssistSampler().also { assistSampler = it }).render(bitmap, levels, tools, assistView, assistVideo)
+                val waveMode = waveformForFrames
+                val analysis = if (tools.needsRaster || waveMode != null) {
+                    (assistSampler ?: AssistSampler().also { assistSampler = it })
+                        .analyze(bitmap, levels, tools, assistView, assistVideo, waveMode)
                 } else null
-                withContext(Dispatchers.Main) { show(session, bitmap, sample, levels, overlay) }
+                withContext(Dispatchers.Main) { show(session, bitmap, sample, levels, analysis) }
             }
         }
     }
@@ -2584,13 +2683,14 @@ class CameraController(private val context: Context, private val scope: Coroutin
         return hash
     }
 
-    private fun show(from: CameraSession, bitmap: Bitmap, sample: LiveViewSample, levels: IntArray?, overlay: AssistOverlay?) {
+    private fun show(from: CameraSession, bitmap: Bitmap, sample: LiveViewSample, levels: IntArray?, analysis: FrameAnalysis?) {
         // кадр прошлого сеанса, дошедший после обрыва, — не тот, что считается «восстановили»
         if (from !== session) return
         measure(sample)
         frameBitmap = bitmap
-        assistOverlay = if (assist.needsRaster) overlay else null
-        noteAssist(overlay)
+        assistOverlay = if (assist.needsRaster) analysis?.overlay else null
+        waveform = if (waveformOn) analysis?.waveform else null
+        noteAssist(analysis?.overlay)
         // новая обёртка на каждый кадр: Bitmap из пула тот же, и с прежней обёрткой Compose не перерисовал бы картинку
         frame = bitmap.asImageBitmap()
         lastSample = sample
@@ -2853,6 +2953,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
         histogram = null
         histogramStats = null
         assistOverlay = null
+        waveform = null
         frameTimes.clear()
         frameGaps.clear()
         lastFrameAt = 0L
@@ -3051,6 +3152,8 @@ class CameraController(private val context: Context, private val scope: Coroutin
         private const val ACTION_USB_PERMISSION = "local.zve10viewer.USB_PERMISSION"
         /** Миниатюра снимка в ленте — не больше стольких точек по длинной стороне. */
         private const val THUMBNAIL_SIDE = 160
+        /** Эталон для наложения — не больше стольких точек по длинной стороне: больше экрану не нужно. */
+        private const val REFERENCE_SIDE = 2048
         /** Столько в фоне — и сеанс закрываем обычным образом; на экране подключимся снова. */
         private const val BACKGROUND_CLOSE_MS = 60_000L
         /** Прощальная запись при закрытии: вернуть камере высокое качество превью, если снижали мы. */
@@ -3092,27 +3195,48 @@ private class FramePool {
     }
 }
 
+/** Что посчитано по точкам кадра: растр помощи и волновая форма. */
+private class FrameAnalysis(val overlay: CameraController.AssistOverlay?, val waveform: CameraController.WaveformTrace?)
+
 /**
- * Растр помощи в кадре (зебра, false color, пикинг) по кадру: яркость всего кадра, видимая часть — в размер растра, сам
- * растр — в Bitmap из трёх по кругу, как кадры. Массивы — одни на весь сеанс. Вызывать из одной корутины.
+ * Растр помощи в кадре (зебра, false color, пикинг) и волновая форма по кадру: точки кадра достаются один раз; растр —
+ * яркость всего кадра, видимая часть — в размер растра. Растры и следы — в Bitmap по три по кругу, как кадры. Массивы —
+ * одни на весь сеанс. Вызывать из одной корутины.
  */
 private class AssistSampler {
     private var pixels = IntArray(0)
     private var out = IntArray(0)
     private val bitmaps = arrayOfNulls<Bitmap>(3)
     private var next = 0
+    private val traces = arrayOfNulls<Bitmap>(3)
+    private var nextTrace = 0
 
-    fun render(frame: Bitmap, levels: IntArray?, assist: MonitorAssist, view: CameraController.AssistView,
-               video: Boolean): CameraController.AssistOverlay? {
+    fun analyze(frame: Bitmap, levels: IntArray?, assist: MonitorAssist, view: CameraController.AssistView, video: Boolean,
+                waveform: Waveform.Mode?): FrameAnalysis {
         val w = frame.width
         val h = frame.height
         if (pixels.size < w * h) pixels = IntArray(w * h)
         frame.getPixels(pixels, 0, w, 0, 0, w, h)
+        // шкала — как у гистограммы: от чёрного до белого превью; гистограмма выключена — уровни по самому кадру
         val luma = AssistRaster.luma(pixels, w * h)
+        val white = LumaStats.whiteLevel(levels ?: IntArray(256).also { counts -> for (v in luma) counts[v]++ }, video)
+        val overlay = if (assist.needsRaster) render(luma, w, h, white, assist, view) else null
+        val trace = waveform?.let { mode ->
+            val counts = Waveform.counts(pixels, w, h, mode)
+            val slot = nextTrace
+            nextTrace = (nextTrace + 1) % traces.size
+            val bitmap = traces[slot]?.takeIf { it.width == counts.columns }
+                ?: Bitmap.createBitmap(counts.columns, Waveform.ROWS, Bitmap.Config.ARGB_8888).also { traces[slot] = it }
+            bitmap.setPixels(Waveform.image(counts), 0, counts.columns, 0, 0, counts.columns, Waveform.ROWS)
+            CameraController.WaveformTrace(bitmap.asImageBitmap(), counts, white)
+        }
+        return FrameAnalysis(overlay, trace)
+    }
+
+    private fun render(luma: IntArray, w: Int, h: Int, white: Int, assist: MonitorAssist,
+                       view: CameraController.AssistView): CameraController.AssistOverlay? {
         val plan = AssistRaster.plan(w, h, view.x, view.y, view.width, view.height, view.factor)
         val part = AssistRaster.resample(luma, w, h, plan)
-        // шкала — как у гистограммы: от чёрного до белого превью; гистограмма выключена — уровни по самому кадру
-        val white = LumaStats.whiteLevel(levels ?: IntArray(256).also { counts -> for (v in luma) counts[v]++ }, video)
         if (out.size < plan.width * plan.height) out = IntArray(plan.width * plan.height)
         val raster = AssistRaster.render(part, plan.width, plan.height, plan.scale, white, assist, out) ?: return null
         val slot = next

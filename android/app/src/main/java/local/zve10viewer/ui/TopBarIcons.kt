@@ -20,7 +20,7 @@ import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.unit.dp
 
 /** Значки верхней панели — «как на камере». */
-enum class TopBarGlyph { histogram, monitor, statusLine, savePreset, settings }
+enum class TopBarGlyph { histogram, waveform, monitor, statusLine, savePreset, settings }
 
 /**
  * Значок кнопки верхней панели: белый рисунок по утверждённому макету — в квадрате 52×52, на кнопке 44 dp с масштабом
@@ -40,6 +40,7 @@ fun TopBarIcon(glyph: TopBarGlyph, modifier: Modifier = Modifier.size(44.dp)) {
         val icon = Icon52(this, k, dx, dy)
         when (glyph) {
             TopBarGlyph.histogram -> icon.histogram()
+            TopBarGlyph.waveform -> icon.waveform()
             TopBarGlyph.monitor -> icon.monitor()
             TopBarGlyph.statusLine -> icon.statusLine()
             TopBarGlyph.savePreset -> icon.savePreset()
@@ -69,6 +70,19 @@ private class Icon52(private val scope: DrawScope, private val k: Float, private
         for (x in floatArrayOf(22.3f, 29.7f)) {
             drawLine(white.copy(alpha = 0.55f), p(x, 15f), p(x, 35f), strokeWidth = 1.dp.toPx(), pathEffect = dash)
         }
+    }
+
+    /** Волновая форма: низ шкалы и линия 100 % пунктиром, между ними — след яркости, как на Mac. */
+    fun waveform() = with(scope) {
+        drawLine(white.copy(alpha = 0.55f), p(15f, 35f), p(37f, 35f), 1.dp.toPx())
+        drawLine(white.copy(alpha = 0.55f), p(15f, 17f), p(37f, 17f), 1.dp.toPx(), pathEffect = PathEffect.dashPathEffect(floatArrayOf(s(2f), s(2f))))
+        val trace = Path().apply {
+            moveTo(p(15f, 30f).x, p(15f, 30f).y)
+            cubicTo(p(18f, 31f).x, p(18f, 31f).y, p(20f, 22f).x, p(20f, 22f).y, p(24f, 22f).x, p(24f, 22f).y)
+            cubicTo(p(27f, 22f).x, p(27f, 22f).y, p(28f, 28f).x, p(28f, 28f).y, p(31f, 27f).x, p(31f, 27f).y)
+            cubicTo(p(34f, 26f).x, p(34f, 26f).y, p(35f, 20f).x, p(35f, 20f).y, p(37f, 20f).x, p(37f, 20f).y)
+        }
+        drawPath(trace, white, style = stroke(2f))
     }
 
     /** Монитор: кадр с полосами зебры в правой половине — как на Mac. */

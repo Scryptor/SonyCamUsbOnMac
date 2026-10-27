@@ -16,6 +16,7 @@ import local.zve10viewer.settings.CaptureMode
 import local.zve10viewer.settings.FileNaming
 import local.zve10viewer.settings.Preset
 import local.zve10viewer.settings.PresetCatalog
+import local.zve10viewer.monitor.Waveform
 import local.zve10viewer.view.FloatingPlacement
 
 /** Настройки программы. Хранятся в SharedPreferences; имена и значения — как у программы для Mac. */
@@ -65,6 +66,33 @@ class Prefs(context: Context) {
     var monitorAssist: String?
         get() = prefs.getString("monitorAssist", null)
         set(value) = prefs.edit().putString("monitorAssist", value).apply()
+
+    var waveformOn: Boolean
+        get() = prefs.getBoolean("waveformOn", false)
+        set(value) = prefs.edit().putBoolean("waveformOn", value).apply()
+
+    var waveformMode: Waveform.Mode
+        get() = runCatching { Waveform.Mode.valueOf(prefs.getString("waveformMode", "")!!) }.getOrDefault(Waveform.Mode.luma)
+        set(value) = prefs.edit().putString("waveformMode", value.name).apply()
+
+    /** Где волновая форма — как у гистограммы; null — на месте по умолчанию, справа внизу. */
+    var waveformPlacement: FloatingPlacement?
+        get() = if (prefs.contains("waveformX") && prefs.contains("waveformY")) {
+            FloatingPlacement.restored(prefs.getFloat("waveformX", 0f), prefs.getFloat("waveformY", 0f))
+        } else {
+            null
+        }
+        set(value) {
+            val edit = prefs.edit()
+            if (value == null) edit.remove("waveformX").remove("waveformY")
+            else edit.putFloat("waveformX", value.x.toFloat()).putFloat("waveformY", value.y.toFloat())
+            edit.apply()
+        }
+
+    /** Откуда эталон для наложения: «кадр 12:04:31» или имя снимка; сам эталон — файл в данных программы. */
+    var referenceSource: String?
+        get() = prefs.getString("referenceSource", null)
+        set(value) = prefs.edit().putString("referenceSource", value).apply()
 
     var histogramOn: Boolean
         get() = prefs.getBoolean("histogramOn", false)

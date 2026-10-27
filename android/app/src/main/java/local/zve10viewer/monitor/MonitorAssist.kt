@@ -15,6 +15,7 @@ data class MonitorAssist(
     val center: Boolean = false,
     val frameMarker: FrameMarker = FrameMarker.off,
     val safeZone: SafeZone = SafeZone.off,
+    val overlay: Overlay = Overlay.off,
     /** Последнее включённое значение каждого инструмента — к нему возвращает повторное касание выбранной плитки. */
     val lastOn: Map<String, String> = emptyMap(),
 ) {
@@ -37,6 +38,9 @@ data class MonitorAssist(
     /** Безопасная зона: доля кадра (или рамки), куда помещают надписи и главное. */
     enum class SafeZone(val value: String, val fraction: Double?) { off("off", null), p90("90", 0.9), p80("80", 0.8) }
 
+    /** Наложение кадра: эталонный кадр поверх живого с этой непрозрачностью — повторить композицию. */
+    enum class Overlay(val value: String, val opacity: Float?) { off("off", null), p25("25", 0.25f), p50("50", 0.5f), p75("75", 0.75f) }
+
     /** Что считается по точкам кадра: зебра, false color, пикинг. */
     val needsRaster: Boolean get() = zebra != Zebra.off || falseColor || peaking != Peaking.off
 
@@ -44,7 +48,7 @@ data class MonitorAssist(
     val hasMarkers: Boolean get() = grid != Grid.off || center || frameMarker != FrameMarker.off || safeZone != SafeZone.off
 
     /** Включено хоть что-то. */
-    val isActive: Boolean get() = needsRaster || hasMarkers
+    val isActive: Boolean get() = needsRaster || hasMarkers || overlay != Overlay.off
 
     /** Значение инструмента строкой — как в API программы для Mac: «95», «on», «9:16». */
     fun value(tool: MonitorTool): String = when (tool) {
@@ -56,6 +60,7 @@ data class MonitorAssist(
         MonitorTool.center -> if (center) "on" else "off"
         MonitorTool.frameMarker -> frameMarker.value
         MonitorTool.safeZone -> safeZone.value
+        MonitorTool.overlay -> overlay.value
     }
 
     /** С новым значением инструмента; null — такого значения у него нет. */
@@ -69,6 +74,7 @@ data class MonitorAssist(
             MonitorTool.center -> flag(value)?.let { copy(center = it) }
             MonitorTool.frameMarker -> FrameMarker.entries.firstOrNull { it.value == value }?.let { copy(frameMarker = it) }
             MonitorTool.safeZone -> SafeZone.entries.firstOrNull { it.value == value }?.let { copy(safeZone = it) }
+            MonitorTool.overlay -> Overlay.entries.firstOrNull { it.value == value }?.let { copy(overlay = it) }
         } ?: return null
         return if (value != "off") next.copy(lastOn = lastOn + (tool.name to value)) else next
     }
@@ -93,6 +99,9 @@ data class MonitorAssist(
         if (tool.options.any { it.first == "off" }) assist.with(tool, "off") ?: assist else assist
     }
 
+    /** Горит ли плитка инструмента: включён. Цвет пикинга «выкл» не бывает — он горит вместе с пикингом. */
+    fun isOn(tool: MonitorTool): Boolean = if (tool == MonitorTool.peakingColor) peaking != Peaking.off else value(tool) != "off"
+
     /** Подпись значения на плитке: «95 %», «Выкл», «Красный». */
     fun label(tool: MonitorTool): String {
         val v = value(tool)
@@ -109,6 +118,7 @@ data class MonitorAssist(
         put("center", center)
         put("frameMarker", frameMarker.value)
         put("safeZone", safeZone.value)
+        put("overlay", overlay.value)
         put("lastOn", JSONObject(lastOn))
     }.toString()
 
@@ -156,4 +166,7 @@ enum class MonitorTool(val title: String, val options: List<Pair<String, String>
         "Рамка другого формата: что войдёт в вертикальное видео (9:16), пост (4:5, 1:1) или кино (2.39:1)."),
     safeZone("Безоп. зона", listOf("off" to "Выкл", "90" to "90 %", "80" to "80 %"),
         "Безопасная зона: 90 % или 80 % кадра (или рамки) — внутри неё надписи не обрежутся."),
+    overlay("Наложение", listOf("off" to "Выкл", "25" to "25 %", "50" to "50 %", "75" to "75 %"),
+        "Эталонный кадр полупрозрачно поверх живого — повторить композицию. Эталон — текущий кадр («Новый кадр») " +
+            "или снимок из галереи («Наложить на кадр»)."),
 }

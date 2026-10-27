@@ -9,6 +9,7 @@ import local.zve10viewer.monitor.FrameMarkers
 import local.zve10viewer.monitor.MonitorAssist
 import local.zve10viewer.monitor.MonitorAssist.Zebra
 import local.zve10viewer.monitor.MonitorTool
+import local.zve10viewer.monitor.Waveform
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -52,6 +53,21 @@ class MonitorAssistTest {
         assertEquals("Выкл", assist.label(MonitorTool.zebra))
         assertEquals("80 %", assist.label(MonitorTool.safeZone))
         assertTrue(assist.falseColor)
+        // цвет пикинга горит вместе с пикингом
+        assertTrue(assist.isOn(MonitorTool.peakingColor))
+        assertFalse(MonitorAssist().isOn(MonitorTool.peakingColor))
+        assertFalse(assist.isOn(MonitorTool.zebra))
+    }
+
+    @Test fun overlayIsAToolWithOpacity() {
+        val assist = MonitorAssist().with(MonitorTool.overlay, "50")!!
+        assertTrue(assist.isActive)
+        assertFalse(assist.needsRaster || assist.hasMarkers)
+        assertEquals(0.5f, assist.overlay.opacity)
+        assertEquals("50 %", assist.label(MonitorTool.overlay))
+        assertEquals(MonitorAssist.Overlay.off, assist.toggled(MonitorTool.overlay).overlay)
+        assertEquals(MonitorAssist.Overlay.p50, assist.toggled(MonitorTool.overlay).toggled(MonitorTool.overlay).overlay)
+        assertEquals(assist, MonitorAssist.fromJson(assist.toJson()))
     }
 
     @Test fun toggleRemembersLastValue() {
@@ -241,5 +257,44 @@ class MonitorAssistTest {
         assertTrue(abs(stepX - stepY) < 0.01)
         assertTrue(0.5f in verticals)
         assertNotNull(lines)
+    }
+
+    // волновая форма
+
+    /** Кадр ARGB: слева половина одного цвета, справа — другого. */
+    private fun halves(width: Int, height: Int, left: Int, right: Int) =
+        IntArray(width * height) { if (it % width < width / 2) left else right }
+
+    @Test fun waveformPutsEachColumnAtItsBrightness() {
+        val w = Waveform.counts(halves(512, 10, 0xFF000000.toInt(), 0xFFC8C8C8.toInt()), 512, 10, Waveform.Mode.luma)
+        assertEquals(Waveform.LUMA_COLUMNS, w.columns)
+        assertEquals(20, w.samplesPerColumn)
+        assertEquals(20, w.count(0, 0))
+        assertEquals(20, w.count(255, 100))
+        assertEquals(0, w.count(255, 0))
+        assertEquals(5120, w.counts.sum())
+        assertEquals(Pair(0, 201), w.levelRange)
+    }
+
+    @Test fun waveformParadeSplitsChannels() {
+        val w = Waveform.counts(halves(256, 4, 0xFFFF0000.toInt(), 0xFF0000FF.toInt()), 256, 4, Waveform.Mode.parade)
+        val p = Waveform.PARADE_COLUMNS
+        assertEquals(p * 3, w.columns)
+        assertEquals(8, w.count(0, 127))
+        assertEquals(8, w.count(p - 1, 0))
+        assertEquals(8, w.count(2 * p, 0))
+        assertEquals(8, w.count(3 * p - 1, 127))
+        assertTrue((p until 2 * p).all { w.count(it, 0) == 8 })
+    }
+
+    @Test fun waveformImageIsBrightWhereColumnsAreDense() {
+        val w = Waveform.counts(halves(512, 10, 0xFF000000.toInt(), 0xFFC8C8C8.toInt()), 512, 10, Waveform.Mode.luma)
+        val pixels = Waveform.image(w)
+        assertEquals(w.columns * Waveform.ROWS, pixels.size)
+        // строки картинки — сверху вниз: чёрное — в последней строке
+        assertEquals(255, pixels[(Waveform.ROWS - 1) * w.columns] ushr 24)
+        assertEquals(0, pixels[0] ushr 24)
+        assertEquals(0.0, Waveform.intensity(0, 100), 1e-9)
+        assertTrue(Waveform.intensity(1, 10_000) >= 0.18)
     }
 }

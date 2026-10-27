@@ -1,6 +1,19 @@
 package local.zve10viewer.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
+import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.drawText
+import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
+import local.zve10viewer.monitor.Waveform
+import kotlin.math.roundToInt
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -68,6 +81,19 @@ fun AssistMenu(controller: CameraController, screen: ScreenState) {
                             .padding(horizontal = 16.dp, vertical = 12.dp))
                 }
             }
+            if (tool == MonitorTool.overlay) {
+                // эталон: откуда он и как взять новый; снимок — кнопкой «Наложить на кадр» в галерее
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(controller.reference?.let { "Эталон: ${it.source}" } ?: "Эталона пока нет", color = Secondary, fontSize = 16.sp)
+                    Text("Новый кадр", color = Color.White, fontSize = 16.sp,
+                        modifier = Modifier.background(PanelLight, RoundedCornerShape(9.dp))
+                            .clickable(enabled = controller.frame != null) {
+                                controller.takeReferenceFromFrame()
+                                if (controller.assist.overlay == MonitorAssist.Overlay.off) controller.toggleAssist(MonitorTool.overlay)
+                            }
+                            .padding(horizontal = 14.dp, vertical = 8.dp))
+                }
+            }
             Text(tool.help, color = Secondary, fontSize = 14.sp, lineHeight = 18.sp, textAlign = TextAlign.Center)
         }
         Column(Modifier.background(Panel, RoundedCornerShape(16.dp)).padding(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -79,7 +105,7 @@ fun AssistMenu(controller: CameraController, screen: ScreenState) {
                             AssistTile("Всё", "Выключить", on = false, selected = false, enabled = assist.isActive,
                                 modifier = Modifier.weight(1f)) { controller.assistOff() }
                         } else {
-                            AssistTile(item.title, assist.label(item), on = assist.value(item) != "off",
+                            AssistTile(item.title, assist.label(item), on = assist.isOn(item),
                                 selected = item == tool, modifier = Modifier.weight(1f)) {
                                 if (screen.assistSelected == item) controller.toggleAssist(item) else screen.assistSelected = item
                             }
@@ -165,6 +191,62 @@ fun DrawScope.drawAssistMarkers(assist: MonitorAssist, frame: Size, rect: Rect) 
         val arm = 14.dp.toPx()
         line(Offset(at.x - arm, at.y), Offset(at.x + arm, at.y), 0.9f, 1.5.dp.toPx())
         line(Offset(at.x, at.y - arm), Offset(at.x, at.y + arm), 0.9f, 1.5.dp.toPx())
+    }
+}
+
+/**
+ * Волновая форма: по горизонтали — кадр слева направо, по вертикали — яркость, снизу чёрное. Линии — 0, 50 и 100 % (белое
+ * превью: в видео 234, в фото 255); что выше 100 % — пересвет. Под графиком — переключатель «Яркость / RGB».
+ */
+@Composable
+fun WaveformView(trace: CameraController.WaveformTrace, mode: Waveform.Mode, onMode: (Waveform.Mode) -> Unit) {
+    val measurer = rememberTextMeasurer()
+    Column(
+        Modifier.background(Color(0x73000000), RoundedCornerShape(10.dp)).padding(10.dp).width(300.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Canvas(Modifier.fillMaxWidth().height(116.dp)) {
+            fun y(level: Double) = size.height * (1 - level.toFloat() / 256)
+            drawImage(trace.image, dstSize = IntSize(size.width.roundToInt(), size.height.roundToInt()), filterQuality = FilterQuality.Low)
+            val label = TextStyle(color = Color.White.copy(alpha = 0.55f), fontSize = 9.sp)
+            for (fraction in listOf(1.0, 0.5, 0.0)) {
+                val at = y(trace.white * fraction + 0.5)
+                drawLine(Color.White.copy(alpha = if (fraction == 0.5) 0.3f else 0.45f), Offset(0f, at), Offset(size.width, at),
+                    1.dp.toPx(), pathEffect = if (fraction == 0.5) PathEffect.dashPathEffect(floatArrayOf(3.dp.toPx(), 3.dp.toPx())) else null)
+                drawText(measurer, "${(fraction * 100).roundToInt()}", Offset(2.dp.toPx(), (at - 13.dp.toPx()).coerceIn(0f, size.height - 12.dp.toPx())),
+                    style = label)
+            }
+            if (mode == Waveform.Mode.parade) {
+                for (third in listOf(1f / 3, 2f / 3)) {
+                    drawLine(Color.White.copy(alpha = 0.3f), Offset(size.width * third, 0f), Offset(size.width * third, size.height), 1.dp.toPx())
+                }
+            }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Волновая форма", color = Color.White.copy(alpha = 0.6f), fontSize = 13.sp, modifier = Modifier.weight(1f))
+            for (item in Waveform.Mode.entries) {
+                val current = item == mode
+                Text(item.title, color = if (current) Color.Black else Color.White, fontSize = 13.sp,
+                    fontWeight = if (current) FontWeight.Bold else FontWeight.Normal,
+                    modifier = Modifier.padding(start = 6.dp).background(if (current) Color.White else PanelLight, RoundedCornerShape(6.dp))
+                        .semantics { contentDescription = "Волновая форма: ${item.title}" }
+                        .clickable { onMode(item) }.padding(horizontal = 10.dp, vertical = 5.dp))
+            }
+        }
+    }
+}
+
+/** Эталонный кадр поверх живого: заполняет кадр на экране (rect) по большей стороне, лишнее обрезано по краю кадра. */
+fun DrawScope.drawReference(image: ImageBitmap, rect: Rect, alpha: Float) {
+    if (image.width <= 0 || image.height <= 0 || rect.width <= 0f || rect.height <= 0f) return
+    val k = maxOf(rect.width / image.width, rect.height / image.height)
+    val w = image.width * k
+    val h = image.height * k
+    val left = rect.center.x - w / 2
+    val top = rect.center.y - h / 2
+    clipRect(rect.left, rect.top, rect.right, rect.bottom) {
+        drawImage(image, dstOffset = IntOffset(left.roundToInt(), top.roundToInt()), dstSize = IntSize(w.roundToInt(), h.roundToInt()),
+            alpha = alpha, filterQuality = FilterQuality.Low)
     }
 }
 

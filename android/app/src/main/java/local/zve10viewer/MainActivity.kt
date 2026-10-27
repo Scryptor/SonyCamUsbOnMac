@@ -48,7 +48,8 @@ class MainActivity : ComponentActivity() {
      * `adb shell am broadcast -p local.zve10viewer -a local.zve10viewer.DEBUG_ZOOM --ef factor 4 --ef x 0.3 --ef y 0.4
      * [--ez bicubic false]`; `… -a local.zve10viewer.DEBUG_GALLERY --ei index 2` (−1 — закрыть); монитор —
      * `… -a local.zve10viewer.DEBUG_ASSIST --es tool zebra --es value 95` (без value — вкл/выкл), `--ez off true` — всё
-     * выключить, `--ez menu true|false [--es tool peaking]` — меню. Растр — в logcat с тегом ZVAssist.
+     * выключить, `--ez menu true|false [--es tool peaking]` — меню, `--es waveform luma|parade|off` — волновая форма,
+     * `--ez reference true` — эталон из текущего кадра, `--ei shot 0` — из снимка ленты. Растр — в logcat с тегом ZVAssist.
      */
     private val debugReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -60,7 +61,9 @@ class MainActivity : ComponentActivity() {
                 ACTION_DEBUG_GALLERY -> controller.debugCommand(CameraController.DebugCommand.Gallery(intent.getIntExtra("index", -1)))
                 ACTION_DEBUG_ASSIST -> controller.debugCommand(CameraController.DebugCommand.Assist(
                     intent.getStringExtra("tool"), intent.getStringExtra("value"), intent.getBooleanExtra("off", false),
-                    if (intent.hasExtra("menu")) intent.getBooleanExtra("menu", false) else null))
+                    if (intent.hasExtra("menu")) intent.getBooleanExtra("menu", false) else null,
+                    intent.getStringExtra("waveform"), intent.getBooleanExtra("reference", false),
+                    if (intent.hasExtra("shot")) intent.getIntExtra("shot", 0) else null))
             }
         }
     }

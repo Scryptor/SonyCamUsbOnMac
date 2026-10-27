@@ -109,6 +109,7 @@ import local.zve10viewer.settings.LumaStats
 import local.zve10viewer.sony.SonyProp
 import kotlin.math.sqrt
 import local.zve10viewer.monitor.MonitorTool
+import local.zve10viewer.monitor.Waveform
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.graphics.FilterQuality
 
@@ -148,8 +149,9 @@ class ScreenState {
     var debugOpen by mutableStateOf(false)
     var debugTab by mutableStateOf(DebugTab.link)
 
-    /** Где гистограмма на экране: касания по ней не возвращают скрытые элементы. */
+    /** Где гистограмма и волновая форма на экране: касания по ним не возвращают скрытые элементы. */
     var histogramRect: Rect? = null
+    var waveformRect: Rect? = null
     /** Высота ленты снимков (как её разложили) — гистограмма по умолчанию стоит над ней. */
     var stripHeight by mutableStateOf<Float?>(null)
     /** Где меню Fn, пока оно открыто: гистограмма поднимается над ним, а не прячется под ним. */
@@ -282,6 +284,14 @@ fun App(controller: CameraController) {
                     screen.galleryShot = if (command.index < 0) null else controller.shots.getOrNull(command.index)?.id
                 is CameraController.DebugCommand.Assist -> {
                     val tool = command.tool?.let { name -> MonitorTool.entries.firstOrNull { it.name == name } }
+                    // волновая форма и эталон — вместе с остальным или отдельно
+                    command.waveform?.let { name ->
+                        val mode = Waveform.Mode.entries.firstOrNull { it.name == name }
+                        if ((mode == null) == controller.waveformOn) controller.toggleWaveform()
+                        if (mode != null) controller.chooseWaveformMode(mode)
+                    }
+                    if (command.reference) controller.takeReferenceFromFrame()
+                    command.shot?.let { index -> controller.shots.getOrNull(index)?.let { controller.takeReference(it) } }
                     when {
                         command.off -> controller.assistOff()
                         command.menu == true -> screen.openAssist(tool)
@@ -428,7 +438,8 @@ private fun LiveScreen(controller: CameraController, screen: ScreenState) {
                         val event = awaitPointerEvent(PointerEventPass.Initial)
                         if (event.type == PointerEventType.Press && event.changes.count { it.pressed } == 1) {
                             val at = event.changes.first().position
-                            onPanel = screen.histogramRect?.contains(at) == true || screen.zoomBadgeRect?.contains(at) == true
+                            onPanel = screen.histogramRect?.contains(at) == true || screen.waveformRect?.contains(at) == true ||
+                                screen.zoomBadgeRect?.contains(at) == true
                             if (!onPanel) screen.revealTap = screen.controlsHidden
                         }
                         if (!onPanel) screen.noteActivity()
@@ -451,6 +462,7 @@ private fun LiveScreen(controller: CameraController, screen: ScreenState) {
         }
         // гистограмма — над видео, под кнопками и меню; не прячется вместе с элементами
         if (controller.histogramOn) FloatingHistogram(controller, screen, feedback)
+        if (controller.waveformOn) FloatingWaveform(controller, screen, feedback)
         // плашка увеличения — видна и при скрытых элементах: увеличенная картинка — не весь кадр
         val zoomFrame = controller.frame
         if (screen.zoom.isZoomed && zoomFrame != null) {
@@ -574,9 +586,12 @@ private fun Video(controller: CameraController, screen: ScreenState, feedback: F
             val bicubic = renderer != null && screen.bicubic && (BICUBIC_AT_IDENTITY || screen.zoom.isZoomed)
             val assist = controller.assist
             val overlay = if (assist.needsRaster) controller.assistOverlay else null
+            val reference = assist.overlay.opacity?.let { opacity -> controller.reference?.let { it to opacity } }
             Canvas(Modifier.fillMaxSize()) {
                 val rect = screen.zoom.imageRect(size, frameSize)
                 drawFrame(frame, rect, if (dimmed) 0.55f else 1f, if (bicubic) renderer else null)
+                // эталонный кадр — полупрозрачно поверх живого: заполняет кадр, лишнее обрезано по его краю
+                if (reference != null) drawReference(reference.first.image, rect, reference.second * if (dimmed) 0.55f else 1f)
                 // зебра, false color и пикинг — растр над своей частью кадра; едет вместе с картинкой
                 if (overlay != null) {
                     val area = assistArea(overlay, rect)
@@ -876,6 +891,14 @@ private fun TopBar(controller: CameraController, screen: ScreenState) {
         ) {
             TopBarIcon(TopBarGlyph.histogram)
         }
+        Box(
+            Modifier.size(44.dp).background(if (controller.waveformOn) Accent else PanelLight, RoundedCornerShape(9.dp))
+                .semantics { contentDescription = "Волновая форма" }
+                .clickable { controller.toggleWaveform() },
+            contentAlignment = Alignment.Center,
+        ) {
+            TopBarIcon(TopBarGlyph.waveform)
+        }
         // зебра, false color, пикинг и маркеры — меню внизу, на месте строки значений
         MonitorButton(screen)
         // строка состояния справа вверху видна вместе с элементами; кнопка закрепляет её — тогда остаётся и без них
@@ -918,16 +941,18 @@ private fun TopBar(controller: CameraController, screen: ScreenState) {
 }
 
 /**
- * Гистограмма отдельным слоем над видео: видна и при скрытых элементах, и при открытом меню Fn (там она нужнее всего —
- * меняют экспозицию; если меню или плашка увеличения её закрыли бы, она поднимается над ними). Тащат за любое место —
- * она чуть крупнее (1,03)
- * и с тенью; отпустили ближе 24 dp к краю — прилипает к отступу 16 dp; за экран не уходит. Место — доли свободного
- * места: переживает поворот и перезапуск. По умолчанию — как раньше, слева внизу над лентой снимков. Размер панели —
- * как её разложили, а не на глаз: с неверным размером у краёв она уходила бы за экран.
+ * Панель отдельным слоем над видео — гистограмма, волновая форма: видна и при скрытых элементах, и при открытом меню Fn
+ * (там она нужнее всего — меняют экспозицию; если меню или плашка увеличения её закрыли бы, она поднимается над ними).
+ * Тащат за любое место — она чуть крупнее (1,03) и с тенью; отпустили ближе 24 dp к краю — прилипает к отступу 16 dp;
+ * за экран не уходит. Место — доли свободного места: переживает поворот и перезапуск. Размер панели — как её разложили,
+ * а не на глаз: с неверным размером у краёв она уходила бы за экран. defaultOrigin — где стоять, пока её не перетаскивали
+ * (в пикселях, по размеру панели и экрана); onRect — где она сейчас (касания по ней не возвращают скрытые элементы).
  */
 @Composable
-private fun FloatingHistogram(controller: CameraController, screen: ScreenState, feedback: FeedbackState) {
-    val bins = controller.histogram ?: return
+private fun FloatingPanel(
+    screen: ScreenState, feedback: FeedbackState, placement: FloatingPlacement?, onPlace: (FloatingPlacement) -> Unit,
+    defaultOrigin: (panel: Size, view: Size) -> Offset, onRect: (Rect?) -> Unit, content: @Composable () -> Unit,
+) {
     val density = LocalDensity.current
     val scope = rememberCoroutineScope()
     var panel by remember { mutableStateOf(IntSize.Zero) }
@@ -947,11 +972,7 @@ private fun FloatingHistogram(controller: CameraController, screen: ScreenState,
         if (panel == IntSize.Zero || view == Size.Zero) return null
         val size = panel.toSize()
         return with(density) {
-            val origin = controller.histogramPlacement?.let { px(it.origin(dp(size), dp(view))) } ?: run {
-                // над лентой снимков: отступ экрана 18, над строкой значений — 76, до ленты — 10
-                val strip = if (controller.shots.isNotEmpty()) (screen.stripHeight ?: 76.dp.toPx()) + 10.dp.toPx() else 0f
-                Offset(18.dp.toPx(), view.height - 18.dp.toPx() - 76.dp.toPx() - strip - size.height)
-            }
+            val origin = placement?.let { px(it.origin(dp(size), dp(view))) } ?: defaultOrigin(size, view)
             // меню Fn и плашка увеличения её не закрывают: если легла бы под них — поднимается над ними
             var placed = origin
             for (obstacle in listOfNotNull(screen.fnMenuRect, screen.zoomBadgeRect)) {
@@ -973,11 +994,11 @@ private fun FloatingHistogram(controller: CameraController, screen: ScreenState,
             placed = true
         }
     }
-    DisposableEffect(Unit) { onDispose { screen.histogramRect = null } }
+    DisposableEffect(Unit) { onDispose { onRect(null) } }
 
     fun drop() {
         val from = drag ?: return
-        controller.placeHistogram(FloatingPlacement.dropped(dp(from), dp(panel.toSize()), dp(feedback.screenSize)))
+        onPlace(FloatingPlacement.dropped(dp(from), dp(panel.toSize()), dp(feedback.screenSize)))
         scope.launch {
             position.snapTo(from)
             drag = null
@@ -991,7 +1012,7 @@ private fun FloatingHistogram(controller: CameraController, screen: ScreenState,
             .offset { (drag ?: position.value).round() }
             .onGloballyPositioned {
                 panel = it.size
-                screen.histogramRect = it.boundsInRoot()
+                onRect(it.boundsInRoot())
             }
             .graphicsLayer {
                 // пока размер не известен — не показываем: место считается от размера
@@ -1017,7 +1038,41 @@ private fun FloatingHistogram(controller: CameraController, screen: ScreenState,
                 )
             },
     ) {
+        content()
+    }
+}
+
+/** Гистограмма; по умолчанию — как раньше, слева внизу над лентой снимков. */
+@Composable
+private fun FloatingHistogram(controller: CameraController, screen: ScreenState, feedback: FeedbackState) {
+    val bins = controller.histogram ?: return
+    val density = LocalDensity.current
+    FloatingPanel(screen, feedback, controller.histogramPlacement, controller::placeHistogram,
+        defaultOrigin = { size, view ->
+            with(density) {
+                // над лентой снимков: отступ экрана 18, над строкой значений — 76, до ленты — 10
+                val strip = if (controller.shots.isNotEmpty()) (screen.stripHeight ?: 76.dp.toPx()) + 10.dp.toPx() else 0f
+                Offset(18.dp.toPx(), view.height - 18.dp.toPx() - 76.dp.toPx() - strip - size.height)
+            }
+        },
+        onRect = { screen.histogramRect = it },
+    ) {
         HistogramView(bins, controller.histogramStats)
+    }
+}
+
+/** Волновая форма; по умолчанию — справа внизу, над строкой значений. */
+@Composable
+private fun FloatingWaveform(controller: CameraController, screen: ScreenState, feedback: FeedbackState) {
+    val trace = controller.waveform ?: return
+    val density = LocalDensity.current
+    FloatingPanel(screen, feedback, controller.waveformPlacement, controller::placeWaveform,
+        defaultOrigin = { size, view ->
+            with(density) { Offset(view.width - 18.dp.toPx() - size.width, view.height - 18.dp.toPx() - 76.dp.toPx() - size.height) }
+        },
+        onRect = { screen.waveformRect = it },
+    ) {
+        WaveformView(trace, controller.waveformMode) { controller.chooseWaveformMode(it) }
     }
 }
 
