@@ -64,7 +64,9 @@ struct LiveScreen: View {
                                         || screen.galleryShot != nil || screen.presetMenuOpen || screen.presetNaming
                                         || screen.presetSaving
                                         // кнопка записи ждёт камеру или показывает отказ — не прятать её из-под взгляда
-                                        || controller.recordingToggle.request != nil || controller.recordingNotice != nil)
+                                        || controller.recordingToggle.request != nil || controller.recordingNotice != nil
+                                        // держат «T» или «W» — зум не должен оборваться вместе с кнопками
+                                        || controller.zoomDirection != 0)
             }
         }
         .environment(\.colorScheme, .dark)

@@ -252,6 +252,9 @@ struct FloatingPanel<Content: View>: View {
             }
             .scaleEffect(dragOrigin == nil ? 1 : 1.03)
             .shadow(color: .black.opacity(dragOrigin == nil ? 0 : 0.45), radius: 14, y: 4)
+            // щелчок по панели — не щелчок по кадру под ней (там он поставил бы фокус касанием)
+            .contentShape(Rectangle())
+            .onTapGesture {}
             .gesture(
                 DragGesture(minimumDistance: 2, coordinateSpace: .named(LiveScreen.space))
                     .onChanged { value in

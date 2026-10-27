@@ -153,6 +153,9 @@ struct FocusScale: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+        // щелчок по шкале — не щелчок по кадру под ней
+        .contentShape(Rectangle())
+        .onTapGesture {}
         .onScrollWheelStep { controller.focusStep($0) }
     }
 

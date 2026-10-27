@@ -412,7 +412,9 @@ private fun LiveScreen(controller: CameraController, screen: ScreenState) {
             delay(500)
             // и пока кнопка записи ждёт камеру или показывает отказ — не прятать её из-под взгляда
             val busy = screen.overlayOpen || controller.review != null || screen.galleryShot != null ||
-                controller.recordingRequest != null || controller.recordingNotice != null
+                controller.recordingRequest != null || controller.recordingNotice != null ||
+                // держат «T» или «W» — зум не должен оборваться вместе с кнопками
+                controller.zoomDirection != 0
             if (busy || !controller.prefs.autoHide) {
                 screen.autoHidden = false
             } else if (!screen.autoHidden && System.currentTimeMillis() - screen.lastActivity > controller.prefs.autoHideSeconds * 1000L) {
