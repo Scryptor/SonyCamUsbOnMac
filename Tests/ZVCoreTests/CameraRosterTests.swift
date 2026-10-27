@@ -239,36 +239,90 @@ private func usb(_ key: String, serial: String? = nil) -> CameraSighting {
     #expect(CameraStripPlan.members(roster, main: ids[0]).map(\.id) == [ids[2], ids[1]])
 }
 
-@Test func linkedFlagIsStoredOnlyWhenSetAndLeavesWithTheStrip() throws {
+private func groupOfFour() -> (CameraRoster, [String]) {
     var roster = CameraRoster()
-    let b = roster.connected(serial: "B", model: "ZV-E10", link: .wifi(CameraEndpoint(host: "10.0.0.6")), now: now)
-    roster.setInStrip(b, true)
-    roster.setLinked(b, true)
-    let text = String(decoding: try #require(roster.encoded()), as: UTF8.self)
-    #expect(text.contains(#""linked":true"#))
-    #expect(CameraRoster.load(cameras: Data(text.utf8), preferred: nil, legacyName: nil, legacyHost: nil).camera(b)?.linked == true)
-    roster.setInStrip(b, false)                       // убрали из ленты — и не связана
-    #expect(roster.camera(b)?.linked == false)
-    #expect(!String(decoding: try #require(roster.encoded()), as: UTF8.self).contains("linked"))
+    let ids = ["A", "B", "C", "D"].enumerated().map { index, serial in
+        roster.connected(serial: serial, model: "ZV-E10", link: .wifi(CameraEndpoint(host: "10.0.0.\(5 + index)")), now: now)
+    }
+    for id in ids { roster.setInStrip(id, true) }
+    return (roster, ids)
 }
 
-@Test func switchingToALinkedCameraKeepsTheGroupTogether() {
-    var roster = CameraRoster()
-    let a = roster.connected(serial: "A", model: "ZV-E10", link: .wifi(CameraEndpoint(host: "10.0.0.5")), now: now)
-    let b = roster.connected(serial: "B", model: "ZV-E10", link: .wifi(CameraEndpoint(host: "10.0.0.6")), now: now)
-    let c = roster.connected(serial: "C", model: "ZV-E10", link: .wifi(CameraEndpoint(host: "10.0.0.7")), now: now)
-    for id in [a, b, c] { roster.setInStrip(id, true) }
-    roster.switchedTo(c, from: a)                     // на несвязанную — связи не меняются
-    #expect(roster.camera(a)?.linked == false)
-    roster.setLinked(b, true)
-    roster.switchedTo(b, from: c)                     // на связанную — прежняя главная тоже связана
-    #expect(roster.camera(c)?.linked == true)
-    roster.setInStrip(a, false)
-    roster.switchedTo(b, from: a)                     // прежняя не в ленте — связывать нечего
-    #expect(roster.camera(a)?.linked == false)
-    roster.switchedTo(b, from: nil)
-    roster.switchedTo(b, from: b)
-    #expect(roster.camera(b)?.linked == true)
+private func group(_ roster: CameraRoster) -> Set<String> { Set(roster.known.filter(\.linked).map(\.id)) }
+
+@Test func groupFlagIsStoredOnlyWhenSetAndLeavesWithTheStrip() throws {
+    var (roster, ids) = groupOfFour()
+    let (a, b) = (ids[0], ids[1])
+    roster.setLinked(b, true, main: a)
+    let text = String(decoding: try #require(roster.encoded()), as: UTF8.self)
+    #expect(text.contains(#""group":true"#) && !text.contains("linked"))
+    #expect(group(CameraRoster.load(cameras: Data(text.utf8), preferred: a, legacyName: nil, legacyHost: nil)) == [a, b])
+    roster.setInStrip(b, false)                       // убрали из ленты — не в группе; осталась одна — группы нет
+    #expect(group(roster).isEmpty)
+    #expect(!String(decoding: try #require(roster.encoded()), as: UTF8.self).contains("group"))
+}
+
+@Test func linkingBringsTheMainIntoTheOneGroup() {
+    var (roster, ids) = groupOfFour()
+    let (a, b, c, d) = (ids[0], ids[1], ids[2], ids[3])
+    roster.setLinked(b, true, main: a)                // связали с главной — и главная в группе
+    roster.setLinked(c, true, main: a)
+    #expect(group(roster) == [a, b, c])
+    roster.setLinked(c, false, main: a)               // отвязали — вышла только она
+    #expect(group(roster) == [a, b])
+    roster.setLinked(c, true, main: d)                // главная D не из группы: группа одна — D и C входят в неё
+    #expect(group(roster) == [a, b, c, d])
+    roster.setLinked(b, true, main: d)                // уже в группе — та же группа
+    #expect(group(roster) == [a, b, c, d])
+    roster.setLinked("нет такой", true, main: d)
+    #expect(group(roster) == [a, b, c, d])
+}
+
+@Test func aGroupOfOneIsNoGroup() {
+    var (roster, ids) = groupOfFour()
+    let (a, b, c) = (ids[0], ids[1], ids[2])
+    roster.setLinked(b, true, main: a)
+    roster.setLinked(b, false, main: a)               // отвязали последнюю — главная тоже не в группе
+    #expect(group(roster).isEmpty)
+    roster.setLinked(b, true, main: nil)              // главной нет — связывать не с кем
+    #expect(group(roster).isEmpty)
+    roster.setLinked(b, true, main: a)
+    roster.setLinked(c, true, main: a)
+    roster.forget(c)
+    roster.forget(b)                                  // забыли — тоже выход из группы
+    #expect(group(roster).isEmpty)
+}
+
+@Test func oldLinkedFlagBecomesAGroupWithTheLastMain() throws {
+    let (roster, ids) = groupOfFour()
+    let (a, b, c) = (ids[0], ids[1], ids[2])
+    // прежние версии: «linked» — только у камер ленты, повторяли за любой главной; последней главной была A
+    let stored = try #require(roster.encoded())
+    var records = try #require(JSONSerialization.jsonObject(with: stored) as? [[String: Any]])
+    for index in records.indices where [b, c].contains(records[index]["id"] as? String) { records[index]["linked"] = true }
+    let old = try JSONSerialization.data(withJSONObject: records)
+    #expect(group(CameraRoster.load(cameras: old, preferred: a, legacyName: nil, legacyHost: nil)) == [a, b, c])
+    // одна связанная и главная — она же: группы из одной не бывает
+    records = records.map { record in record.filter { $0.key != "linked" } }
+    records[1]["linked"] = true
+    let lone = try JSONSerialization.data(withJSONObject: records)
+    #expect(group(CameraRoster.load(cameras: lone, preferred: b, legacyName: nil, legacyHost: nil)).isEmpty)
+    // уже новые записи — «linked» без значения
+    records[2]["group"] = true
+    records[3]["group"] = true
+    let mixed = try JSONSerialization.data(withJSONObject: records)
+    #expect(group(CameraRoster.load(cameras: mixed, preferred: a, legacyName: nil, legacyHost: nil)) == [ids[2], ids[3]])
+}
+
+@Test func followersAreTheGroupOnlyWhenTheMainIsInIt() {
+    var (roster, ids) = groupOfFour()
+    let (a, b, c, d) = (ids[0], ids[1], ids[2], ids[3])
+    roster.setLinked(b, true, main: a)
+    roster.setLinked(c, true, main: a)
+    #expect(roster.followers(of: a, among: [b, c, d]) == [b, c])
+    #expect(roster.followers(of: b, among: [a, c, d]) == [a, c])      // переключились на камеру группы — она ведёт
+    #expect(roster.followers(of: d, among: [a, b, c]).isEmpty)        // на камеру не из группы — группа ждёт
+    #expect(roster.followers(of: nil, among: [a, b, c]).isEmpty)
 }
 
 @Test func stripKeepsTheOrderOfKnownCamerasWhicheverIsMain() {

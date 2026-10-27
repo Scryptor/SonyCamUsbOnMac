@@ -72,12 +72,15 @@ struct CameraStrip: View {
             CameraTile(name: controller.currentCameraName, frame: controller.frame, main: true,
                        connected: controller.phase == .ready, recording: controller.isRecording,
                        battery: controller.property(.battery)?.current.intValue,
-                       link: controller.sideCameras.contains { controller.roster.camera($0.id)?.linked == true } ? .leads : .none)
+                       link: controller.mainInGroup && controller.sideCameras.contains { controller.roster.camera($0.id)?.linked == true }
+                           ? .leads : .none)
         } else if let side = controller.sideCameras.first(where: { $0.id == id }) {
-            let linked = controller.roster.camera(side.id)?.linked == true
+            let inGroup = controller.roster.camera(side.id)?.linked == true
+            let link: CameraTile.Link = !inGroup ? .unlinked : controller.mainInGroup ? .linked : .waiting
             CameraTile(name: controller.roster.camera(side.id)?.name ?? "Камера", frame: side.frame, main: false,
                        connected: side.connected, recording: side.recording, battery: side.battery,
-                       link: linked ? .linked : .unlinked, onLink: { controller.linkCamera(side.id, !linked) })
+                       // горит — отвязать; в группе, а главная нет, или не в группе — связать с главной
+                       link: link, onLink: { controller.linkCamera(side.id, link != .linked) })
         }
     }
 }
@@ -105,8 +108,9 @@ private struct SideMenu: ViewModifier {
 
 /// Плитка ленты: кадр, имя, «● REC», заряд, если мало, цепочка группы; у главной — синяя рамка.
 private struct CameraTile: View {
-    /// Цепочка: у главной — ведёт группу (без кнопки), у камеры ленты — кнопка «связать».
-    enum Link { case none, leads, linked, unlinked }
+    /// Цепочка: у главной — ведёт группу (без кнопки), у камеры ленты — кнопка. `waiting` — камера в группе, а главная
+    /// нет: группа ждёт и не повторяет.
+    enum Link { case none, leads, linked, waiting, unlinked }
 
     let name: String
     let frame: CGImage?
@@ -187,18 +191,36 @@ private struct CameraTile: View {
                 .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 4))
                 .padding(4)
                 .help("Ведёт группу: связанные камеры повторяют за ней")
-        case .linked, .unlinked:
+        case .linked, .waiting, .unlinked:
             Button(action: onLink) {
                 Image(systemName: "link")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(link == .linked ? Color.white : Color.white.opacity(0.6))
+                    .foregroundStyle(link == .unlinked ? Color.white.opacity(0.6) : Color.white)
                     .padding(5)
-                    .background(link == .linked ? Color.accentColor : Color.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 4))
+                    .background(linkBackground, in: RoundedRectangle(cornerRadius: 4))
+                    // приглушённая — на тёмной подложке: на светлом кадре синий вполсилы иначе блёклый
+                    .background(Color.black.opacity(link == .waiting ? 0.55 : 0), in: RoundedRectangle(cornerRadius: 4))
             }
             .buttonStyle(.plain)
             .padding(4)
-            .help(link == .linked ? "Отвязать от главной" : "Связать с главной: её настройки и запись — и на этой камере")
+            .help(linkHelp)
             .accessibilityLabel(link == .linked ? "Отвязать от главной" : "Связать с главной")
+        }
+    }
+
+    private var linkBackground: Color {
+        switch link {
+        case .linked: return .accentColor
+        case .waiting: return Color.accentColor.opacity(0.4)
+        default: return Color.black.opacity(0.55)
+        }
+    }
+
+    private var linkHelp: String {
+        switch link {
+        case .linked: return "Отвязать от главной"
+        case .waiting: return "В группе, но главная — не из неё: сейчас не повторяет. Связать с главной — вся группа будет повторять за ней"
+        default: return "Связать с главной: её настройки и запись — и на этой камере"
         }
     }
 }

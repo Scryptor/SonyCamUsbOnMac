@@ -41,7 +41,8 @@ sealed class CameraLink {
  * отпечатки той же камеры (по Wi-Fi — USN из ответа на поиск, по кабелю — серийный номер USB, если он не совпал); name —
  * как назвали; host и port — где была по Wi-Fi в последний раз (port — только если не 15740); paired — сопряжена;
  * lastUsed — когда подключались, секунды Unix; inStrip — в ленте камер: программа держит её на связи рядом с главной;
- * linked — связана с главной: повторяет за ней настройки, пресеты и запись.
+ * linked — в группе (цепочка на плитке): камеры группы на связи повторяют за главной настройки, пресеты и запись, когда
+ * главная тоже в группе.
  */
 data class KnownCamera(
     val id: String,
@@ -183,35 +184,45 @@ data class CameraBook(val cameras: List<KnownCamera> = emptyList(), val preferre
         return copy(cameras = cameras.map { if (it.id == id) it.copy(name = trimmed) else it })
     }
 
-    /** «Забыть»: записи нет, и предпочтение, если было на ней, снято. */
+    /** «Забыть»: записи нет, и предпочтение, если было на ней, снято; из группы она тоже выходит. */
     fun forgotten(id: String): CameraBook =
-        CameraBook(cameras.filter { it.id != id }, preferred.takeIf { it != id })
+        CameraBook(cameras.filter { it.id != id }, preferred.takeIf { it != id }).withoutLoneMember()
 
     /** «Забыть сопряжение» (новый GUID): ни одна камера программу больше не знает, имена остаются. */
     fun unpairedAll(): CameraBook = copy(cameras = cameras.map { it.copy(paired = false) })
 
-    /** «В ленту» / «Убрать из ленты» (убранная — и не связана); камера, с которой переключились на другую, тоже уходит в ленту. */
+    /** «В ленту» / «Убрать из ленты» (убранная — и не в группе); камера, с которой переключились на другую, тоже уходит в ленту. */
     fun withStrip(id: String, inStrip: Boolean): CameraBook {
         val camera = find(id) ?: return this
         val linked = camera.linked && inStrip
         if (camera.inStrip == inStrip && camera.linked == linked) return this
-        return copy(cameras = cameras.map { if (it.id == id) it.copy(inStrip = inStrip, linked = linked) else it })
-    }
-
-    /** Цепочка на плитке ленты: связать с главной или отвязать. */
-    fun withLinked(id: String, linked: Boolean): CameraBook {
-        val camera = find(id) ?: return this
-        if (camera.linked == linked) return this
-        return copy(cameras = cameras.map { if (it.id == id) it.copy(linked = linked) else it })
+        return copy(cameras = cameras.map { if (it.id == id) it.copy(inStrip = inStrip, linked = linked) else it }).withoutLoneMember()
     }
 
     /**
-     * Главной стала камера ленты main. Связанная — прежняя главная (она уже в ленте) тоже связана: группа остаётся
-     * вместе. Несвязанная — связи не меняются.
+     * Цепочка на плитке камеры ленты. Связать — в группе она и главная main; группа одна, так что главная не из группы
+     * входит в неё вместе со всеми, кто там уже есть. Отвязать — камера выходит из группы.
      */
-    fun switchedTo(main: String, previous: String?): CameraBook {
-        if (find(main)?.linked != true || previous == null || previous == main || find(previous)?.inStrip != true) return this
-        return withLinked(previous, true)
+    fun withLinked(id: String, linked: Boolean, main: String?): CameraBook {
+        if (find(id) == null) return this
+        val members = if (linked) setOfNotNull(id, main) else setOf(id)
+        val book = copy(cameras = cameras.map { if (it.id in members) it.copy(linked = linked) else it }).withoutLoneMember()
+        return if (book == this) this else book
+    }
+
+    /**
+     * Кто из камер ленты sides повторяет за главной main: камеры группы, если главная сама в группе. Главная не из
+     * группы — группа ждёт: ни за кем не повторяет.
+     */
+    fun followers(main: String?, sides: List<String>): List<String> {
+        if (main == null || find(main)?.linked != true) return emptyList()
+        return sides.filter { find(it)?.linked == true }
+    }
+
+    /** Группа из одной камеры — не группа. */
+    private fun withoutLoneMember(): CameraBook {
+        val lone = cameras.singleOrNull { it.linked } ?: return this
+        return copy(cameras = cameras.map { if (it === lone) it.copy(linked = false) else it })
     }
 
     /**
@@ -356,7 +367,7 @@ data class CameraBook(val cameras: List<KnownCamera> = emptyList(), val preferre
          * «legacy»: имя и модель — имя камеры, адрес — последний, сопряжена.
          */
         fun load(stored: String?, preferred: String?, legacyName: String?, legacyHost: String?): CameraBook {
-            if (stored != null) return CameraBook(fromJson(stored), preferred)
+            if (stored != null) return CameraBook(fromJson(stored), preferred).withLegacyGroup(stored)
             if (legacyName == null) return CameraBook(preferred = preferred)
             val address = legacyHost?.let(WiFiAddress::parse)
             val legacy = KnownCamera(LEGACY_ID, legacyName, legacyName, host = address?.host,
@@ -375,7 +386,8 @@ data class CameraBook(val cameras: List<KnownCamera> = emptyList(), val preferre
                 camera.lastUsed?.let { item.put("lastUsed", it) }
                 // не в ленте — поля нет: запись та же, что у прежних версий
                 if (camera.inStrip) item.put("strip", true)
-                if (camera.linked) item.put("linked", true)
+                // «group», а не «linked»: прежние версии писали «linked» с другим смыслом (см. withLegacyGroup)
+                if (camera.linked) item.put("group", true)
                 put(item)
             }
         }.toString()
@@ -394,9 +406,26 @@ data class CameraBook(val cameras: List<KnownCamera> = emptyList(), val preferre
                 val port = if (item.has("port") && !item.isNull("port")) item.optInt("port").takeIf { it in 1..65535 && it != PtpIp.PORT } else null
                 val lastUsed = if (item.has("lastUsed") && !item.isNull("lastUsed")) item.optLong("lastUsed") else null
                 KnownCamera(id, name ?: model, model, aliases, text(item, "host"), port, item.optBoolean("paired", false), lastUsed,
-                    item.optBoolean("strip", false), item.optBoolean("linked", false))
+                    item.optBoolean("strip", false), item.optBoolean("group", false))
             }
         }.getOrDefault(emptyList())
+
+        /**
+         * Прежние версии: «linked» — у камер ленты, а повторяли они за любой главной. Записей с «group» нет, а с «linked»
+         * есть — группа: они и предпочтённая (последняя главная).
+         */
+        private fun CameraBook.withLegacyGroup(json: String): CameraBook {
+            if (cameras.any { it.linked }) return this
+            val legacy = runCatching {
+                val array = JSONArray(json)
+                (0 until array.length()).mapNotNull { i ->
+                    array.optJSONObject(i)?.takeIf { it.optBoolean("linked", false) }?.let { text(it, "id") }
+                }
+            }.getOrDefault(emptyList())
+            if (legacy.isEmpty()) return this
+            val members = legacy.toSet() + listOfNotNull(preferred)
+            return copy(cameras = cameras.map { if (it.id in members) it.copy(linked = true) else it }).withoutLoneMember()
+        }
 
         /** Строка из JSON; нет, null или пусто — null (org.json на Android и на JVM по-разному отдают null). */
         private fun text(item: JSONObject, key: String): String? =

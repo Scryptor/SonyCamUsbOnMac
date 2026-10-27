@@ -1378,10 +1378,10 @@ class CameraController(private val context: Context, private val scope: Coroutin
     }
 
     /**
-     * Камера ленты — главная сразу: её открытый сеанс переходит на большой экран, прежняя главная (previous) — в ленту.
-     * Связанная стала главной — прежняя главная тоже связана: группа остаётся вместе.
+     * Камера ленты — главная сразу: её открытый сеанс переходит на большой экран, прежняя главная — в ленту. Группа не
+     * меняется: камера из неё ведёт группу, не из неё — группа ждёт.
      */
-    private fun promote(side: SideCamera, previous: String? = currentCameraId) {
+    private fun promote(side: SideCamera) {
         if (!side.connected || !freeForSwitch()) return
         // freeForSwitch могла убрать её (сеанс прежней главной лёг на её же место) — берём сеанс сейчас
         val open = side.detach() ?: return
@@ -1390,7 +1390,6 @@ class CameraController(private val context: Context, private val scope: Coroutin
         pairingTarget = null
         wifiStatus = null
         if (choice is CameraLink.WiFi) choice = null
-        updateBook(cameraBook.switchedTo(side.id, previous))
         adoptSession(open)
     }
 
@@ -1425,13 +1424,19 @@ class CameraController(private val context: Context, private val scope: Coroutin
 
     // MARK: - Группа камер
 
-    /** Связанные камеры ленты на связи: повторяют за главной настройки, пресеты и запись. */
+    /** Камеры группы в ленте на связи — когда главная тоже в группе: повторяют за ней настройки, пресеты и запись. */
     private val linkedSides: List<SideCamera>
-        get() = sideCameras.filter { it.connected && cameraBook.find(it.id)?.linked == true }
+        get() {
+            val followers = cameraBook.followers(currentCameraId, sideCameras.map { it.id }).toSet()
+            return sideCameras.filter { it.connected && it.id in followers }
+        }
 
-    /** Цепочка на плитке ленты: связать камеру с главной или отвязать. */
+    /** Главная в группе: камеры группы повторяют за ней. */
+    val mainInGroup: Boolean get() = currentCameraId?.let { cameraBook.find(it)?.linked } == true
+
+    /** Цепочка на плитке ленты: связать камеру с главной (главная тоже входит в группу) или отвязать. */
     fun setLinked(id: String, linked: Boolean) {
-        updateBook(cameraBook.withLinked(id, linked))
+        updateBook(cameraBook.withLinked(id, linked, currentCameraId))
         journal("«${cameraBook.find(id)?.name ?: id}» — ${if (linked) "связана с главной" else "отвязана от главной"}")
     }
 
@@ -2239,7 +2244,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
         }
         if (successor != null) {
             journal("главная пропала — главной становится «${successor.name}» из ленты")
-            promote(successor, previous = lostId)
+            promote(successor)
             return
         }
         val seconds = wifiPolicy.sessionLost(System.currentTimeMillis())

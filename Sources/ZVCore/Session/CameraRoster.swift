@@ -55,7 +55,8 @@ public struct KnownCamera: Codable, Equatable, Sendable, Identifiable {
     public var lastUsed: Date?
     /// В ленте камер: программа держит её на связи рядом с главной.
     public var inStrip: Bool
-    /// Связана с главной: повторяет за ней настройки, пресеты и запись.
+    /// В группе (цепочка на плитке): камеры группы на связи повторяют за главной настройки, пресеты и запись, когда
+    /// главная тоже в группе.
     public var linked: Bool
 
     public init(id: String, aliases: [String] = [], name: String, model: String, host: String? = nil, port: UInt16? = nil,
@@ -78,8 +79,10 @@ public struct KnownCamera: Codable, Equatable, Sendable, Identifiable {
         fingerprints.contains(id) || fingerprints.contains(where: aliases.contains)
     }
 
+    // «group», а не «linked»: прежние версии писали «linked» с другим смыслом (см. `CameraRoster.load`)
     private enum CodingKeys: String, CodingKey {
-        case id, aliases, name, model, host, port, paired, lastUsed, strip, linked
+        case id, aliases, name, model, host, port, paired, lastUsed, strip
+        case linked = "group"
     }
 
     public init(from decoder: Decoder) throws {
@@ -226,12 +229,34 @@ public struct CameraRoster: Equatable, Sendable {
         }
         // незнакомые поля и записи без id пропускаем: остальные читаются
         let records = (try? JSONDecoder().decode([Failable].self, from: cameras))?.compactMap(\.camera) ?? []
-        return CameraRoster(known: records, preferred: records.contains { $0.id == preferred } ? preferred : nil)
+        var roster = CameraRoster(known: records, preferred: records.contains { $0.id == preferred } ? preferred : nil)
+        // прежние версии: «linked» — у камер ленты, а повторяли они за любой главной; группа — они и последняя главная
+        if !records.contains(where: \.linked) {
+            let legacy = (try? JSONDecoder().decode([LegacyLink].self, from: cameras))?.filter { $0.linked == true }.compactMap(\.id) ?? []
+            if !legacy.isEmpty {
+                for id in legacy + [roster.preferred].compactMap({ $0 }) { roster.setMember(id, true) }
+                roster.dissolveLoneMember()
+            }
+        }
+        return roster
     }
 
     private struct Failable: Decodable {
         let camera: KnownCamera?
         init(from decoder: Decoder) throws { camera = try? KnownCamera(from: decoder) }
+    }
+
+    private struct LegacyLink: Decodable {
+        let id: String?
+        let linked: Bool?
+
+        init(from decoder: Decoder) throws {
+            let c = try? decoder.container(keyedBy: CodingKeys.self)
+            id = try? c?.decodeIfPresent(String.self, forKey: .id)
+            linked = try? c?.decodeIfPresent(Bool.self, forKey: .linked)
+        }
+
+        private enum CodingKeys: String, CodingKey { case id, linked }
     }
 
     public func encoded() -> Data? { try? JSONEncoder().encode(known) }
@@ -398,17 +423,41 @@ public struct CameraRoster: Equatable, Sendable {
         known[index].name = trimmed
     }
 
-    /// В ленту или из неё; убранная из ленты — и не связана.
+    /// В ленту или из неё; убранная из ленты — и не в группе.
     public mutating func setInStrip(_ id: String, _ inStrip: Bool) {
         guard let index = known.firstIndex(where: { $0.id == id }) else { return }
         known[index].inStrip = inStrip
-        if !inStrip { known[index].linked = false }
+        if !inStrip {
+            known[index].linked = false
+            dissolveLoneMember()
+        }
     }
 
-    /// Связать с главной или отвязать.
-    public mutating func setLinked(_ id: String, _ linked: Bool) {
+    /// Цепочка на плитке камеры ленты. Связать — в группе она и главная `main`; группа одна, так что главная не из
+    /// группы входит в неё вместе со всеми, кто там уже есть. Отвязать — камера выходит из группы.
+    public mutating func setLinked(_ id: String, _ linked: Bool, main: String?) {
+        guard camera(id) != nil else { return }
+        setMember(id, linked)
+        if linked, let main { setMember(main, true) }
+        dissolveLoneMember()
+    }
+
+    /// Кто из камер ленты `sides` повторяет за главной `main`: камеры группы, если главная сама в группе. Главная не из
+    /// группы — группа ждёт: ни за кем не повторяет.
+    public func followers(of main: String?, among sides: [String]) -> [String] {
+        guard camera(main)?.linked == true else { return [] }
+        return sides.filter { camera($0)?.linked == true }
+    }
+
+    private mutating func setMember(_ id: String, _ member: Bool) {
         guard let index = known.firstIndex(where: { $0.id == id }) else { return }
-        known[index].linked = linked
+        known[index].linked = member
+    }
+
+    /// Группа из одной камеры — не группа.
+    private mutating func dissolveLoneMember() {
+        let members = known.indices.filter { known[$0].linked }
+        if members.count == 1 { known[members[0]].linked = false }
     }
 
     /// Плитки ленты по порядку: эти id — в порядке знакомых камер, так что выбор главной места не меняет; без записи —
@@ -433,16 +482,10 @@ public struct CameraRoster: Equatable, Sendable {
         known.insert(known.remove(at: from), at: to)
     }
 
-    /// Главной стала камера ленты `main`. Связанная — прежняя главная (если она в ленте) тоже связана: группа остаётся
-    /// вместе. Несвязанная — связи не меняются.
-    public mutating func switchedTo(_ main: String, from previous: String?) {
-        guard camera(main)?.linked == true, let previous, previous != main, camera(previous)?.inStrip == true else { return }
-        setLinked(previous, true)
-    }
-
     public mutating func forget(_ id: String) {
         known.removeAll { $0.id == id }
         if preferred == id { preferred = nil }
+        dissolveLoneMember()
     }
 
     /// Сопряжена ли камера по этому адресу (или с этим идентификатором в сети). Пока прежняя память о камере не

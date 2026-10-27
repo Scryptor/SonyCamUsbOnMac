@@ -36,7 +36,7 @@ class StripOrderTest {
     @Test fun choosingTheMainMovesNoTile() {
         // главная — A, в ленте B и C; касание по C: A уходит в ленту, C — главная, ни одна запись не переставлена
         val book = CameraBook(listOf(a.copy(inStrip = false), b, c), preferred = a.id)
-        val switched = book.withStrip(a.id, true).switchedTo(c.id, previous = a.id)
+        val switched = book.withStrip(a.id, true)
             .connected(null, "ZV-E10", CameraLink.WiFi(WiFiAddress("192.168.1.123", 15742)), listOf(c.id), now).first
         assertEquals(listOf("A", "B", "C"), switched.names())
         assertEquals(c.id, switched.preferred)

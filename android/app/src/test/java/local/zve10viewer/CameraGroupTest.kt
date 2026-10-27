@@ -34,6 +34,7 @@ class CameraGroupTest {
     private val b = KnownCamera("bbbbbbbbbbbbbbbb", "B", "ZV-E10", host = "192.168.1.123", port = 15741, paired = true, inStrip = true,
         linked = true)
     private val c = KnownCamera("cccccccccccccccc", "C", "ZV-E10", host = "192.168.1.123", port = 15742, paired = true, inStrip = true)
+    private val d = KnownCamera("dddddddddddddddd", "D", "ZV-E10", host = "192.168.1.123", port = 15743, paired = true, inStrip = true)
 
     private suspend fun ready(camera: FakeCamera, scope: CoroutineScope): CameraSession =
         CameraSession(camera, fast).also {
@@ -53,41 +54,76 @@ class CameraGroupTest {
     private fun FakeCamera.written(): List<Int> = sent.filter { it.first == SonyOp.SET_EXT_PROP_VALUE }.map { it.second.first().toInt() }
     private fun FakeCamera.value(code: Int): Long = props.first { it.code == code }.current
 
-    @Test fun linkedIsStoredOnlyWhenSet() {
+    private fun CameraBook.group(): Set<String> = cameras.filter { it.linked }.map { it.id }.toSet()
+
+    @Test fun groupIsStoredOnlyWhenSet() {
         val json = CameraBook.toJson(listOf(b, c))
         val items = JSONArray(json)
-        assertTrue(items.getJSONObject(0).getBoolean("linked"))
-        // не связана — поля нет: запись та же, что у прежних версий
-        assertFalse(items.getJSONObject(1).has("linked"))
+        assertTrue(items.getJSONObject(0).getBoolean("group"))
+        // не в группе — поля нет; «linked» прежних версий больше не пишется
+        assertFalse(items.getJSONObject(1).has("group"))
+        assertFalse(json.contains("linked"))
         assertEquals(listOf(b, c), CameraBook.fromJson(json))
     }
 
-    @Test fun removingFromTheStripAlsoUnlinks() {
-        val book = CameraBook(listOf(a, b.copy(linked = false), c))
-        val linked = book.withLinked(b.id, true)
-        assertTrue(linked.find(b.id)!!.linked)
-        assertEquals(book, book.withLinked("нет такой", true))
-        assertFalse(linked.withLinked(b.id, false).find(b.id)!!.linked)
-        // убрали из ленты — и не связана; вернули в ленту — связи нет
-        val removed = linked.withStrip(b.id, false)
+    @Test fun linkingBringsTheMainIntoTheOneGroup() {
+        val book = CameraBook(listOf(a, b.copy(linked = false), c, d))
+        // связали с главной — и главная в группе
+        val ab = book.withLinked(b.id, true, main = a.id)
+        assertEquals(setOf(a.id, b.id), ab.group())
+        val abc = ab.withLinked(c.id, true, main = a.id)
+        assertEquals(setOf(a.id, b.id, c.id), abc.group())
+        // отвязали — вышла только она
+        assertEquals(setOf(a.id, b.id), abc.withLinked(c.id, false, main = a.id).group())
+        // главная D не из группы: группа одна — D и C входят в неё
+        assertEquals(setOf(a.id, b.id, c.id, d.id), ab.withLinked(c.id, true, main = d.id).group())
+        // уже в группе — та же книга; незнакомая камера — тоже
+        assertEquals(ab, ab.withLinked(b.id, true, main = a.id))
+        assertEquals(ab, ab.withLinked("нет такой", true, main = d.id))
+    }
+
+    @Test fun aGroupOfOneIsNoGroup() {
+        val book = CameraBook(listOf(a, b.copy(linked = false), c, d))
+        val ab = book.withLinked(b.id, true, main = a.id)
+        // отвязали последнюю — главная тоже не в группе
+        assertEquals(emptySet<String>(), ab.withLinked(b.id, false, main = a.id).group())
+        // главной нет — связывать не с кем
+        assertEquals(emptySet<String>(), book.withLinked(b.id, true, main = null).group())
+        // убрали из ленты или забыли — тоже выход из группы; вернули в ленту — не в группе
+        val removed = ab.withStrip(b.id, false)
         assertFalse(removed.find(b.id)!!.inStrip)
-        assertFalse(removed.find(b.id)!!.linked)
+        assertEquals(emptySet<String>(), removed.group())
         assertFalse(removed.withStrip(b.id, true).find(b.id)!!.linked)
-        // подключение камеры (новый id по серийному номеру, lastUsed) связь не снимает
-        val (after, _) = linked.connected("SERIAL", "ZV-E10", CameraLink.WiFi(WiFiAddress("192.168.1.123", 15741)), listOf(b.id), now)
+        assertEquals(emptySet<String>(), ab.forgotten(b.id).group())
+        // подключение камеры (новый id по серийному номеру, lastUsed) группу не меняет
+        val (after, _) = ab.connected("SERIAL", "ZV-E10", CameraLink.WiFi(WiFiAddress("192.168.1.123", 15741)), listOf(b.id), now)
         assertTrue(after.cameras.first { it.name == "B" }.linked)
     }
 
-    @Test fun switchingToALinkedCameraKeepsTheGroupTogether() {
-        val book = CameraBook(listOf(a, b, c))
-        // главной стала связанная B — прежняя главная A (уже в ленте) тоже связана
-        assertTrue(book.switchedTo(b.id, a.id).find(a.id)!!.linked)
-        // главной стала несвязанная C — связи не меняются
-        assertEquals(book, book.switchedTo(c.id, a.id))
-        // прежней главной нет или она не в ленте (была по кабелю) — тоже
-        assertEquals(book, book.switchedTo(b.id, null))
-        val usb = CameraBook(listOf(a.copy(inStrip = false), b, c))
-        assertEquals(usb, usb.switchedTo(b.id, a.id))
+    @Test fun oldLinkedFlagBecomesAGroupWithTheLastMain() {
+        fun stored(vararg extra: Pair<String, String>): String = JSONArray(CameraBook.toJson(listOf(a, b.copy(linked = false), c, d))).apply {
+            for (i in 0 until length()) {
+                val item = getJSONObject(i)
+                extra.filter { it.first == item.getString("id") }.forEach { item.put(it.second, true) }
+            }
+        }.toString()
+        // прежние версии: «linked» — только у камер ленты, повторяли за любой главной; последней главной была A
+        assertEquals(setOf(a.id, b.id, c.id), CameraBook.load(stored(b.id to "linked", c.id to "linked"), a.id, null, null).group())
+        // одна связанная, и главная — она же: группы из одной не бывает
+        assertEquals(emptySet<String>(), CameraBook.load(stored(b.id to "linked"), b.id, null, null).group())
+        // уже новые записи — «linked» без значения
+        assertEquals(setOf(c.id, d.id),
+            CameraBook.load(stored(b.id to "linked", c.id to "group", d.id to "group"), a.id, null, null).group())
+    }
+
+    @Test fun followersAreTheGroupOnlyWhenTheMainIsInIt() {
+        val book = CameraBook(listOf(a, b.copy(linked = false), c, d)).withLinked(b.id, true, main = a.id).withLinked(c.id, true, main = a.id)
+        assertEquals(listOf(b.id, c.id), book.followers(a.id, listOf(b.id, c.id, d.id)))
+        // переключились на камеру группы — она ведёт
+        assertEquals(listOf(a.id, c.id), book.followers(b.id, listOf(a.id, c.id, d.id)))
+        // на камеру не из группы — группа ждёт
+        assertEquals(emptyList<String>(), book.followers(d.id, listOf(a.id, b.id, c.id)))
+        assertEquals(emptyList<String>(), book.followers(null, listOf(a.id, b.id, c.id)))
     }
 
     @Test fun groupFailuresMakeOneStatusLine() {

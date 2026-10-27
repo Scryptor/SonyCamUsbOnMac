@@ -245,11 +245,13 @@ fun CameraStrip(controller: CameraController, modifier: Modifier = Modifier) {
                     StripTile(id, drag, controller.frame, controller.cameraName, main = true,
                         recording = controller.recordingStartedAt != null, battery = battery,
                         connected = controller.phase == CameraController.Phase.ready,
-                        linked = controller.sideCameras.any { book.find(it.id)?.linked == true })
+                        linked = controller.mainInGroup && controller.sideCameras.any { book.find(it.id)?.linked == true })
                 } else {
-                    val linked = book.find(side.id)?.linked == true
+                    val inGroup = book.find(side.id)?.linked == true
+                    // горит — отвязать; в группе, а главная нет (ждёт), или не в группе — связать с главной
+                    val linked = inGroup && controller.mainInGroup
                     StripTile(id, drag, side.frame, book.find(side.id)?.name ?: side.name, main = false, recording = side.recording,
-                        battery = side.battery, connected = side.connected, linked = linked,
+                        battery = side.battery, connected = side.connected, linked = linked, waiting = inGroup && !linked,
                         onMain = { controller.makeMain(side.id) }, onRemove = { controller.removeFromStrip(side.id) },
                         onLink = { controller.setLinked(side.id, !linked) })
                 }
@@ -409,12 +411,13 @@ private suspend fun PointerInputScope.stripTileGestures(
 
 /**
  * id — камера в книге: по нему плитку перетаскивают; null — главная ещё подключается, её не тащат. linked — у камеры
- * ленты: связана с главной; у главной — ведёт группу.
+ * ленты: в группе и повторяет за главной; у главной — ведёт группу. waiting — камера ленты в группе, а главная нет:
+ * группа ждёт и не повторяет.
  */
 @Composable
 private fun StripTile(id: String?, drag: StripDrag, frame: ImageBitmap?, name: String, main: Boolean, recording: Boolean,
-                      battery: Int?, connected: Boolean, linked: Boolean, onMain: () -> Unit = {}, onRemove: () -> Unit = {},
-                      onLink: () -> Unit = {}) {
+                      battery: Int?, connected: Boolean, linked: Boolean, waiting: Boolean = false, onMain: () -> Unit = {},
+                      onRemove: () -> Unit = {}, onLink: () -> Unit = {}) {
     var menu by remember { mutableStateOf(false) }
     val press = remember { MutableInteractionSource() }
     // жест у плитки один на всё время в ленте: главная она сейчас или нет — узнаёт по ходу
@@ -485,12 +488,25 @@ private fun StripTile(id: String?, drag: StripDrag, frame: ImageBitmap?, name: S
             // ведёт группу
             if (!main || linked) {
                 val button = if (main) Modifier else Modifier.clip(CircleShape).clickable(onClick = onLink)
-                    .semantics { contentDescription = if (linked) "Отвязать от главной" else "Связать с главной" }
+                    .semantics {
+                        contentDescription = when {
+                            linked -> "Отвязать от главной"
+                            waiting -> "В группе, сейчас не повторяет — связать с главной"
+                            else -> "Связать с главной"
+                        }
+                    }
+                // приглушённая — синий вполсилы на тёмной подложке: группа ждёт свою главную
                 Box(Modifier.align(Alignment.BottomEnd).padding(bottom = 22.dp).then(button).padding(5.dp).size(30.dp)
-                    .background(if (linked && !main) Accent else Panel, CircleShape), contentAlignment = Alignment.Center) {
+                    .background(Panel, CircleShape)
+                    .background(when {
+                        main -> Color.Transparent
+                        linked -> Accent
+                        waiting -> Accent.copy(alpha = 0.4f)
+                        else -> Color.Transparent
+                    }, CircleShape), contentAlignment = Alignment.Center) {
                     ChainGlyph(when {
                         main -> Accent
-                        linked -> Color.White
+                        linked || waiting -> Color.White
                         else -> Color.White.copy(alpha = 0.6f)
                     }, Modifier.size(18.dp))
                 }

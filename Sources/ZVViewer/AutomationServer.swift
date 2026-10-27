@@ -563,6 +563,8 @@ final class AutomationServer {
          "connected": side.connected, "recording": side.recording, "battery": side.battery ?? NSNull(),
          "fps": side.fps, "port": Int(side.endpoint.port),
          "linked": controller.roster.camera(side.id)?.linked ?? false,
+         // в группе, и главная тоже: повторяет за ней
+         "following": controller.mainInGroup && controller.roster.camera(side.id)?.linked == true,
          // что дошло до камеры ленты — для тестов группы
          "values": Dictionary(uniqueKeysWithValues: [SettingID.iso, .shutter, .aperture, .whiteBalance, .colorTemperature, .exposureProgram]
             .compactMap { id in side.properties[id.code]?.current.intValue.map { (id.rawValue, $0) } })]

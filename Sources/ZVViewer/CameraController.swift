@@ -1313,10 +1313,9 @@ final class CameraController {
     }
 
     /// Камера из ленты — главная, сразу: её открытый сеанс переходит на большой экран. Прежняя главная по Wi-Fi —
-    /// в ленту, по кабелю — отключается. `lost` — главная, которая пропала: сеанса у неё уже нет.
-    private func promote(_ side: SideCamera, after lost: String? = nil) {
+    /// в ленту, по кабелю — отключается. Группа не меняется: камера из неё ведёт группу, не из неё — группа ждёт.
+    private func promote(_ side: SideCamera) {
         guard let handed = side.handOver() else { return }
-        let previous = lost ?? currentCameraID
         sideCameras.removeAll { $0 === side }
         choosing = nil
         pairingTarget = nil
@@ -1324,22 +1323,23 @@ final class CameraController {
         reconnectTask?.cancel()
         reconnectTask = nil
         moveMainAside()
-        // переключились на связанную — прежняя главная тоже связана: группа остаётся вместе
-        roster.switchedTo(side.id, from: previous)
-        storeRoster()
         adoptMain(handed)
     }
 
     // MARK: - Группа камер
 
-    /// Связанные камеры ленты на связи: повторяют за главной настройки, пресеты и запись.
+    /// Камеры группы в ленте на связи — когда главная тоже в группе: повторяют за ней настройки, пресеты и запись.
     var linkedSides: [SideCamera] {
-        sideCameras.filter { $0.connected && roster.camera($0.id)?.linked == true }
+        let followers = Set(roster.followers(of: currentCameraID, among: sideCameras.map(\.id)))
+        return sideCameras.filter { $0.connected && followers.contains($0.id) }
     }
 
-    /// Связать камеру ленты с главной или отвязать.
+    /// Главная в группе: камеры группы повторяют за ней.
+    var mainInGroup: Bool { roster.camera(currentCameraID)?.linked == true }
+
+    /// Цепочка на плитке: связать камеру ленты с главной (главная тоже входит в группу) или отвязать.
     func linkCamera(_ id: String, _ linked: Bool) {
-        roster.setLinked(id, linked)
+        roster.setLinked(id, linked, main: currentCameraID)
         storeRoster()
     }
 
@@ -1832,7 +1832,7 @@ final class CameraController {
         // в ленте есть камеры на связи — главной становится верхняя; пропавшая, если она в ленте, — плиткой «нет связи»
         if let side = topConnectedSide {
             if let lost, lost.inStrip, let endpoint = lost.endpoint { _ = sideCamera(lost.id, endpoint) }
-            promote(side, after: lost?.id)
+            promote(side)
             return
         }
         let seconds = wifiPolicy.sessionLost(now: Date())

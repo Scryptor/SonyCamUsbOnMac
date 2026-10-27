@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Сквозной тест группы камер на виртуальных камерах: связанные камеры ленты повторяют за главной настройки, баланс
 белого и температуру, режим, пресет и запись; на камере, которая не может, — «Не удалось на …»; отвязанная не
-повторяет; переключились на связанную — прежняя главная тоже связана; главная пропала — тоже.
+повторяет; главная не из группы — группа ждёт, приглушённая цепочка вводит главную в группу; переключились на
+связанную — прежняя главная в группе; главная пропала — тоже; отвязали всех — группы нет.
 
 Перед запуском:
   scripts/fake_cameras.py --reject C:iso --slow-record C   # A, B, C на 127.0.0.1:15740–15742; C не меняет ISO,
@@ -90,7 +91,8 @@ s, ok = wait(lambda s: main_is("A")(s) and tile(s, "B") and tile(s, "C") and til
 check("A — главная, B и C в ленте", ok, str([(x["name"], x["main"]) for x in s["strip"]]))
 for letter in "BC":
     act(action="linkCamera", id=tile(s, letter)["id"], linked=True)
-s = state(); check("B и C связаны", tile(s, "B")["linked"] and tile(s, "C")["linked"])
+s = state(); check("B и C связаны, A в группе и ведёт её", tile(s, "B")["linked"] and tile(s, "C")["linked"] and tile(s, "A")["linked"]
+                   and tile(s, "B")["following"] and tile(s, "C")["following"])
 
 # настройка на главной — на связанных; C ISO не меняет — «не удалось»
 iso = another(s, "iso", 16777215, value(s, "B", "iso"))
@@ -172,10 +174,32 @@ act(action="request", setting="whiteBalance", value=another(state(), "whiteBalan
 time.sleep(4)
 check("отвязанная C не повторяет", value(state(), "C", "whiteBalance") == c_wb)
 
-# переключились на связанную B — A связана, изменения на B доходят до A
+# переключились на отвязанную C — группа ждёт: A и B в группе, но за C не повторяют
+act(action="selectCamera", id=tile(state(), "C")["id"])
+s, ok = wait(main_is("C"), 5); check("главная — C, не из группы", ok and not tile(s, "C")["linked"])
+check("A и B в группе, но не повторяют", all(tile(s, x)["linked"] and not tile(s, x)["following"] for x in "AB"),
+      str([(x["name"], x["linked"], x.get("following")) for x in s["strip"]]))
+wb_ab = {x: value(s, x, "whiteBalance") for x in "AB"}
+act(action="request", setting="whiteBalance", value=another(s, "whiteBalance", *wb_ab.values()))
+time.sleep(4)
+s = state()
+check("баланс белого на C до A и B не дошёл", all(value(s, x, "whiteBalance") == wb_ab[x] for x in "AB"),
+      str({x: value(s, x, "whiteBalance") for x in "AB"}))
+
+# приглушённая цепочка на A — C входит в группу, и вся группа повторяет за ней
+link("A")
+s = state()
+check("C в группе, A и B повторяют", tile(s, "C")["linked"] and all(tile(s, x)["following"] for x in "AB"),
+      str([(x["name"], x["linked"], x.get("following")) for x in s["strip"]]))
+wb2 = another(s, "whiteBalance", setting(s, "whiteBalance")["value"], *[value(s, x, "whiteBalance") for x in "AB"])
+act(action="request", setting="whiteBalance", value=wb2)
+s, ok = wait(lambda s: all(value(s, x, "whiteBalance") == wb2 for x in "AB"), 8)
+check("баланс белого на C — и на A и B", ok, str({x: value(s, x, "whiteBalance") for x in "AB"}))
+
+# переключились на связанную B — A в группе, изменения на B доходят до A
 act(action="selectCamera", id=tile(state(), "B")["id"])
 s, ok = wait(main_is("B"), 5); check("главная — B", ok)
-check("прежняя главная A стала связанной", (tile(s, "A") or {}).get("linked"), str(tile(s, "A")))
+check("прежняя главная A в группе", (tile(s, "A") or {}).get("linked"), str(tile(s, "A")))
 iso2 = another(s, "iso", 16777215, value(s, "A", "iso"))
 act(action="request", setting="iso", value=iso2)
 s, ok = wait(lambda s: value(s, "A", "iso") == iso2, 8); check("ISO на B — и на A", ok)
@@ -201,4 +225,6 @@ for i, p in enumerate(s["presets"]):
 for x in state()["strip"]:
     if not x["main"]:
         act(action="linkCamera", id=x["id"], linked=False)
+s = state()
+check("отвязали всех — группы нет и у главной", not any(x["linked"] for x in s["strip"]), str([(x["name"], x["linked"]) for x in s["strip"]]))
 print(f"\n{sum(ok for _, ok in results)}/{len(results)} PASS")
