@@ -141,4 +141,10 @@ import Testing
     #expect(try decode(#"{"action":"moveWaveform","x":1,"y":0}"#) == .moveWaveform(x: 1, y: 0))
     #expect(try decode(#"{"action":"referenceFromFrame"}"#) == .referenceFromFrame)
     #expect(try decode(#"{"action":"referenceFromShot","index":1}"#) == .referenceFromShot(1))
+    #expect(try decode(#"{"action":"toggleTouchFocus"}"#) == .toggleTouchFocus)
+    #expect(try decode(#"{"action":"touchFocus","x":0.25,"y":0.5}"#) == .touchFocus(x: 0.25, y: 0.5))
+    #expect(try decode(#"{"action":"cancelTouch"}"#) == .cancelTouch)
+    #expect(try decode(#"{"action":"zoomStart","name":"tele"}"#) == .zoomStart("tele"))
+    #expect(try decode(#"{"action":"zoomStop"}"#) == .zoomStop)
+    #expect(try decode(#"{"action":"focusStep","offset":-7}"#) == .focusStep(-7))
 }

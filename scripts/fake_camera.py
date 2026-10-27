@@ -13,7 +13,11 @@ Wi-Fi: высокое — 1024×576, дополнено до ~72 КБ; низк�
 - кнопка записи (0xD2C8) — как у ZV-E10, «удержание»: «нажать» начинает запись, «отпустить» останавливает, каждое —
   через 0,8 с (--record-delay), по MovieRecordingState 0xD21D; «отпустить» во время старта камера пропускает. Как она
   отвечает на нажатие и отпускание и не бросает ли запись сама — --record (сценарии в RECORD_SCENARIOS);
-- цветовая температура 0xD20F открыта только в режиме баланса белого «Цвет. темп.», как у настоящей камеры.
+- цветовая температура 0xD20F открыта только в режиме баланса белого «Цвет. темп.», как у настоящей камеры;
+- фокус и зум с экрана, как у ZV-E10 с китовым PZ 16-50: точка AF 0xD2DC двигает рамку в зонах «Точка» и «Зона»,
+  касание 0xD2E4 в «Широкой» начинает слежение (0xD2E5 — снять), рамки — в кадре live view (FocalFrameInfo);
+  Near/Far 0xD2D1 двигает фокус 0xD24C, только в MF (0x500A = 1 открывает 0xD235); зум 0xD2DD (1 — теле, −1 — широкий,
+  0 — стоп) едет 40 %/с по шкале 0xD25D, и картинка в видоискателе наезжает до 3×.
 
 Несколько камер сразу (scripts/fake_cameras.py) различаются: --name, --serial (по нему программа отличает камеры),
 --mark (другой план сцены — zoom, pan — или кадр отражён и повёрнут), --battery, --mode. --ssdp — отвечает на поиск в сети, как камера Sony, с портом
@@ -41,6 +45,12 @@ OK, ACCESS_DENIED, INVALID_HANDLE, DEVICE_BUSY = 0x2001, 0x200F, 0x2009, 0x2019
 LIVE_VIEW, CAPTURED = 0xFFFFC002, 0xFFFFC001
 PROPERTY_CHANGED = 0xC203
 S1, S2, MOVIE_REC = 0xD2C1, 0xD2C2, 0xD2C8
+NEAR_FAR, AF_POSITION, ZOOM, TOUCH, TOUCH_CANCEL = 0xD2D1, 0xD2DC, 0xD2DD, 0xD2E4, 0xD2E5
+FOCUS_MODE, FOCUS_AREA, NEAR_FAR_ENABLED, FOCAL_POSITION = 0x500A, 0xD22C, 0xD235, 0xD24C
+ZOOM_ENABLED, ZOOM_BAR, TOUCH_ENABLED, TOUCH_CANCEL_ENABLED = 0xD25B, 0xD25D, 0xD284, 0xD285
+FOCAL_INFO_AT, FOCAL_INFO_MAX = 1012, 512                  # где в заголовке кадра рамки фокуса (у ZV-E10) и сколько места
+ZOOM_LEVELS, ZOOM_MAX = 11, 3.0                            # картинка наезжает до 3× за 11 ступеней
+SPOT_SIZE = {0x101: 0.06, 0x102: 0.09, 0x103: 0.12, 0x104: 0.09}  # рамка «Точки» S/M/L/расширенной, доля ширины
 FOCUS_FOUND, OBJECT_IN_MEMORY, RECORDING, FILE_FORMAT = 0xD213, 0xD215, 0xD21D, 0xD253
 EXPOSURE_PROGRAM, BATTERY = 0x500E, 0xD218
 WHITE_BALANCE, COLOR_TEMP, MANUAL_WB = 0x5005, 0xD20F, 0x8012  # температура открыта только в «Цвет. темп.»
@@ -73,10 +83,10 @@ def fixture(name):
     return open(os.path.join(FIX, name), "rb").read()
 
 
-def frames(mark=None, picture=None):
+def frames(mark=None, picture=None, crop=1.0):
     """Ответы GetObject 0xFFFFC002 для высокого и низкого качества: заголовок Sony, JPEG, добивка до размера.
     mark — другой план сцены (zoom, pan) или кадр отражён и повёрнут: у каждой из нескольких камер своя картинка;
-    picture — свой JPEG 1024×576 вместо сцены."""
+    picture — свой JPEG 1024×576 вместо сцены; crop — наезд зума: середина кадра, растянутая во столько раз."""
     raw = fixture("lv_frame_raw.bin")
     offset, size = struct.unpack_from("<II", raw)
     path = picture or os.path.join(ASSETS, VIEWS.get(mark, "viewfinder.jpg"))
@@ -86,6 +96,11 @@ def frames(mark=None, picture=None):
         open(src, "wb").write(jpeg_high)
         if mark in MARKS:
             subprocess.run(["sips", *MARKS[mark], src, "--out", src], capture_output=True, check=True)
+            jpeg_high = open(src, "rb").read()
+        if crop > 1.0:
+            subprocess.run(["sips", "-c", str(round(576 / crop)), str(round(1024 / crop)), src, "--out", src],
+                           capture_output=True, check=True)
+            subprocess.run(["sips", "-z", "576", "1024", src, "--out", src], capture_output=True, check=True)
             jpeg_high = open(src, "rb").read()
         subprocess.run(["sips", "-z", "360", "640", src, "--out", dst], capture_output=True, check=True)
         jpeg_low = open(dst, "rb").read()
@@ -251,6 +266,7 @@ class Properties:
 
 class Camera:
     def __init__(self, args):
+        self.mark, self.picture = args.mark, args.picture
         jpeg, self.frames = frames(args.mark, args.picture)
         self.photo = open(args.photo, "rb").read() if args.photo else big_photo(jpeg)
         self.rate = args.rate
@@ -285,6 +301,16 @@ class Camera:
         if args.mode:
             self.props.set(EXPOSURE_PROGRAM, MODES[args.mode])
         self.props.enable(COLOR_TEMP, self.props.get(WHITE_BALANCE) == MANUAL_WB)
+        # фокус и зум с экрана
+        self.af_point = (320, 240)                          # точка AF в сетке 640×480
+        self.af_moved = 0.0                                 # когда её двигали: фокус находится через 0,3 с
+        self.touch_point = None                             # слежение от касания экрана
+        self.zoom_dir = 0                                   # −1, 0, 1
+        self.zoom_pos = 0.0                                 # 0…100 на шкале
+        self.zoom_frames = None                             # ступени картинки, считаются в фоне при первом зуме
+        self.zoom_task = None
+        self.props.set(ZOOM_BAR, 1 << 24)
+        self.sync_near_far()
         self.events = []                                    # писатели соединений событий
         self.objects = []                                   # снимки в памяти камеры: (имя, данные)
         self.number = 1000
@@ -306,8 +332,128 @@ class Camera:
         """С секундами от запуска: по ним сверяется порядок с тем, что видела программа."""
         print(f"{time.monotonic() - self.started:8.3f}  {text}", flush=True)
 
+    def sync_near_far(self):
+        """Near/Far открыт только в ручном фокусе, как у ZV-E10."""
+        manual = self.props.get(FOCUS_MODE) == 1
+        self.props.enable(NEAR_FAR_ENABLED, manual)
+        self.props.set(NEAR_FAR_ENABLED, 1 if manual else 0)
+
+    def moves_point(self):
+        area = self.props.get(FOCUS_AREA)
+        return area == 0x2 or 0x101 <= area <= 0x104 or area == 0x202 or 0x204 <= area <= 0x207
+
+    def focus_frames(self):
+        """Блок FocalFrameInfo 1.01 для кадра: рамка «Точки» или «Зоны» и рамка слежения — в сетке 640×480 ×1024."""
+        focus, tracking = [], []
+        # в ручном фокусе камера рамку AF не показывает
+        if self.moves_point() and self.props.get(FOCUS_MODE) != 1:
+            area = self.props.get(FOCUS_AREA)
+            w = 0.3 if area in (0x2, 0x202) else SPOT_SIZE.get(area if area < 0x200 else area - 0x103, 0.09)
+            found = 2 if time.monotonic() - self.af_moved > 0.3 else 1
+            focus.append((found, self.af_point[0] / 639, self.af_point[1] / 479, w, w * 4 / 3))
+        if self.touch_point:
+            tracking.append((2, self.touch_point[0] / 639, self.touch_point[1] / 479, 0.12, 0.16))
+        xd, yd = 640 * 1024, 480 * 1024
+        out = struct.pack("<H6x40xH6x", 101, 0)
+        for frames in (focus, [], tracking):
+            out += struct.pack("<IIH6x", xd, yd, len(frames))
+            for state, x, y, w, h in frames:
+                out += struct.pack("<HHB3xIIII", 1, state, 1, round(x * xd), round(y * yd), round(h * yd), round(w * xd))
+        return out + b"\0" * 16
+
+    def live_view(self):
+        """Кадр для GetObject 0xFFFFC002: картинка (с наездом зума) и рамки фокуса в заголовке."""
+        frames = self.frames
+        if self.zoom_frames and self.zoom_pos > 0:
+            frames = self.zoom_frames[min(ZOOM_LEVELS - 1, round(self.zoom_pos / 100 * (ZOOM_LEVELS - 1)))]
+        body = bytearray(frames[self.quality])
+        info = self.focus_frames()[:FOCAL_INFO_MAX]
+        body[FOCAL_INFO_AT:FOCAL_INFO_AT + len(info)] = info
+        struct.pack_into("<II", body, 8, FOCAL_INFO_AT, len(info))
+        return bytes(body)
+
+    def prepare_zoom(self):
+        """Ступени наезда картинки — в фоне, при первом зуме: sips обрезает середину и растягивает обратно."""
+        if self.zoom_frames is not None:
+            return
+        self.zoom_frames = []
+
+        def work():
+            levels = []
+            for i in range(ZOOM_LEVELS):
+                z = 1 + (ZOOM_MAX - 1) * i / (ZOOM_LEVELS - 1)
+                levels.append(frames(self.mark, self.picture, crop=z)[1])
+            self.zoom_frames = levels
+            self.log("ступени зума готовы")
+
+        import threading
+        threading.Thread(target=work, daemon=True).start()
+
+    def zoom_step(self):
+        """Зум едет, пока не придёт стоп или не упрётся в край: шкала 0xD25D — каждые 0,1 с."""
+        if self.zoom_dir == 0:
+            self.zoom_task = None
+            return
+        before = self.zoom_pos
+        self.zoom_pos = min(100.0, max(0.0, self.zoom_pos + self.zoom_dir * 4))
+        if round(self.zoom_pos) != round(before):
+            self.changed(ZOOM_BAR, 1 << 24 | round(self.zoom_pos))
+        if self.zoom_pos in (0.0, 100.0):
+            self.log(f"зум упёрся: {round(self.zoom_pos)}")
+            self.zoom_dir = 0
+            self.zoom_task = None
+            return
+        self.zoom_task = asyncio.get_running_loop().call_later(0.1, self.zoom_step)
+
     def control(self, code, value):
         """Команда 0x9207; возвращает код ответа."""
+        if code == AF_POSITION:
+            x, y = value >> 16 & 0xFFFF, value & 0xFFFF
+            if not self.moves_point():
+                self.log(f"точка AF ({x}, {y}) — зона 0x{self.props.get(FOCUS_AREA):X} точку не двигает")
+                return OK
+            self.af_point, self.af_moved = (min(x, 639), min(y, 479)), time.monotonic()
+            self.log(f"точка AF → ({x}, {y})")
+            return OK
+        if code == TOUCH:
+            if self.props.get(TOUCH_ENABLED) != 1:
+                return DEVICE_BUSY
+            x, y = value >> 16 & 0xFFFF, value & 0xFFFF
+            if self.moves_point():
+                self.af_point, self.af_moved = (min(x, 639), min(y, 479)), time.monotonic()
+                self.log(f"касание ({x}, {y}) — точка AF туда же")
+            else:
+                self.touch_point = (min(x, 639), min(y, 479))
+                self.props.enable(TOUCH_CANCEL_ENABLED, True)
+                self.changed(TOUCH_CANCEL_ENABLED, 1)
+                self.log(f"касание ({x}, {y}) — слежение")
+            return OK
+        if code == TOUCH_CANCEL and value == 1:
+            if self.touch_point:
+                self.touch_point = None
+                self.changed(TOUCH_CANCEL_ENABLED, 0)
+                self.log("слежение снято")
+            return OK
+        if code == NEAR_FAR:
+            if self.props.get(NEAR_FAR_ENABLED) != 1:
+                self.log(f"Near/Far {value:+d} — закрыт (не MF), не двигаю")
+                return OK
+            pos = max(0, min(100, self.props.get(FOCAL_POSITION) + value))
+            self.changed(FOCAL_POSITION, pos)
+            self.log(f"фокус {'ближе' if value < 0 else 'дальше'} на {abs(value)} → {pos}")
+            return OK
+        if code == ZOOM:
+            if self.props.get(ZOOM_ENABLED) != 1:
+                return DEVICE_BUSY
+            direction = (value > 0) - (value < 0)
+            if direction:
+                self.prepare_zoom()
+            if direction != self.zoom_dir:
+                self.log("зум " + {1: "к теле", -1: "к широкому", 0: f"стоп на {round(self.zoom_pos)}"}[direction])
+            self.zoom_dir = direction
+            if direction and self.zoom_task is None:
+                self.zoom_step()
+            return OK
         if code == S1 and value == 2:
             self.later(0.15, lambda: self.changed(FOCUS_FOUND, 2))
         elif code == S1 and value == 1:
@@ -480,7 +626,7 @@ def respond(cam, code, params, out):
         if now - cam.last_frame < FRAME_PERIOD:
             return None, ACCESS_DENIED
         cam.last_frame = now
-        return cam.frames[cam.quality], OK
+        return cam.live_view(), OK
     if code in (0x1008, 0x1009) and params and params[0] == CAPTURED:
         if not cam.objects:
             return None, INVALID_HANDLE
@@ -507,8 +653,15 @@ def respond(cam, code, params, out):
             if params[0] == WHITE_BALANCE:
                 cam.props.enable(COLOR_TEMP, cam.props.get(WHITE_BALANCE) == MANUAL_WB)
                 cam.changed(COLOR_TEMP)
-    if code == 0x9207 and params and len(out) >= 2:
-        return None, cam.control(params[0], struct.unpack_from("<H", out)[0])
+            if params[0] == FOCUS_MODE:
+                cam.sync_near_far()
+                cam.changed(NEAR_FAR_ENABLED)
+    if code == 0x9207 and params and out:
+        # значение — своего типа: зум INT8, Near/Far INT16, точка AF и касание UINT32, кнопки UINT16
+        fmt = {ZOOM: "<b", NEAR_FAR: "<h", AF_POSITION: "<I", TOUCH: "<I"}.get(params[0], "<H")
+        if len(out) < struct.calcsize(fmt):
+            return None, 0x2002
+        return None, cam.control(params[0], struct.unpack_from(fmt, out)[0])
     return None, OK
 
 

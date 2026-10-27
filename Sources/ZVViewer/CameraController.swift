@@ -33,6 +33,17 @@ final class CameraController {
     private(set) var waveform: WaveformTrace?
     /// Эталонный кадр для наложения: текущий кадр или снимок из галереи. Хранится в файле — переживает перезапуск.
     private(set) var reference: ReferenceFrame?
+    /// Команды 0x9207, которые знает камера на связи: по ним видно, есть ли фокус касанием, зум, Near/Far.
+    private(set) var controlCodes: Set<UInt16> = []
+    /// Рамки фокуса последнего кадра: где камера фокусирует.
+    private(set) var focusFrames: [FocusFrame] = []
+    /// Куда коснулись для фокуса и когда — для отметки на кадре.
+    private(set) var touchMark: (point: CGPoint, at: Date)?
+    /// Зум едет: 1 — к теле, −1 — к широкому; 0 — стоит.
+    private(set) var zoomDirection = 0
+    /// Единиц Near/Far, которые ещё надо отправить: шкалу тянут быстрее, чем камера отвечает.
+    @ObservationIgnored private var focusUnits = 0
+    @ObservationIgnored private var focusDriving = false
     private(set) var fps: Double = 0
     /// fps для строки состояния: обновляется дважды в секунду, а не с каждым кадром.
     private(set) var shownFPS = 0
@@ -1960,6 +1971,11 @@ final class CameraController {
     var linkRTTMs: Int? { linkRTT.map { Int(($0 * 1000).rounded()) } }
 
     private func startStreams(_ session: CameraSession, onEnded: @escaping () -> Void) {
+        // какие команды знает камера — из её ответа на рукопожатие
+        tasks.append(Task { [weak self] in
+            let codes = await session.controlCodes
+            self?.controlCodes = codes
+        })
         tasks.append(Task { [weak self] in
             for await snapshot in session.snapshots {
                 self?.apply(snapshot)
@@ -2019,6 +2035,7 @@ final class CameraController {
 
     private func show(_ image: CGImage, sample: LiveViewSample, levels: [Int], tools: FrameTools.Result) {
         frame = image
+        if focusFrames != sample.focusFrames { focusFrames = sample.focusFrames }
         assistOverlay = tools.overlay
         waveform = tools.waveform
         if !hasFrame { hasFrame = true }
@@ -2193,6 +2210,11 @@ final class CameraController {
         histogramStats = nil
         assistOverlay = nil
         waveform = nil
+        controlCodes = []
+        focusFrames = []
+        touchMark = nil
+        zoomDirection = 0
+        focusUnits = 0
         fps = 0
         shownFPS = 0
         frameGapMs = 0
@@ -2273,6 +2295,104 @@ final class CameraController {
     /// Инструменты выключили — растр по старому кадру не показываем, даже если новых кадров нет.
     func clearAssistOverlay() {
         assistOverlay = nil
+    }
+
+    // MARK: - Фокус касанием, зум, шкала фокуса
+
+    private func value(_ code: UInt16) -> Int64? { properties[code]?.current.intValue }
+
+    /// Как сейчас ставится фокус касанием; nil — никак (ручной фокус, камера не умеет).
+    var touchFocusMethod: TouchFocus.Method? {
+        TouchFocus.method(focusMode: value(SonyProp.focusMode), focusArea: value(SonyProp.focusArea),
+                          remoteTouchEnabled: value(SonyProp.remoteTouchEnabled), controls: controlCodes)
+    }
+
+    /// Камера вообще умеет фокус касанием (кнопка есть, даже если сейчас ручной фокус).
+    var touchFocusSupported: Bool {
+        controlCodes.contains(SonyControl.afAreaPosition) || controlCodes.contains(SonyControl.remoteTouch)
+    }
+
+    /// Слежение от касания можно снять.
+    var touchCancelAvailable: Bool {
+        value(SonyProp.remoteTouchCancelEnabled) == 1 && controlCodes.contains(SonyControl.remoteTouchCancel)
+    }
+
+    var zoomAvailable: Bool { PowerZoom.isAvailable(zoomEnabled: value(SonyProp.zoomEnabled), controls: controlCodes) }
+
+    /// Шкала зума; nil — камера её не отдаёт.
+    var zoomBar: PowerZoom.Bar? {
+        guard let raw = value(SonyProp.zoomBar), PowerZoom.Bar(raw).boxes > 0 else { return nil }
+        return PowerZoom.Bar(raw)
+    }
+
+    /// Масштаб зума подписью («×1,2»); на ×1,0 — nil: подпись не нужна.
+    var zoomScaleLabel: String? {
+        guard let scale = value(SonyProp.zoomScale), scale > 1000 else { return nil }
+        return PowerZoom.label(scale: scale)
+    }
+
+    var focusDriveAvailable: Bool {
+        FocusDrive.isAvailable(nearFarEnabled: value(SonyProp.nearFarEnabled), controls: controlCodes)
+    }
+
+    /// Где фокус, 0…100 (0 — ближе всего); nil — камера не отдаёт.
+    var focalPosition: Int? {
+        guard let property = properties[SonyProp.focalPosition], property.enabled != 0,
+              let v = property.current.intValue else { return nil }
+        return Int(v)
+    }
+
+    /// Фокус в точку кадра (доли 0…1): точка AF или касание экрана камеры. false — сейчас нельзя.
+    @discardableResult
+    func touchFocus(at point: CGPoint) -> Bool {
+        guard phase == .ready, let session else { return false }
+        guard let method = touchFocusMethod else {
+            showStatus(TouchFocus.refusal(focusMode: value(SonyProp.focusMode)))
+            return false
+        }
+        touchMark = (point, Date())
+        let code = method == .areaPosition ? SonyControl.afAreaPosition : SonyControl.remoteTouch
+        let encoded = TouchFocus.encode(x: Double(point.x), y: Double(point.y))
+        note("фокус касанием: \(method == .areaPosition ? "точка AF" : "касание экрана камеры") (\(encoded >> 16), \(encoded & 0xFFFF))")
+        Task { [weak self] in
+            let code = try? await session.control(code, value: encoded, type: PTPType.uint32)
+            if code != PTPResponseCode.ok { self?.showStatus("Камера не поставила фокус в эту точку") }
+        }
+        return true
+    }
+
+    /// Снять слежение, начатое касанием.
+    func cancelTouch() {
+        guard phase == .ready, let session, touchCancelAvailable else { return }
+        touchMark = nil
+        Task { _ = try? await session.pressButton(SonyControl.remoteTouchCancel) }
+    }
+
+    /// Зум: 1 — к теле, −1 — к широкому, пока не придёт 0. Повтор того же направления ничего не шлёт.
+    func zoom(_ direction: Int) {
+        let direction = max(-1, min(1, direction))
+        guard direction != zoomDirection, let session else { return }
+        guard direction == 0 || (phase == .ready && zoomAvailable) else { return }
+        zoomDirection = direction
+        note("зум: " + (direction > 0 ? "к теле" : direction < 0 ? "к широкому" : "стоп"))
+        Task { _ = try? await session.control(SonyControl.zoomOperation, value: Int64(direction), type: PTPType.int8) }
+    }
+
+    /// Перефокусировка на столько единиц Near/Far (отрицательное — ближе): по одной команде за раз, остальное копится.
+    func focusStep(_ units: Int) {
+        guard units != 0, phase == .ready, focusDriveAvailable, let session else { return }
+        focusUnits += units
+        guard !focusDriving else { return }
+        focusDriving = true
+        Task { [weak self] in
+            while let self, self.focusUnits != 0, self.session === session {
+                let commands = FocusDrive.commands(units: self.focusUnits)
+                guard let next = commands.first else { break }
+                self.focusUnits -= Int(next)
+                _ = try? await session.control(SonyControl.nearFar, value: next, type: PTPType.int16)
+            }
+            self?.focusDriving = false
+        }
     }
 
     /// Волновую форму выключили — и её тоже.

@@ -50,6 +50,37 @@ public enum SonyProp {
     public static let shutterHalfPress: UInt16 = 0xD2C1
     public static let shutterFullPress: UInt16 = 0xD2C2
     public static let movieRecButton: UInt16 = 0xD2C8
+
+    // фокус и зум с экрана (Sony Camera Control PTP 3 Reference)
+    /// Near/Far — доступна ли перефокусировка ближе/дальше (0x01 — да; у ZV-E10 — в MF).
+    public static let nearFarEnabled: UInt16 = 0xD235
+    /// Положение фокуса 0…100 (UINT8), только чтение.
+    public static let focalPosition: UInt16 = 0xD24C
+    /// Можно ли управлять зумом (0x01 — да): объектив с приводом или Clear Image Zoom.
+    public static let zoomEnabled: UInt16 = 0xD25B
+    /// Масштаб зума ×1000 (UINT32): 1000 — ×1,0.
+    public static let zoomScale: UInt16 = 0xD25C
+    /// Шкала зума (UINT32): биты 31–24 — сколько отрезков, 23–16 — в каком, 15–0 — где в нём (0…100).
+    public static let zoomBar: UInt16 = 0xD25D
+    /// Что делает касание экрана камеры: 0x03 — фокус, 0x04 — слежение (и с Touch AE — 0x08…0x0B).
+    public static let touchFunction: UInt16 = 0xD283
+    /// Можно ли «коснуться» экрана камеры командой (0x01 — да) и снять это касание.
+    public static let remoteTouchEnabled: UInt16 = 0xD284
+    public static let remoteTouchCancelEnabled: UInt16 = 0xD285
+}
+
+/// Команды управления 0x9207 (Control Device) — кроме кнопок спуска и записи; тип значения — свой у каждой.
+public enum SonyControl {
+    /// Ближе (−) / дальше (+) на 1…7 шагов, INT16; только при Near/Far Enable 0xD235 = 1.
+    public static let nearFar: UInt16 = 0xD2D1
+    /// Точка AF: (x << 16) | y в сетке 640×480, UINT32; двигает рамку в зонах «Точка» и «Зона».
+    public static let afAreaPosition: UInt16 = 0xD2DC
+    /// Зум, INT8: 1 — к теле, −1 — к широкому, 0 — стоп; едет, пока не придёт стоп.
+    public static let zoomOperation: UInt16 = 0xD2DD
+    /// Касание экрана камеры в точке (x << 16) | y сетки 640×480, UINT32: фокус или слежение — как настроено в камере.
+    public static let remoteTouch: UInt16 = 0xD2E4
+    /// Снять касание (слежение), кнопка UINT16: нажать и отпустить.
+    public static let remoteTouchCancel: UInt16 = 0xD2E5
 }
 
 public enum Sony {

@@ -57,6 +57,9 @@ final class ScreenState {
     /// Где гистограмма: доли свободного места; nil — на месте по умолчанию, слева внизу над лентой снимков.
     private(set) var histogramPlacement: FloatingPlacement?
 
+    /// Фокус касанием: горит — щелчок по кадру ставит туда фокус, а на кадре видны рамки фокуса камеры.
+    private(set) var touchFocusOn: Bool
+
     /// Волновая форма: включена ли, какая (яркость или RGB-парад) и где; nil — на месте по умолчанию, справа внизу.
     private(set) var waveformOn: Bool
     private(set) var waveformMode: Waveform.Mode
@@ -193,6 +196,11 @@ final class ScreenState {
         if let data = try? JSONEncoder().encode(next) { defaults.set(data, forKey: "monitorAssist") }
     }
 
+    func toggleTouchFocus() {
+        touchFocusOn.toggle()
+        defaults.set(touchFocusOn, forKey: "touchFocusOn")
+    }
+
     func toggleWaveform() {
         waveformOn.toggle()
         defaults.set(waveformOn, forKey: "waveformOn")
@@ -274,6 +282,7 @@ final class ScreenState {
         histogramPlacement = defaults.data(forKey: "histogramPlacement").flatMap { try? JSONDecoder().decode(FloatingPlacement.self, from: $0) }
         assist = defaults.data(forKey: "monitorAssist").flatMap { try? JSONDecoder().decode(MonitorAssist.self, from: $0) } ?? MonitorAssist()
         waveformOn = defaults.bool(forKey: "waveformOn")
+        touchFocusOn = defaults.bool(forKey: "touchFocusOn")
         waveformMode = defaults.string(forKey: "waveformMode").flatMap(Waveform.Mode.init(rawValue:)) ?? .luma
         waveformPlacement = defaults.data(forKey: "waveformPlacement").flatMap { try? JSONDecoder().decode(FloatingPlacement.self, from: $0) }
     }

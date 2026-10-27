@@ -23,9 +23,12 @@ struct LiveScreen: View {
         .animation(.easeInOut(duration: 0.2), value: showControls)
         .animation(.easeInOut(duration: 0.2), value: screen.zoom.isZoomed)
         .contentShape(Rectangle())
-        .onTapGesture {
+        .onTapGesture(coordinateSpace: .local) { location in
+            // открыто меню — щелчок его закрывает; иначе, при фокусе касанием, — фокус в эту точку кадра
+            let menus = screen.fnOpen || screen.assistOpen || screen.allSettingsOpen || screen.pillInfo != nil || screen.presetMenuOpen
             screen.closeOverlays()
             screen.noteActivity()
+            if !menus, screen.touchFocusOn, let point = framePoint(location) { controller.touchFocus(at: point) }
         }
         .onContinuousHover { _ in screen.noteActivity() }
         // подсказка о S&Q пропадает вместе с режимом (например, MODE на камере) — закрываем и её флаг
@@ -89,6 +92,13 @@ struct LiveScreen: View {
             guard screen.galleryShot == nil else { return .ignored }
             let key = press.characters.lowercased()
             screen.toggleAssist("zя".contains(key) ? .zebra : "pз".contains(key) ? .peaking : .falseColor)
+            return .handled
+        }
+        // зум с экрана: T — к теле, W — к широкому, пока клавиша нажата
+        .onKeyPress(characters: CharacterSet(charactersIn: "tTеЕwWцЦ"), phases: [.down, .up]) { press in
+            guard controller.zoomAvailable || controller.zoomDirection != 0 else { return .ignored }
+            let tele = "tе".contains(press.characters.lowercased())
+            controller.zoom(press.phase == .up ? 0 : tele ? 1 : -1)
             return .handled
         }
         .onKeyPress(characters: CharacterSet(charactersIn: "hHрР")) { _ in
@@ -246,6 +256,10 @@ struct LiveScreen: View {
             if screen.assist.hasMarkers {
                 AssistMarkers(assist: screen.assist, frame: frameSize, rect: screen.zoom.imageRect(view: size, frame: frameSize))
             }
+            // рамки фокуса камеры и отметка касания — пока фокус касанием включён
+            if screen.touchFocusOn {
+                FocusFramesLayer(controller: controller, rect: screen.zoom.imageRect(view: size, frame: frameSize))
+            }
             // рамка записи — по краю видимой картинки, при увеличении — по краю экрана
             TallyBorder(recording: controller.isRecording,
                         rect: screen.zoom.imageRect(view: size, frame: frameSize)
@@ -264,6 +278,15 @@ struct LiveScreen: View {
     private static func downloadCaption(_ phase: CapturePhase) -> String? {
         guard case .downloading = phase else { return nil }
         return CaptureFeedback.caption(phase)
+    }
+
+    /// Точка кадра (доли) под точкой экрана — с увеличением; nil — мимо кадра или кадра нет.
+    private func framePoint(_ location: CGPoint) -> CGPoint? {
+        guard let frame = controller.frame else { return nil }
+        // размер экрана — как у слоя с видео: тот же GeometryReader
+        let rect = screen.zoom.imageRect(view: zoomScroll.viewSize, frame: CGSize(width: frame.width, height: frame.height))
+        guard rect.width > 0, rect.height > 0, rect.contains(location) else { return nil }
+        return CGPoint(x: (location.x - rect.minX) / rect.width, y: (location.y - rect.minY) / rect.height)
     }
 
     /// Где весь кадр на экране без увеличения.
@@ -296,7 +319,18 @@ struct LiveScreen: View {
                     } else if screen.assistOpen {
                         AssistMenu(controller: controller, screen: screen)
                     } else if !screen.allSettingsOpen {
-                        InfoLine(controller: controller) { screen.openFn($0) }
+                        VStack(spacing: 10) {
+                            // ручной фокус — шкала фокуса над строкой значений; слежение от касания — снять
+                            if controller.touchCancelAvailable, screen.touchFocusOn {
+                                Button("Снять слежение") { controller.cancelTouch() }
+                                    .buttonStyle(.plain)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 6)
+                                    .background(.ultraThinMaterial, in: Capsule())
+                            }
+                            if controller.focusDriveAvailable { FocusScale(controller: controller) }
+                            InfoLine(controller: controller) { screen.openFn($0) }
+                        }
                     }
                     Spacer()
                 }
@@ -306,7 +340,7 @@ struct LiveScreen: View {
             .padding(16)
             HStack {
                 Spacer()
-                RightColumn(controller: controller)
+                RightColumn(controller: controller, screen: screen)
             }
             .padding(.trailing, 20)
         }

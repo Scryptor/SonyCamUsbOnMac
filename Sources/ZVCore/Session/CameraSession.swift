@@ -12,6 +12,8 @@ public actor CameraSession {
     public private(set) var deviceInfo: DeviceInfo?
     public private(set) var properties: [UInt16: SonyProperty] = [:]
     public private(set) var isReady = false
+    /// Команды 0x9207, которые камера назвала в GetExtDeviceInfo: по ним видно, умеет ли она фокус касанием, зум и т. п.
+    public private(set) var controlCodes: Set<UInt16> = []
     /// Каждое перечитывание свойств — сколько угодно слушателям; поток завершается при разрыве связи.
     private nonisolated let snapshotBroadcast = Broadcast<[UInt16: SonyProperty]>()
     private var eventTask: Task<Void, Never>?
@@ -41,8 +43,10 @@ public actor CameraSession {
         try await call(SonyOp.connect, [2, 0, 0])
         var hasExtInfo = false
         for attempt in 1...20 {
-            if try await !call(SonyOp.getExtDeviceInfo, [Sony.protocolVersion, 1]).data.isEmpty {
+            let ext = try await call(SonyOp.getExtDeviceInfo, [Sony.protocolVersion, 1]).data
+            if !ext.isEmpty {
                 hasExtInfo = true
+                controlCodes = Set((try? SonyExtInfo(data: ext))?.controlCodes ?? [])
                 break
             }
             if attempt < 20 { try await Task.sleep(for: .milliseconds(100)) }
@@ -131,7 +135,8 @@ public actor CameraSession {
             case PTPResponseCode.ok:
                 if let jpeg = LiveViewFrame.jpeg(from: reply.data) {
                     return LiveViewSample(jpeg: jpeg, bytes: reply.data.count, seconds: took.seconds,
-                                          shortReplySeconds: shortest?.seconds, waits: waits)
+                                          shortReplySeconds: shortest?.seconds, waits: waits,
+                                          focusFrames: FocusFrame.parse(liveView: reply.data))
                 }
                 try await Task.sleep(for: .milliseconds(20))
             case PTPResponseCode.accessDenied, PTPResponseCode.deviceBusy:
@@ -146,6 +151,19 @@ public actor CameraSession {
                 throw SessionError.operationFailed(operation: SonyOp.getObject, code: reply.code)
             }
         }
+    }
+
+    /// Команда управления 0x9207 со значением своего типа (точка AF, зум, Near/Far); отдаёт код ответа камеры.
+    @discardableResult
+    public func control(_ code: UInt16, value: Int64, type: UInt16) async throws -> UInt16 {
+        try await rawSend(SonyOp.controlDevice, [UInt32(code)], outData: PTPValue.encode(value, type: type)).code
+    }
+
+    /// Кнопка 0x9207: нажать и отпустить (снять касание и т. п.); отдаёт код ответа на отпускание.
+    @discardableResult
+    public func pressButton(_ code: UInt16) async throws -> UInt16 {
+        try await control(code, value: 2, type: PTPType.uint16)
+        return try await control(code, value: 1, type: PTPType.uint16)
     }
 
     /// Записать значение без ожидания подтверждения и без проверок — для служебных свойств (качество превью).

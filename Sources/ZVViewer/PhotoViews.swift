@@ -6,10 +6,14 @@ import ZVCore
 /// Палец (курсор) закрывает кнопку — отклик вокруг неё: кольцо, волна, дуга ожидания, подпись слева.
 struct RightColumn: View {
     let controller: CameraController
+    let screen: ScreenState
 
     var body: some View {
         VStack(spacing: 14) {
+            // зум — над переключателем режима, как рычажок зума камеры над кнопками
+            if controller.zoomAvailable { ZoomRocker(controller: controller) }
             ModeSwitch(controller: controller)
+            if controller.touchFocusSupported { TouchFocusButton(controller: controller, screen: screen) }
             if controller.mode == .photo {
                 ShutterButton(controller: controller)
             } else {

@@ -362,6 +362,25 @@ final class AutomationServer {
         case let .referenceFromShot(index):
             guard controller.shots.indices.contains(index) else { return "no shot \(index)" }
             controller.takeReference(from: controller.shots[index])
+        case .toggleTouchFocus:
+            screen.toggleTouchFocus()
+        case let .touchFocus(x, y):
+            guard controller.touchFocusMethod != nil else {
+                return "touch focus is not available now (focus mode MF, or the camera has no AF position / remote touch)"
+            }
+            controller.touchFocus(at: CGPoint(x: min(max(x, 0), 1), y: min(max(y, 0), 1)))
+        case .cancelTouch:
+            guard controller.touchCancelAvailable else { return "nothing to cancel" }
+            controller.cancelTouch()
+        case let .zoomStart(name):
+            guard name == "tele" || name == "wide" else { return "name: tele | wide" }
+            guard controller.zoomAvailable else { return "the camera does not offer zoom now" }
+            controller.zoom(name == "tele" ? 1 : -1)
+        case .zoomStop:
+            controller.zoom(0)
+        case let .focusStep(units):
+            guard controller.focusDriveAvailable else { return "focus scale needs manual focus (Near/Far is closed)" }
+            controller.focusStep(units)
         }
         return nil
     }
@@ -490,6 +509,7 @@ final class AutomationServer {
             "selected": screen.assistSelected.rawValue,
             "values": Dictionary(uniqueKeysWithValues: MonitorTool.allCases.map { ($0.rawValue, screen.assist.value($0)) }),
         ] as [String: Any]
+        ui["touchFocus"] = screen.touchFocusOn
         ui["waveform"] = [
             "on": screen.waveformOn,
             "mode": screen.waveformMode.rawValue,
@@ -511,6 +531,22 @@ final class AutomationServer {
                 return ["mode": trace.counts.mode.rawValue, "columns": trace.counts.columns, "white": trace.white,
                         "low": range?.low ?? NSNull(), "high": range?.high ?? NSNull()]
             } ?? NSNull(),
+            "lens": [
+                "controls": controller.controlCodes.sorted().map { String(format: "0x%04X", $0) },
+                "touchFocus": controller.touchFocusMethod?.rawValue ?? NSNull(),
+                "touchCancel": controller.touchCancelAvailable,
+                "zoom": controller.zoomAvailable,
+                "zoomDirection": controller.zoomDirection,
+                "zoomBar": controller.zoomBar.map { ["boxes": $0.boxes, "box": $0.box, "position": $0.position,
+                                                    "fraction": $0.fraction ?? NSNull()] as [String: Any] } ?? NSNull(),
+                "zoomScale": controller.zoomScaleLabel ?? NSNull(),
+                "focusScale": controller.focusDriveAvailable,
+                "focalPosition": controller.focalPosition ?? NSNull(),
+                "focusFrames": controller.focusFrames.map { frame -> [String: Any] in
+                    ["kind": frame.kind.rawValue, "x": frame.rect.midX, "y": frame.rect.midY, "width": frame.rect.width,
+                     "height": frame.rect.height, "focused": frame.focused]
+                },
+            ] as [String: Any],
             "reference": controller.reference.map { ["source": $0.source, "width": $0.image.width, "height": $0.image.height] as [String: Any] }
                 ?? NSNull(),
             "assistOverlay": controller.assistOverlay.map { overlay -> [String: Any] in

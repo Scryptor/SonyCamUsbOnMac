@@ -93,6 +93,15 @@ public enum AutomationAction: Equatable, Sendable, Decodable {
     /// Эталон для наложения: текущий кадр или снимок сеанса (номер в `shots`).
     case referenceFromFrame
     case referenceFromShot(Int)
+    /// Фокус касанием: включить или выключить режим; фокус в точку кадра (доли) — как щелчок по кадру; снять слежение.
+    case toggleTouchFocus
+    case touchFocus(x: Double, y: Double)
+    case cancelTouch
+    /// Зум: «tele» или «wide» — поехал, как будто держат T или W; стоп — отпустили.
+    case zoomStart(String)
+    case zoomStop
+    /// Шкала фокуса: столько единиц Near/Far (отрицательное — ближе).
+    case focusStep(Int)
 
     private enum Keys: String, CodingKey {
         case action, key, setting, offset, value, group, name, index, confirm, mode, x, y, factor, included, from, to, id, linked, onto
@@ -180,6 +189,12 @@ public enum AutomationAction: Equatable, Sendable, Decodable {
         case "moveWaveform": self = .moveWaveform(x: try c.decode(Double.self, forKey: .x), y: try c.decode(Double.self, forKey: .y))
         case "referenceFromFrame": self = .referenceFromFrame
         case "referenceFromShot": self = .referenceFromShot(try c.decodeIfPresent(Int.self, forKey: .index) ?? 0)
+        case "toggleTouchFocus": self = .toggleTouchFocus
+        case "touchFocus": self = .touchFocus(x: try c.decode(Double.self, forKey: .x), y: try c.decode(Double.self, forKey: .y))
+        case "cancelTouch": self = .cancelTouch
+        case "zoomStart": self = .zoomStart(try c.decode(String.self, forKey: .name))
+        case "zoomStop": self = .zoomStop
+        case "focusStep": self = .focusStep(try c.decode(Int.self, forKey: .offset))
         default:
             throw DecodingError.dataCorruptedError(forKey: .action, in: c, debugDescription: "неизвестная команда \(action)")
         }

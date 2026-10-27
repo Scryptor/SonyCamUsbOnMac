@@ -35,13 +35,17 @@ public struct LiveViewSample: Sendable {
     public let shortReplySeconds: TimeInterval?
     /// Сколько раз перед этим кадром камера ответила «кадр не готов».
     public let waits: Int
+    /// Рамки фокуса этого кадра: где камера фокусирует.
+    public let focusFrames: [FocusFrame]
 
-    public init(jpeg: Data, bytes: Int, seconds: TimeInterval, shortReplySeconds: TimeInterval?, waits: Int = 0) {
+    public init(jpeg: Data, bytes: Int, seconds: TimeInterval, shortReplySeconds: TimeInterval?, waits: Int = 0,
+                focusFrames: [FocusFrame] = []) {
         self.jpeg = jpeg
         self.bytes = bytes
         self.seconds = seconds
         self.shortReplySeconds = shortReplySeconds
         self.waits = waits
+        self.focusFrames = focusFrames
     }
 }
 
