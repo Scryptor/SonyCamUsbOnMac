@@ -214,7 +214,8 @@ final class ZoomPatch {
     }
 }
 
-/// Прокрутка двумя пальцами двигает увеличенную картинку. Меню Fn, панель настроек и галерея прокручивают своё.
+/// Прокрутка двумя пальцами двигает увеличенную картинку. Меню Fn и «Монитор», шкала фокуса, панель настроек и галерея
+/// прокручивают своё.
 @MainActor
 final class ZoomScroll {
     var viewSize = CGSize.zero
@@ -223,8 +224,9 @@ final class ZoomScroll {
     func start(screen: ScreenState, controller: CameraController) {
         stop()
         token = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
-            guard let self, screen.zoom.isZoomed, screen.galleryShot == nil, !screen.fnOpen, !screen.allSettingsOpen,
-                  !screen.debugOpen, controller.review == nil, event.window?.title == LiveScreen.windowTitle,
+            guard let self, screen.zoom.isZoomed, screen.galleryShot == nil, !screen.fnOpen, !screen.assistOpen,
+                  !screen.allSettingsOpen, !screen.debugOpen, controller.review == nil, !ScrollMonitor.claims(event),
+                  event.window?.title == LiveScreen.windowTitle,
                   event.hasPreciseScrollingDeltas, let frame = controller.frame else { return event }
             screen.zoom = screen.zoom.panned(by: CGSize(width: event.scrollingDeltaX, height: event.scrollingDeltaY),
                                              view: self.viewSize, frame: CGSize(width: frame.width, height: frame.height))

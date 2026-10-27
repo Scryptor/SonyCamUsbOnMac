@@ -21,12 +21,22 @@ public enum TouchFocus {
         return area == 0x2 || (0x101...0x104).contains(area) || area == 0x202 || (0x204...0x207).contains(area)
     }
 
+    /// Касание экрана камеры делает фокус или слежение (Function of Touch Operation 0xD283: 3, 4 и они же с Touch AE —
+    /// 8…11). Касание-спуск (2, 6, 7) сделало бы снимок, Touch AE (5) — экспозицию: таким касанием фокус не ставим.
+    public static func touchFocuses(touchFunction: Int64?) -> Bool {
+        guard let f = touchFunction else { return false }
+        return (3...4).contains(f) || (8...11).contains(f)
+    }
+
     /// Как ставить фокус касанием сейчас; nil — никак: ручной фокус или камера этого не умеет. controls — команды
     /// 0x9207, которые камера назвала в GetExtDeviceInfo.
-    public static func method(focusMode: Int64?, focusArea: Int64?, remoteTouchEnabled: Int64?, controls: Set<UInt16>) -> Method? {
+    public static func method(focusMode: Int64?, focusArea: Int64?, remoteTouchEnabled: Int64?, touchFunction: Int64?,
+                              controls: Set<UInt16>) -> Method? {
         if focusMode == 1 { return nil }
         if movesPoint(focusArea: focusArea), controls.contains(SonyControl.afAreaPosition) { return .areaPosition }
-        if remoteTouchEnabled == 1, controls.contains(SonyControl.remoteTouch) { return .remoteTouch }
+        if remoteTouchEnabled == 1, touchFocuses(touchFunction: touchFunction), controls.contains(SonyControl.remoteTouch) {
+            return .remoteTouch
+        }
         return nil
     }
 

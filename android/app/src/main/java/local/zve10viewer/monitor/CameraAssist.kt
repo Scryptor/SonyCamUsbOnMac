@@ -116,11 +116,17 @@ object TouchFocus {
     fun movesPoint(focusArea: Long?): Boolean =
         focusArea != null && (focusArea == 0x2L || focusArea in 0x101L..0x104L || focusArea == 0x202L || focusArea in 0x204L..0x207L)
 
+    /**
+     * Касание экрана камеры делает фокус или слежение (Function of Touch Operation 0xD283: 3, 4 и они же с Touch AE —
+     * 8…11). Касание-спуск (2, 6, 7) сделало бы снимок, Touch AE (5) — экспозицию: таким касанием фокус не ставим.
+     */
+    fun touchFocuses(touchFunction: Long?): Boolean = touchFunction != null && (touchFunction in 3L..4L || touchFunction in 8L..11L)
+
     /** Как ставить фокус касанием сейчас; null — никак: ручной фокус или камера этого не умеет. */
-    fun method(focusMode: Long?, focusArea: Long?, remoteTouchEnabled: Long?, controls: Set<Int>): Method? = when {
+    fun method(focusMode: Long?, focusArea: Long?, remoteTouchEnabled: Long?, touchFunction: Long?, controls: Set<Int>): Method? = when {
         focusMode == 1L -> null
         movesPoint(focusArea) && SonyControl.AF_AREA_POSITION in controls -> Method.areaPosition
-        remoteTouchEnabled == 1L && SonyControl.REMOTE_TOUCH in controls -> Method.remoteTouch
+        remoteTouchEnabled == 1L && touchFocuses(touchFunction) && SonyControl.REMOTE_TOUCH in controls -> Method.remoteTouch
         else -> null
     }
 

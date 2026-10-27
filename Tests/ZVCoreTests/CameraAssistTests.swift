@@ -51,13 +51,24 @@ import Testing
     // у ZV-E10 есть обе команды
     #expect(controls.contains(SonyControl.afAreaPosition) && controls.contains(SonyControl.remoteTouch))
     // «Точка M» — точка AF; «Широкая» — касание экрана камеры; MF — никак
-    #expect(TouchFocus.method(focusMode: 0x8004, focusArea: 0x102, remoteTouchEnabled: 1, controls: controls) == .areaPosition)
-    #expect(TouchFocus.method(focusMode: 0x8004, focusArea: 0x2, remoteTouchEnabled: 1, controls: controls) == .areaPosition)
-    #expect(TouchFocus.method(focusMode: 0x8004, focusArea: 0x205, remoteTouchEnabled: 1, controls: controls) == .areaPosition)
-    #expect(TouchFocus.method(focusMode: 0x8004, focusArea: 0x1, remoteTouchEnabled: 1, controls: controls) == .remoteTouch)
-    #expect(TouchFocus.method(focusMode: 0x8004, focusArea: 0x1, remoteTouchEnabled: 0, controls: controls) == nil)
-    #expect(TouchFocus.method(focusMode: 1, focusArea: 0x102, remoteTouchEnabled: 1, controls: controls) == nil)
-    #expect(TouchFocus.method(focusMode: 0x8004, focusArea: 0x102, remoteTouchEnabled: 1, controls: []) == nil)
+    func method(_ mode: Int64?, _ area: Int64?, _ enabled: Int64?, _ function: Int64?, _ codes: Set<UInt16>) -> TouchFocus.Method? {
+        TouchFocus.method(focusMode: mode, focusArea: area, remoteTouchEnabled: enabled, touchFunction: function, controls: codes)
+    }
+    // у ZV-E10 касание экрана в видео — слежение (0xD283 = 4)
+    #expect(method(0x8004, 0x102, 1, 4, controls) == .areaPosition)
+    #expect(method(0x8004, 0x2, 1, 4, controls) == .areaPosition)
+    #expect(method(0x8004, 0x205, 1, 4, controls) == .areaPosition)
+    #expect(method(0x8004, 0x1, 1, 4, controls) == .remoteTouch)
+    #expect(method(0x8004, 0x1, 1, 9, controls) == .remoteTouch)
+    #expect(method(0x8004, 0x1, 0, 4, controls) == nil)
+    #expect(method(1, 0x102, 1, 4, controls) == nil)
+    #expect(method(0x8004, 0x102, 1, 4, []) == nil)
+    // касание-спуск сделало бы снимок, Touch AE — экспозицию; функция неизвестна — тоже нет
+    #expect(method(0x8004, 0x1, 1, 2, controls) == nil)
+    #expect(method(0x8004, 0x1, 1, 5, controls) == nil)
+    #expect(method(0x8004, 0x1, 1, nil, controls) == nil)
+    // точка AF от функции касания не зависит
+    #expect(method(0x8004, 0x103, 1, 2, controls) == .areaPosition)
 }
 
 @Test func touchFocusMapsTheFrameTo640x480() {

@@ -44,6 +44,10 @@ final class CameraController {
     /// Единиц Near/Far, которые ещё надо отправить: шкалу тянут быстрее, чем камера отвечает.
     @ObservationIgnored private var focusUnits = 0
     @ObservationIgnored private var focusDriving = false
+    /// Растёт, когда сеанс уходит: цикл шагов фокуса прошлого сеанса останавливается и новому не мешает.
+    @ObservationIgnored private var focusGeneration = 0
+    /// Последняя команда объектива: следующая ждёт её — «стоп» зума не обгонит «пуск».
+    @ObservationIgnored private var lensTail: Task<Void, Never>?
     private(set) var fps: Double = 0
     /// fps для строки состояния: обновляется дважды в секунду, а не с каждым кадром.
     private(set) var shownFPS = 0
@@ -1862,6 +1866,7 @@ final class CameraController {
     /// Сеанс оборвался, но камеру ждём обратно: закрыть всё, что связано с соединением, а картинку, настройки,
     /// таймер записи и ленту снимков оставить на экране.
     private func suspendSession() {
+        releaseLens()
         tasks.forEach { $0.cancel() }
         tasks.removeAll()
         // старое соединение — сбросом (RST): камера, застрявшая на передаче, освобождается сразу и примет новое
@@ -2154,6 +2159,7 @@ final class CameraController {
     /// Останавливает всё, что связано с текущей камерой, и закрывает сессию.
     /// closing: false — сеанс уходит в ленту: всё, что связано с главным экраном, сбрасывается, а соединение — нет.
     private func teardown(closing: Bool = true) {
+        releaseLens()
         tasks.forEach { $0.cancel() }
         tasks.removeAll()
         reconnectTask?.cancel()
@@ -2304,7 +2310,8 @@ final class CameraController {
     /// Как сейчас ставится фокус касанием; nil — никак (ручной фокус, камера не умеет).
     var touchFocusMethod: TouchFocus.Method? {
         TouchFocus.method(focusMode: value(SonyProp.focusMode), focusArea: value(SonyProp.focusArea),
-                          remoteTouchEnabled: value(SonyProp.remoteTouchEnabled), controls: controlCodes)
+                          remoteTouchEnabled: value(SonyProp.remoteTouchEnabled), touchFunction: value(SonyProp.touchFunction),
+                          controls: controlCodes)
     }
 
     /// Камера вообще умеет фокус касанием (кнопка есть, даже если сейчас ручной фокус).
@@ -2350,32 +2357,62 @@ final class CameraController {
             showStatus(TouchFocus.refusal(focusMode: value(SonyProp.focusMode)))
             return false
         }
-        touchMark = (point, Date())
+        let mark = Date()
+        touchMark = (point, mark)
+        // отметка гаснет за секунду — потом её нет, и слой с рамками не перерисовывается 30 раз в секунду
+        Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(1100))
+            if self?.touchMark?.at == mark { self?.touchMark = nil }
+        }
         let code = method == .areaPosition ? SonyControl.afAreaPosition : SonyControl.remoteTouch
         let encoded = TouchFocus.encode(x: Double(point.x), y: Double(point.y))
         note("фокус касанием: \(method == .areaPosition ? "точка AF" : "касание экрана камеры") (\(encoded >> 16), \(encoded & 0xFFFF))")
-        Task { [weak self] in
+        lensCommand { [weak self] in
             let code = try? await session.control(code, value: encoded, type: PTPType.uint32)
-            if code != PTPResponseCode.ok { self?.showStatus("Камера не поставила фокус в эту точку") }
+            if code != PTPResponseCode.ok { await self?.showStatus("Камера не поставила фокус в эту точку") }
         }
         return true
+    }
+
+    /// Команды объектива — по одной и по порядку.
+    private func lensCommand(_ body: @escaping @Sendable () async -> Void) {
+        let previous = lensTail
+        lensTail = Task {
+            await previous?.value
+            await body()
+        }
     }
 
     /// Снять слежение, начатое касанием.
     func cancelTouch() {
         guard phase == .ready, let session, touchCancelAvailable else { return }
         touchMark = nil
-        Task { _ = try? await session.pressButton(SonyControl.remoteTouchCancel) }
+        lensCommand { _ = try? await session.pressButton(SonyControl.remoteTouchCancel) }
     }
 
-    /// Зум: 1 — к теле, −1 — к широкому, пока не придёт 0. Повтор того же направления ничего не шлёт.
+    /// Зум: 1 — к теле, −1 — к широкому, пока не придёт 0. Повтор того же направления ничего не шлёт. Стоп без сеанса
+    /// (связь пропала, пока держали «T») только отпускает кнопку: слать некому.
     func zoom(_ direction: Int) {
         let direction = max(-1, min(1, direction))
-        guard direction != zoomDirection, let session else { return }
-        guard direction == 0 || (phase == .ready && zoomAvailable) else { return }
+        guard direction != zoomDirection else { return }
+        guard direction == 0 || (session != nil && phase == .ready && zoomAvailable) else { return }
         zoomDirection = direction
+        guard let session else { return }
         note("зум: " + (direction > 0 ? "к теле" : direction < 0 ? "к широкому" : "стоп"))
-        Task { _ = try? await session.control(SonyControl.zoomOperation, value: Int64(direction), type: PTPType.int8) }
+        lensCommand { _ = try? await session.control(SonyControl.zoomOperation, value: Int64(direction), type: PTPType.int8) }
+    }
+
+    /// Сеанс уходит (обрыв, другая камера, лента): зум — стоп этому сеансу, кнопка отпущена, очередь шагов фокуса пуста,
+    /// отметка касания снята. Иначе после переподключения «T» горела бы, а шаги прошлого сеанса ушли бы новому.
+    private func releaseLens() {
+        if zoomDirection != 0, let session {
+            lensCommand { _ = try? await session.control(SonyControl.zoomOperation, value: 0, type: PTPType.int8) }
+        }
+        zoomDirection = 0
+        focusUnits = 0
+        focusGeneration += 1
+        focusDriving = false
+        touchMark = nil
     }
 
     /// Перефокусировка на столько единиц Near/Far (отрицательное — ближе): по одной команде за раз, остальное копится.
@@ -2384,14 +2421,15 @@ final class CameraController {
         focusUnits += units
         guard !focusDriving else { return }
         focusDriving = true
+        let generation = focusGeneration
         Task { [weak self] in
-            while let self, self.focusUnits != 0, self.session === session {
-                let commands = FocusDrive.commands(units: self.focusUnits)
-                guard let next = commands.first else { break }
+            while let self, self.focusGeneration == generation, self.focusUnits != 0 {
+                guard let next = FocusDrive.commands(units: self.focusUnits).first else { break }
                 self.focusUnits -= Int(next)
                 _ = try? await session.control(SonyControl.nearFar, value: next, type: PTPType.int16)
             }
-            self?.focusDriving = false
+            // сеанс ушёл, пока шла команда, — флаг уже сброшен, и новый цикл мог начаться: его не трогаем
+            if let self, self.focusGeneration == generation { self.focusDriving = false }
         }
     }
 

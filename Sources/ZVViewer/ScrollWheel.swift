@@ -32,9 +32,15 @@ final class ScrollMonitor {
     var frame: CGRect = .zero
     private var token: Any?
     private var stepper = ScrollStepper()
+    /// Кто сейчас ловит колесо: прокрутка над ним — его шаги, а не сдвиг увеличенной картинки.
+    private static var live: [ScrollMonitor] = []
+
+    /// Колесо над одним из элементов с шагами — шкала фокуса, меню.
+    static func claims(_ event: NSEvent) -> Bool { live.contains { $0.contains(event) } }
 
     func start(_ onStep: @escaping (Int) -> Void) {
         stop()
+        Self.live.append(self)
         token = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
             guard let self else { return event }
             let steps = self.stepper.feed(dx: event.scrollingDeltaX, dy: event.scrollingDeltaY,
@@ -50,6 +56,7 @@ final class ScrollMonitor {
         if let token { NSEvent.removeMonitor(token) }
         token = nil
         stepper = ScrollStepper()
+        Self.live.removeAll { $0 === self }
     }
 
     private func contains(_ event: NSEvent) -> Bool {

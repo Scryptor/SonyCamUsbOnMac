@@ -94,6 +94,9 @@ struct LiveScreen: View {
             screen.toggleAssist("zя".contains(key) ? .zebra : "pз".contains(key) ? .peaking : .falseColor)
             return .handled
         }
+        // окно или программа ушли из фокуса, пока держали T или W, — отпускание клавиши сюда уже не придёт: стоп
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in controller.zoom(0) }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { _ in controller.zoom(0) }
         // зум с экрана: T — к теле, W — к широкому, пока клавиша нажата
         .onKeyPress(characters: CharacterSet(charactersIn: "tTеЕwWцЦ"), phases: [.down, .up]) { press in
             guard controller.zoomAvailable || controller.zoomDirection != 0 else { return .ignored }

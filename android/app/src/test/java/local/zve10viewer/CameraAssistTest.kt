@@ -70,13 +70,21 @@ class CameraAssistTest {
         val controls = SonyExtInfo.parse(fixture("sony_extdeviceinfo"))!!.controlCodes.toSet()
         // у ZV-E10 есть обе команды
         assertTrue(SonyControl.AF_AREA_POSITION in controls && SonyControl.REMOTE_TOUCH in controls)
-        assertEquals(TouchFocus.Method.areaPosition, TouchFocus.method(0x8004, 0x102, 1, controls))
-        assertEquals(TouchFocus.Method.areaPosition, TouchFocus.method(0x8004, 0x2, 1, controls))
-        assertEquals(TouchFocus.Method.areaPosition, TouchFocus.method(0x8004, 0x205, 1, controls))
-        assertEquals(TouchFocus.Method.remoteTouch, TouchFocus.method(0x8004, 0x1, 1, controls))
-        assertNull(TouchFocus.method(0x8004, 0x1, 0, controls))
-        assertNull(TouchFocus.method(1, 0x102, 1, controls))
-        assertNull(TouchFocus.method(0x8004, 0x102, 1, emptySet()))
+        // у ZV-E10 касание экрана в видео — слежение (0xD283 = 4)
+        assertEquals(TouchFocus.Method.areaPosition, TouchFocus.method(0x8004, 0x102, 1, 4, controls))
+        assertEquals(TouchFocus.Method.areaPosition, TouchFocus.method(0x8004, 0x2, 1, 4, controls))
+        assertEquals(TouchFocus.Method.areaPosition, TouchFocus.method(0x8004, 0x205, 1, 4, controls))
+        assertEquals(TouchFocus.Method.remoteTouch, TouchFocus.method(0x8004, 0x1, 1, 4, controls))
+        assertEquals(TouchFocus.Method.remoteTouch, TouchFocus.method(0x8004, 0x1, 1, 9, controls))
+        assertNull(TouchFocus.method(0x8004, 0x1, 0, 4, controls))
+        assertNull(TouchFocus.method(1, 0x102, 1, 4, controls))
+        assertNull(TouchFocus.method(0x8004, 0x102, 1, 4, emptySet()))
+        // касание-спуск сделало бы снимок, Touch AE — экспозицию; функция неизвестна — тоже нет
+        assertNull(TouchFocus.method(0x8004, 0x1, 1, 2, controls))
+        assertNull(TouchFocus.method(0x8004, 0x1, 1, 5, controls))
+        assertNull(TouchFocus.method(0x8004, 0x1, 1, null, controls))
+        // точка AF от функции касания не зависит
+        assertEquals(TouchFocus.Method.areaPosition, TouchFocus.method(0x8004, 0x103, 1, 2, controls))
     }
 
     @Test fun touchFocusMapsTheFrameTo640x480() {

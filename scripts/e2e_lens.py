@@ -31,7 +31,7 @@ def near(a, b, tolerance=0.03):
     return abs(a - b) <= tolerance
 
 
-def run(out):
+def run(out, restart_camera):
     s = state()
     check("камера назвала команды фокуса и зума",
           all(c in lens(s)["controls"] for c in ("0xD2D1", "0xD2DC", "0xD2DD", "0xD2E4")), lens(s)["controls"])
@@ -105,6 +105,27 @@ def run(out):
     act("focusStep", offset=6)
     wait(lambda s: lens(s)["focalPosition"] == before, 4)
 
+    # держали «T», а связь пропала: отпустили во время обрыва — кнопка отпущена, после переподключения зум снова работает
+    act("zoomStart", name="tele")
+    time.sleep(0.4)
+    restart_camera(down=True)
+    s = wait(lambda s: s.get("phase") != "ready" or (s.get("link") or {}).get("state") != "ok", 15)
+    act("zoomStop")
+    s = state()
+    check("обрыв во время зума: отпустили — кнопка отпущена", lens(s)["zoomDirection"] == 0, lens(s))
+    restart_camera(down=False)
+    s = wait(lambda s: s.get("phase") == "ready" and s.get("fps", 0) > 3 and lens(s)["zoom"], 40)
+    time.sleep(3)
+    check("после переподключения «T» не горит", lens(state())["zoomDirection"] == 0, lens(state()))
+    before_bar = lens(state())["zoomBar"]["position"]
+    act("zoomStart", name="tele")
+    s = wait(lambda s: (lens(s)["zoomBar"] or {}).get("position", 0) > before_bar, 4)
+    act("zoomStop")
+    check("и зум снова едет", lens(s)["zoomBar"]["position"] > before_bar, (before_bar, lens(s)["zoomBar"]))
+    act("zoomStart", name="wide")
+    wait(lambda s: lens(s)["zoomBar"]["position"] == 0, 6)
+    act("zoomStop")
+
     # как было: AF-C, «Широкая»
     act("request", setting="focusMode", value=FOCUS_MODE_AFC)
     wait(lambda s: setting(s, "focusMode").get("value") == FOCUS_MODE_AFC, 4)
@@ -121,8 +142,19 @@ def main():
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
     before = save_prefs()
-    cam = subprocess.Popen([sys.executable, os.path.join(ROOT, "scripts/fake_camera.py"), "--listen", CAMERA],
-                           stdout=open(os.path.join(args.out, "camera.log"), "w"), stderr=subprocess.STDOUT)
+    log = open(os.path.join(args.out, "camera.log"), "a")
+    cams = [subprocess.Popen([sys.executable, os.path.join(ROOT, "scripts/fake_camera.py"), "--listen", CAMERA], stdout=log,
+                             stderr=subprocess.STDOUT)]
+
+    def restart_camera(down):
+        """Камера пропала (процесс остановлен) или вернулась (новый на том же адресе)."""
+        if down:
+            cams[-1].terminate()
+            cams[-1].wait()
+        else:
+            cams.append(subprocess.Popen([sys.executable, os.path.join(ROOT, "scripts/fake_camera.py"), "--listen", CAMERA],
+                                         stdout=log, stderr=subprocess.STDOUT))
+
     time.sleep(0.5)
     env = dict(os.environ, ZV_AUTOMATION="1", ZV_PTPIP_HOST=CAMERA)
     proc = subprocess.Popen([os.path.join(args.app, "Contents/MacOS/ZVViewer"), "-ApplePersistenceIgnoreState", "YES"], env=env,
@@ -135,7 +167,7 @@ def main():
         time.sleep(3)                                   # первые секунды сеанса камера пропускает записи
         autohide = s["prefs"]["autoHide"]
         try:
-            run(args.out)
+            run(args.out, restart_camera)
         finally:
             act("zoomStop")
             act("setPreference", key="autoHide", value="true" if autohide else "false")
@@ -145,8 +177,10 @@ def main():
             proc.wait(timeout=8)
         except subprocess.TimeoutExpired:
             proc.kill()
-        cam.terminate()
-        cam.wait()
+        for cam in cams:
+            if cam.poll() is None:
+                cam.terminate()
+                cam.wait()
         restore_prefs(before)
     print(f"\n{e2e_monitor.passed} из {e2e_monitor.passed + e2e_monitor.failed} проверок прошли; скриншоты — {args.out}")
     return 0 if e2e_monitor.failed == 0 else 1

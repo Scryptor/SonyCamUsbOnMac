@@ -48,6 +48,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import local.zve10viewer.debug.DebugFormat
@@ -300,6 +301,10 @@ class CameraController(private val context: Context, private val scope: Coroutin
     /** Единиц Near/Far, которые ещё надо отправить: шкалу тянут быстрее, чем камера отвечает. */
     private var focusUnits = 0
     private var focusDriving = false
+    /** Растёт, когда сеанс уходит: цикл шагов фокуса прошлого сеанса останавливается и новому не мешает. */
+    private var focusGeneration = 0
+    /** Команды объектива — по одной и по порядку: «стоп» зума не обгонит «пуск» (Mutex отдаёт замок по очереди). */
+    private val lensMutex = kotlinx.coroutines.sync.Mutex()
     /** Красная рамка во время записи — как её рисовать (настройка ⚙). */
     var tallyStyle by mutableStateOf(prefs.tallyStyle)
         private set
@@ -928,7 +933,8 @@ class CameraController(private val context: Context, private val scope: Coroutin
 
     /** Как сейчас ставится фокус касанием; null — никак (ручной фокус, камера не умеет). */
     val touchFocusMethod: TouchFocus.Method?
-        get() = TouchFocus.method(value(SonyProp.FOCUS_MODE), value(SonyProp.FOCUS_AREA), value(SonyProp.REMOTE_TOUCH_ENABLED), controlCodes)
+        get() = TouchFocus.method(value(SonyProp.FOCUS_MODE), value(SonyProp.FOCUS_AREA), value(SonyProp.REMOTE_TOUCH_ENABLED),
+            value(SonyProp.TOUCH_FUNCTION), controlCodes)
 
     /** Камера вообще умеет фокус касанием (кнопка есть, даже если сейчас ручной фокус). */
     val touchFocusSupported: Boolean
@@ -968,7 +974,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
         journal("фокус касанием: ${if (method == TouchFocus.Method.areaPosition) "точка AF" else "касание экрана камеры"} " +
             "(${encoded shr 16}, ${encoded and 0xFFFF})")
         scope.launch {
-            val reply = runCatching { session.control(code, encoded, PtpType.UINT32) }.getOrNull()
+            val reply = lensMutex.withLock { runCatching { session.control(code, encoded, PtpType.UINT32) }.getOrNull() }
             if (reply != PtpResponseCode.OK) showStatus("Камера не поставила фокус в эту точку")
         }
         return true
@@ -979,18 +985,38 @@ class CameraController(private val context: Context, private val scope: Coroutin
         val session = session ?: return
         if (phase != Phase.ready || !touchCancelAvailable) return
         touchMark = null
-        scope.launch { runCatching { session.pressButton(SonyControl.REMOTE_TOUCH_CANCEL) } }
+        scope.launch { lensMutex.withLock { runCatching { session.pressButton(SonyControl.REMOTE_TOUCH_CANCEL) } } }
     }
 
-    /** Зум: 1 — к теле, −1 — к широкому, пока не придёт 0. Повтор того же направления ничего не шлёт. */
+    /**
+     * Зум: 1 — к теле, −1 — к широкому, пока не придёт 0. Повтор того же направления ничего не шлёт. Стоп без сеанса
+     * (связь пропала, пока держали «T») только сбрасывает кнопку: слать некому.
+     */
     fun zoom(direction: Int) {
         val dir = direction.coerceIn(-1, 1)
-        val session = session ?: return
         if (dir == zoomDirection) return
-        if (dir != 0 && (phase != Phase.ready || !zoomAvailable)) return
+        val session = session
+        if (dir != 0 && (session == null || phase != Phase.ready || !zoomAvailable)) return
         zoomDirection = dir
+        if (session == null) return
         journal("зум: " + if (dir > 0) "к теле" else if (dir < 0) "к широкому" else "стоп")
-        scope.launch { runCatching { session.control(SonyControl.ZOOM_OPERATION, dir.toLong(), PtpType.INT8) } }
+        scope.launch { lensMutex.withLock { runCatching { session.control(SonyControl.ZOOM_OPERATION, dir.toLong(), PtpType.INT8) } } }
+    }
+
+    /**
+     * Сеанс уходит (обрыв, другая камера, лента): зум — стоп этому сеансу, кнопка отпущена, очередь шагов фокуса пуста,
+     * отметка касания снята. Иначе после переподключения «T» горела бы, а шаги прошлого сеанса ушли бы новому.
+     */
+    private fun releaseLens() {
+        val session = session
+        if (zoomDirection != 0 && session != null) {
+            scope.launch { lensMutex.withLock { runCatching { session.control(SonyControl.ZOOM_OPERATION, 0, PtpType.INT8) } } }
+        }
+        zoomDirection = 0
+        focusUnits = 0
+        focusGeneration++
+        focusDriving = false
+        touchMark = null
     }
 
     /** Перефокусировка на столько единиц Near/Far (отрицательное — ближе): по одной команде за раз, остальное копится. */
@@ -1000,15 +1026,17 @@ class CameraController(private val context: Context, private val scope: Coroutin
         focusUnits += units
         if (focusDriving) return
         focusDriving = true
+        val generation = focusGeneration
         scope.launch {
             try {
-                while (focusUnits != 0 && this@CameraController.session === session) {
+                while (focusUnits != 0 && focusGeneration == generation) {
                     val next = FocusDrive.commands(focusUnits).firstOrNull() ?: break
                     focusUnits -= next.toInt()
                     runCatching { session.control(SonyControl.NEAR_FAR, next, PtpType.INT16) }
                 }
             } finally {
-                focusDriving = false
+                // сеанс ушёл, пока шла команда, — флаг уже сброшен, и новый цикл мог начаться: его не трогаем
+                if (focusGeneration == generation) focusDriving = false
             }
         }
     }
@@ -2704,15 +2732,17 @@ class CameraController(private val context: Context, private val scope: Coroutin
             var assistSampler: AssistSampler? = null
             for (sample in frames) {
                 val bitmap = pool.decode(sample.data, sample.jpegOffset, sample.jpegLength) ?: continue
-                val levels = if (histogramOn) (sampler ?: HistogramSampler().also { sampler = it }).levels(bitmap) else null
                 // помощь в кадре и волновая форма — по тому же кадру и вместе с ним: подсветка не отстаёт от картинки
                 val tools = assistForFrames
                 val waveMode = waveformForFrames
-                val analysis = if (tools.needsRaster || waveMode != null) {
+                val analyzing = tools.needsRaster || waveMode != null
+                // уровни — по той же уменьшенной копии, что у гистограммы и на Mac: белый уровень у всех один
+                val levels = if (histogramOn || analyzing) (sampler ?: HistogramSampler().also { sampler = it }).levels(bitmap) else null
+                val analysis = if (analyzing) {
                     (assistSampler ?: AssistSampler().also { assistSampler = it })
                         .analyze(bitmap, levels, tools, assistView, assistVideo, waveMode)
                 } else null
-                withContext(Dispatchers.Main) { show(session, bitmap, sample, levels, analysis) }
+                withContext(Dispatchers.Main) { show(session, bitmap, sample, if (histogramOn) levels else null, analysis) }
             }
         }
     }
@@ -3037,6 +3067,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
      * Картинку, свойства, таймер записи и ленту на экране не трогает — их сбрасывает teardown.
      */
     private fun stopSession(abort: Boolean, keepOpen: Boolean = false) {
+        releaseLens()
         jobs.forEach { it.cancel() }
         jobs.clear()
         qualityJob?.cancel()
