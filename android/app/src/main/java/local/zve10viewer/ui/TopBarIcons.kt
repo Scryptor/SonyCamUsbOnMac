@@ -16,10 +16,11 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.unit.dp
 
 /** Значки верхней панели — «как на камере». */
-enum class TopBarGlyph { histogram, statusLine, savePreset, settings }
+enum class TopBarGlyph { histogram, monitor, statusLine, savePreset, settings }
 
 /**
  * Значок кнопки верхней панели: белый рисунок по утверждённому макету — в квадрате 52×52, на кнопке 44 dp с масштабом
@@ -39,6 +40,7 @@ fun TopBarIcon(glyph: TopBarGlyph, modifier: Modifier = Modifier.size(44.dp)) {
         val icon = Icon52(this, k, dx, dy)
         when (glyph) {
             TopBarGlyph.histogram -> icon.histogram()
+            TopBarGlyph.monitor -> icon.monitor()
             TopBarGlyph.statusLine -> icon.statusLine()
             TopBarGlyph.savePreset -> icon.savePreset()
             TopBarGlyph.settings -> icon.settings()
@@ -66,6 +68,16 @@ private class Icon52(private val scope: DrawScope, private val k: Float, private
         val dash = PathEffect.dashPathEffect(floatArrayOf(s(2f), s(2f)))
         for (x in floatArrayOf(22.3f, 29.7f)) {
             drawLine(white.copy(alpha = 0.55f), p(x, 15f), p(x, 35f), strokeWidth = 1.dp.toPx(), pathEffect = dash)
+        }
+    }
+
+    /** Монитор: кадр с полосами зебры в правой половине — как на Mac. */
+    fun monitor() = with(scope) {
+        drawRoundRect(white, p(15f, 18f), Size(s(22f), s(16f)), CornerRadius(s(2.5f)), style = stroke(1.8f))
+        val inner = p(16.5f, 19.5f)
+        val end = p(35.5f, 32.5f)
+        clipRect(inner.x, inner.y, end.x, end.y) {
+            for (x in floatArrayOf(24f, 29f, 34f)) drawLine(white, p(x - 4f, 34f), p(x + 4f, 18f), s(2f))
         }
     }
 

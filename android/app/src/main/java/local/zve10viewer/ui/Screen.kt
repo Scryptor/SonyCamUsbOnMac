@@ -108,6 +108,9 @@ import local.zve10viewer.settings.ValueFormatter
 import local.zve10viewer.settings.LumaStats
 import local.zve10viewer.sony.SonyProp
 import kotlin.math.sqrt
+import local.zve10viewer.monitor.MonitorTool
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.graphics.FilterQuality
 
 val Panel = Color(0xD91C1C1E)
 val PanelLight = Color(0x1FFFFFFF)
@@ -136,6 +139,10 @@ class ScreenState {
 
     /** Подсказка под строкой состояния: о подключении или о кадрах. */
     var pillInfo by mutableStateOf<PillInfo?>(null)
+
+    /** Меню «Монитор» внизу — на месте строки значений, как меню Fn, — и выбранная в нём плитка. */
+    var assistOpen by mutableStateOf(false)
+    var assistSelected by mutableStateOf(MonitorTool.zebra)
 
     /** Панель отладки: долгое нажатие на плашку состояния или ⚙ → «Отладка»; закрывается только ×. */
     var debugOpen by mutableStateOf(false)
@@ -183,8 +190,8 @@ class ScreenState {
     val controlsHidden: Boolean get() = manualHidden || autoHidden
     /** Открыто меню, панель, список пресетов или окошко: элементы не прячутся сами, касание видео закрывает. */
     val overlayOpen: Boolean
-        get() = fnOpen || allSettingsOpen || settingsOpen || pillInfo != null || presetMenuOpen || newPresetOpen || savePresetOpen ||
-            presetsOpen
+        get() = fnOpen || assistOpen || allSettingsOpen || settingsOpen || pillInfo != null || presetMenuOpen || newPresetOpen ||
+            savePresetOpen || presetsOpen
 
     fun togglePillInfo(info: PillInfo) {
         val open = pillInfo != info
@@ -205,6 +212,17 @@ class ScreenState {
         presetsOpen = true
     }
 
+    /** Кнопка «Монитор»: открыть меню инструментов или закрыть его. */
+    fun toggleAssistMenu() {
+        if (assistOpen) closeOverlays() else openAssist(null)
+    }
+
+    fun openAssist(tool: MonitorTool?) {
+        if (tool != null) assistSelected = tool
+        closeOverlays()
+        assistOpen = true
+    }
+
     fun noteActivity() {
         lastActivity = System.currentTimeMillis()
         if (autoHidden) autoHidden = false
@@ -212,6 +230,7 @@ class ScreenState {
 
     fun openFn(id: SettingID?) {
         if (id != null) selected = id
+        assistOpen = false
         pillInfo = null
         presetMenuOpen = false
         allSettingsOpen = false
@@ -225,6 +244,7 @@ class ScreenState {
             editing = null
         }
         fnOpen = false
+        assistOpen = false
         settingsOpen = false
         pillInfo = null
         presetMenuOpen = false
@@ -233,6 +253,7 @@ class ScreenState {
 
     fun closeOverlays() {
         fnOpen = false
+        assistOpen = false
         allSettingsOpen = false
         settingsOpen = false
         editing = null
@@ -259,6 +280,16 @@ fun App(controller: CameraController) {
                 }
                 is CameraController.DebugCommand.Gallery ->
                     screen.galleryShot = if (command.index < 0) null else controller.shots.getOrNull(command.index)?.id
+                is CameraController.DebugCommand.Assist -> {
+                    val tool = command.tool?.let { name -> MonitorTool.entries.firstOrNull { it.name == name } }
+                    when {
+                        command.off -> controller.assistOff()
+                        command.menu == true -> screen.openAssist(tool)
+                        command.menu == false -> if (screen.assistOpen) screen.closeOverlays()
+                        tool != null && command.value != null -> controller.setAssist(tool, command.value)
+                        tool != null -> controller.toggleAssist(tool)
+                    }
+                }
             }
         }
     }
@@ -541,8 +572,28 @@ private fun Video(controller: CameraController, screen: ScreenState, feedback: F
             // связь прервалась — последний кадр остаётся, но приглушён: видно, что он не живой
             val dimmed = notice == FrameNotice.interrupted || notice == FrameNotice.reconnecting
             val bicubic = renderer != null && screen.bicubic && (BICUBIC_AT_IDENTITY || screen.zoom.isZoomed)
+            val assist = controller.assist
+            val overlay = if (assist.needsRaster) controller.assistOverlay else null
             Canvas(Modifier.fillMaxSize()) {
-                drawFrame(frame, screen.zoom.imageRect(size, frameSize), if (dimmed) 0.55f else 1f, if (bicubic) renderer else null)
+                val rect = screen.zoom.imageRect(size, frameSize)
+                drawFrame(frame, rect, if (dimmed) 0.55f else 1f, if (bicubic) renderer else null)
+                // зебра, false color и пикинг — растр над своей частью кадра; едет вместе с картинкой
+                if (overlay != null) {
+                    val area = assistArea(overlay, rect)
+                    drawImage(overlay.image, dstOffset = IntOffset(area.left.roundToInt(), area.top.roundToInt()),
+                        dstSize = IntSize(area.width.roundToInt(), area.height.roundToInt()), alpha = if (dimmed) 0.55f else 1f,
+                        filterQuality = FilterQuality.Low)
+                }
+                if (assist.hasMarkers) drawAssistMarkers(assist, frameSize, rect)
+            }
+            // растр помощи считается по видимой части кадра
+            SideEffect {
+                val visible = screen.zoom.visibleRegion(viewSize, frameSize)
+                controller.assistView = CameraController.AssistView(visible.left.toDouble(), visible.top.toDouble(),
+                    visible.width.toDouble(), visible.height.toDouble(), screen.zoom.factor)
+            }
+            if (assist.falseColor) {
+                FalseColorLegend(Modifier.align(Alignment.TopCenter).padding(top = if (screen.controlsHidden && !screen.overlayOpen) 18.dp else 84.dp))
             }
             // стоп-кадр — всегда целиком: улетает из вписанного кадра; рамка записи — по краю видимой картинки
             SideEffect { feedback.frameRect = ViewZoom.identity.imageRect(viewSize, frameSize) }
@@ -615,17 +666,21 @@ private fun Controls(controller: CameraController, screen: ScreenState, feedback
             }
         }
         RightColumn(controller, feedback, Modifier.align(Alignment.CenterEnd).padding(end = 4.dp))
-        if (!screen.fnOpen && controller.shots.isNotEmpty()) {
+        if (!screen.fnOpen && !screen.assistOpen && controller.shots.isNotEmpty()) {
             Box(Modifier.align(Alignment.BottomStart).padding(bottom = 76.dp)
                 .onSizeChanged { screen.stripHeight = it.height.toFloat() }) {
                 ShotsStrip(controller, feedback) { screen.galleryShot = it.id }
             }
         }
-        Box(Modifier.align(Alignment.BottomCenter).padding(end = if (screen.fnOpen) 110.dp else 0.dp)) {
+        Box(Modifier.align(Alignment.BottomCenter).padding(end = if (screen.fnOpen || screen.assistOpen) 110.dp else 0.dp)) {
             if (screen.fnOpen) {
                 // где меню — для гистограммы: она поднимается над ним
                 DisposableEffect(Unit) { onDispose { screen.fnMenuRect = null } }
                 Box(Modifier.onGloballyPositioned { screen.fnMenuRect = it.boundsInRoot() }) { FnMenu(controller, screen) }
+            } else if (screen.assistOpen) {
+                // меню «Монитор» — на том же месте, гистограмма поднимается и над ним
+                DisposableEffect(Unit) { onDispose { screen.fnMenuRect = null } }
+                Box(Modifier.onGloballyPositioned { screen.fnMenuRect = it.boundsInRoot() }) { AssistMenu(controller, screen) }
             } else if (!screen.allSettingsOpen) {
                 InfoLine(controller) { screen.openFn(it) }
             }
@@ -821,6 +876,8 @@ private fun TopBar(controller: CameraController, screen: ScreenState) {
         ) {
             TopBarIcon(TopBarGlyph.histogram)
         }
+        // зебра, false color, пикинг и маркеры — меню внизу, на месте строки значений
+        MonitorButton(screen)
         // строка состояния справа вверху видна вместе с элементами; кнопка закрепляет её — тогда остаётся и без них
         Box(
             Modifier.size(44.dp).background(if (controller.statusBarPinned) Accent else PanelLight, RoundedCornerShape(9.dp))

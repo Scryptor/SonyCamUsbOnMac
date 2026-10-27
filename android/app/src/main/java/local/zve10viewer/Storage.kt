@@ -61,6 +61,11 @@ class Prefs(context: Context) {
         get() = prefs.getInt("autoHideSeconds", 3).coerceIn(1, 30)
         set(value) = prefs.edit().putInt("autoHideSeconds", value.coerceIn(1, 30)).apply()
 
+    /** Инструменты монитора (зебра, false color, пикинг, маркеры) — JSON, как у программы для Mac. */
+    var monitorAssist: String?
+        get() = prefs.getString("monitorAssist", null)
+        set(value) = prefs.edit().putString("monitorAssist", value).apply()
+
     var histogramOn: Boolean
         get() = prefs.getBoolean("histogramOn", false)
         set(value) = prefs.edit().putBoolean("histogramOn", value).apply()

@@ -86,6 +86,9 @@ import local.zve10viewer.settings.FileNaming
 import local.zve10viewer.settings.GroupFailures
 import local.zve10viewer.settings.LumaHistogram
 import local.zve10viewer.settings.LumaStats
+import local.zve10viewer.monitor.AssistRaster
+import local.zve10viewer.monitor.MonitorAssist
+import local.zve10viewer.monitor.MonitorTool
 import local.zve10viewer.settings.Preset
 import local.zve10viewer.settings.PresetCatalog
 import local.zve10viewer.settings.PresetChange
@@ -232,6 +235,24 @@ class CameraController(private val context: Context, private val scope: Coroutin
         private set
     var histogramOn by mutableStateOf(prefs.histogramOn)
         private set
+    /** Инструменты монитора: зебра, false color, пикинг, маркеры — помнятся между запусками. */
+    var assist by mutableStateOf(MonitorAssist.fromJson(prefs.monitorAssist))
+        private set
+    /** Зебра, false color и пикинг по последнему кадру — растр над видимой его частью; null — эти инструменты выключены. */
+    var assistOverlay by mutableStateOf<AssistOverlay?>(null)
+        private set
+
+    /** Растр помощи в кадре: картинка над частью кадра (доли) и сколько точек под зеброй и пикингом, %. */
+    class AssistOverlay(val image: ImageBitmap, val left: Float, val top: Float, val width: Float, val height: Float,
+                        val zebraShare: Double, val peakingShare: Double)
+
+    /** Что видно на экране: часть кадра (доли) и увеличение — от этого растр помощи. Ставит экран. */
+    data class AssistView(val x: Double, val y: Double, val width: Double, val height: Double, val factor: Double)
+
+    @Volatile var assistView = AssistView(0.0, 0.0, 1.0, 1.0, 1.0)
+    /** Инструменты и фото / видео — для потока кадров (белое в превью: в видео 234, в фото 255). */
+    @Volatile private var assistForFrames = assist
+    @Volatile private var assistVideo = true
     /** Красная рамка во время записи — как её рисовать (настройка ⚙). */
     var tallyStyle by mutableStateOf(prefs.tallyStyle)
         private set
@@ -370,6 +391,11 @@ class CameraController(private val context: Context, private val scope: Coroutin
         data class Zoom(val factor: Double, val x: Double, val y: Double, val bicubic: Boolean?) : DebugCommand()
         /** Галерея на снимке с этим местом в ленте (0 — самый новый); меньше нуля — закрыть. */
         data class Gallery(val index: Int) : DebugCommand()
+        /**
+         * Монитор: tool + value — значение инструмента, tool без value — включить или выключить его, off — выключить всё,
+         * menu — открыть меню (на инструменте tool) или закрыть.
+         */
+        data class Assist(val tool: String?, val value: String?, val off: Boolean, val menu: Boolean?) : DebugCommand()
     }
 
     private val debugCommandFlow = MutableSharedFlow<DebugCommand>(extraBufferCapacity = 8)
@@ -817,6 +843,25 @@ class CameraController(private val context: Context, private val scope: Coroutin
     fun applyTallyStyle(style: TallyStyle) {
         tallyStyle = style
         prefs.tallyStyle = style
+    }
+
+    /** Значение инструмента монитора; false — у него такого нет. */
+    fun setAssist(tool: MonitorTool, value: String): Boolean {
+        saveAssist(assist.with(tool, value) ?: return false)
+        return true
+    }
+
+    /** Включить или выключить инструмент: включается тем значением, что было в прошлый раз. */
+    fun toggleAssist(tool: MonitorTool) = saveAssist(assist.toggled(tool))
+
+    fun assistOff() = saveAssist(assist.allOff())
+
+    private fun saveAssist(next: MonitorAssist) {
+        assist = next
+        assistForFrames = next
+        prefs.monitorAssist = next.toJson()
+        // растровые выключили — старый растр не показываем, даже если новых кадров нет
+        if (!next.needsRaster) assistOverlay = null
     }
 
     fun toggleHistogram() {
@@ -2438,10 +2483,16 @@ class CameraController(private val context: Context, private val scope: Coroutin
             // свои Bitmap у каждого сеанса: прошлый, может быть, ещё дорисовывает свой последний кадр
             val pool = FramePool()
             var sampler: HistogramSampler? = null
+            var assistSampler: AssistSampler? = null
             for (sample in frames) {
                 val bitmap = pool.decode(sample.data, sample.jpegOffset, sample.jpegLength) ?: continue
                 val levels = if (histogramOn) (sampler ?: HistogramSampler().also { sampler = it }).levels(bitmap) else null
-                withContext(Dispatchers.Main) { show(session, bitmap, sample, levels) }
+                // помощь в кадре — по тому же кадру и вместе с ним: подсветка не отстаёт от картинки
+                val tools = assistForFrames
+                val overlay = if (tools.needsRaster) {
+                    (assistSampler ?: AssistSampler().also { assistSampler = it }).render(bitmap, levels, tools, assistView, assistVideo)
+                } else null
+                withContext(Dispatchers.Main) { show(session, bitmap, sample, levels, overlay) }
             }
         }
     }
@@ -2465,6 +2516,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
 
     private fun apply(snapshot: Map<Int, SonyProperty>) {
         properties = snapshot
+        assistVideo = mode != CaptureMode.photo
         // пресеты на экране — режима камеры; запоминаем его: без связи показываем тот же список
         snapshot[SettingID.exposureProgram.code]?.current?.intValue?.let(CaptureMode::of)?.let { mode ->
             if (mode != presetMode) {
@@ -2508,6 +2560,18 @@ class CameraController(private val context: Context, private val scope: Coroutin
         frameLog.clear()
     }
 
+    /** Растр помощи в журнале logcat (тег ZVAssist) раз в 2 с: размер, часть кадра, зебра и пикинг — для проверок по adb. */
+    private var assistLoggedAt = 0L
+
+    private fun noteAssist(overlay: AssistOverlay?) {
+        val now = System.currentTimeMillis()
+        if (overlay == null || now - assistLoggedAt < 2000) return
+        assistLoggedAt = now
+        Log.i("ZVAssist", "растр %d×%d, часть кадра %.3f %.3f %.3f×%.3f, зебра %.2f%%, пикинг %.2f%%".format(java.util.Locale.ROOT,
+            overlay.image.width, overlay.image.height, overlay.left, overlay.top, overlay.width, overlay.height,
+            overlay.zebraShare, overlay.peakingShare))
+    }
+
     /** Отпечаток кадра для подсчёта повторов: каждый 16-й байт JPEG — повтор не пропустит, а дешевле полного хеша. */
     private fun fingerprint(sample: LiveViewSample): Int {
         var hash = sample.jpegLength
@@ -2520,11 +2584,13 @@ class CameraController(private val context: Context, private val scope: Coroutin
         return hash
     }
 
-    private fun show(from: CameraSession, bitmap: Bitmap, sample: LiveViewSample, levels: IntArray?) {
+    private fun show(from: CameraSession, bitmap: Bitmap, sample: LiveViewSample, levels: IntArray?, overlay: AssistOverlay?) {
         // кадр прошлого сеанса, дошедший после обрыва, — не тот, что считается «восстановили»
         if (from !== session) return
         measure(sample)
         frameBitmap = bitmap
+        assistOverlay = if (assist.needsRaster) overlay else null
+        noteAssist(overlay)
         // новая обёртка на каждый кадр: Bitmap из пула тот же, и с прежней обёрткой Compose не перерисовал бы картинку
         frame = bitmap.asImageBitmap()
         lastSample = sample
@@ -2786,6 +2852,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
         liveViewQuality = null
         histogram = null
         histogramStats = null
+        assistOverlay = null
         frameTimes.clear()
         frameGaps.clear()
         lastFrameAt = 0L
@@ -3022,6 +3089,40 @@ private class FramePool {
         options.inBitmap = null
         bitmaps[slot] = bitmap
         return bitmap
+    }
+}
+
+/**
+ * Растр помощи в кадре (зебра, false color, пикинг) по кадру: яркость всего кадра, видимая часть — в размер растра, сам
+ * растр — в Bitmap из трёх по кругу, как кадры. Массивы — одни на весь сеанс. Вызывать из одной корутины.
+ */
+private class AssistSampler {
+    private var pixels = IntArray(0)
+    private var out = IntArray(0)
+    private val bitmaps = arrayOfNulls<Bitmap>(3)
+    private var next = 0
+
+    fun render(frame: Bitmap, levels: IntArray?, assist: MonitorAssist, view: CameraController.AssistView,
+               video: Boolean): CameraController.AssistOverlay? {
+        val w = frame.width
+        val h = frame.height
+        if (pixels.size < w * h) pixels = IntArray(w * h)
+        frame.getPixels(pixels, 0, w, 0, 0, w, h)
+        val luma = AssistRaster.luma(pixels, w * h)
+        val plan = AssistRaster.plan(w, h, view.x, view.y, view.width, view.height, view.factor)
+        val part = AssistRaster.resample(luma, w, h, plan)
+        // шкала — как у гистограммы: от чёрного до белого превью; гистограмма выключена — уровни по самому кадру
+        val white = LumaStats.whiteLevel(levels ?: IntArray(256).also { counts -> for (v in luma) counts[v]++ }, video)
+        if (out.size < plan.width * plan.height) out = IntArray(plan.width * plan.height)
+        val raster = AssistRaster.render(part, plan.width, plan.height, plan.scale, white, assist, out) ?: return null
+        val slot = next
+        next = (next + 1) % bitmaps.size
+        val bitmap = bitmaps[slot]?.takeIf { it.width == raster.width && it.height == raster.height }
+            ?: Bitmap.createBitmap(raster.width, raster.height, Bitmap.Config.ARGB_8888).also { bitmaps[slot] = it }
+        bitmap.setPixels(raster.pixels, 0, raster.width, 0, 0, raster.width, raster.height)
+        val r = plan.region
+        return CameraController.AssistOverlay(bitmap.asImageBitmap(), (r.x / w).toFloat(), (r.y / h).toFloat(),
+            (r.width / w).toFloat(), (r.height / h).toFloat(), raster.zebraShare, raster.peakingShare)
     }
 }
 
