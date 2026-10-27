@@ -65,6 +65,12 @@ final class ScreenState {
     /// Цифровое увеличение live view — только на экране, камера о нём не знает.
     var zoom: ViewZoom = .identity
 
+    /// Помощь в кадре — инструменты монитора (зебра, false color, пикинг, маркеры); помнится между запусками.
+    private(set) var assist: MonitorAssist
+    /// Меню «Монитор» внизу — на месте строки значений, как меню Fn, — и выбранная в нём плитка.
+    private(set) var assistOpen = false
+    var assistSelected: MonitorTool = .zebra
+
     /// Список пресетов под кнопкой вверху слева.
     var presetMenuOpen = false
     /// Окно «Пресеты»: открыто ли и какой пресет в нём выбран.
@@ -128,6 +134,60 @@ final class ScreenState {
         }
     }
 
+    /// Кнопка «Монитор»: открыть меню инструментов или закрыть его.
+    func toggleAssistMenu() {
+        if assistOpen { closeOverlays() } else { openAssist(nil) }
+    }
+
+    func openAssist(_ tool: MonitorTool?) {
+        if let tool { assistSelected = tool }
+        fnOpen = false
+        allSettingsOpen = false
+        editing = nil
+        pillInfo = nil
+        presetMenuOpen = false
+        assistOpen = true
+    }
+
+    /// Значение инструмента; false — у него такого нет.
+    @discardableResult
+    func setAssist(_ tool: MonitorTool, _ value: String) -> Bool {
+        var next = assist
+        guard next.set(tool, value) else { return false }
+        saveAssist(next)
+        return true
+    }
+
+    /// Включить или выключить инструмент: включается тем значением, что было в прошлый раз.
+    func toggleAssist(_ tool: MonitorTool) {
+        var next = assist
+        next.toggle(tool)
+        saveAssist(next)
+    }
+
+    /// Плитка в меню «Монитор»: первое касание выбирает её, касание выбранной — включает или выключает.
+    func tapAssistTile(_ tool: MonitorTool) {
+        if assistSelected == tool { toggleAssist(tool) } else { assistSelected = tool }
+    }
+
+    /// Соседнее значение выбранного инструмента — стрелки и колесо в меню «Монитор».
+    func stepAssist(_ offset: Int) {
+        let options = assistSelected.options.map(\.value)
+        guard let i = options.firstIndex(of: assist.value(assistSelected)) else { return }
+        setAssist(assistSelected, options[min(max(i + offset, 0), options.count - 1)])
+    }
+
+    func turnOffAssist() {
+        var next = assist
+        next.turnOffAll()
+        saveAssist(next)
+    }
+
+    private func saveAssist(_ next: MonitorAssist) {
+        assist = next
+        if let data = try? JSONEncoder().encode(next) { defaults.set(data, forKey: "monitorAssist") }
+    }
+
     func placeHistogram(_ placement: FloatingPlacement) {
         histogramPlacement = placement
         if let data = try? JSONEncoder().encode(placement) { defaults.set(data, forKey: "histogramPlacement") }
@@ -158,7 +218,8 @@ final class ScreenState {
 
     /// Элементы на экране: не спрятаны, или открыто то, с чем они не прячутся, — меню, панель, подсказка.
     var controlsShown: Bool {
-        !controlsHidden || fnOpen || allSettingsOpen || pillInfo != nil || presetMenuOpen || presetNaming || presetSaving
+        !controlsHidden || fnOpen || assistOpen || allSettingsOpen || pillInfo != nil || presetMenuOpen || presetNaming
+            || presetSaving
     }
 
     func togglePillInfo(_ info: PillInfo) {
@@ -191,6 +252,7 @@ final class ScreenState {
         histogramOn = defaults.bool(forKey: "histogramOn")
         statusBarPinned = defaults.object(forKey: "statusBarPinned") as? Bool ?? true
         histogramPlacement = defaults.data(forKey: "histogramPlacement").flatMap { try? JSONDecoder().decode(FloatingPlacement.self, from: $0) }
+        assist = defaults.data(forKey: "monitorAssist").flatMap { try? JSONDecoder().decode(MonitorAssist.self, from: $0) } ?? MonitorAssist()
     }
 
     func toggleFn() {
@@ -200,6 +262,7 @@ final class ScreenState {
     func openFn(_ id: SettingID?) {
         if let id { selected = id }
         allSettingsOpen = false
+        assistOpen = false
         pillInfo = nil
         presetMenuOpen = false
         fnOpen = true
@@ -211,6 +274,7 @@ final class ScreenState {
             editing = nil
         }
         fnOpen = false
+        assistOpen = false
         pillInfo = nil
         presetMenuOpen = false
         allSettingsOpen = true
@@ -218,6 +282,7 @@ final class ScreenState {
 
     func closeOverlays() {
         fnOpen = false
+        assistOpen = false
         allSettingsOpen = false
         editing = nil
         pillInfo = nil

@@ -25,6 +25,10 @@ final class CameraController {
     private(set) var histogram: [Int] = []
     /// Доли теней, полутонов и светов, провалы, пересвет и средняя яркость по тому же кадру.
     private(set) var histogramStats: LumaStats?
+    /// Зебра, false color и пикинг по тому же кадру — растр поверх видимой его части; nil — не включены.
+    private(set) var assistOverlay: AssistOverlay?
+    /// Что считать для помощи в кадре: инструменты и видимая часть кадра. Читается из потока кадров.
+    @ObservationIgnored let assistInput = AssistInput()
     private(set) var fps: Double = 0
     /// fps для строки состояния: обновляется дважды в секунду, а не с каждым кадром.
     private(set) var shownFPS = 0
@@ -1981,12 +1985,15 @@ final class CameraController {
                 }
             }
         })
+        let assistInput = self.assistInput
         tasks.append(Task.detached(priority: .userInitiated) { [weak self] in
             for await sample in frames {
                 guard let image = Self.decode(sample.jpeg) else { continue }
                 let levels = Self.histogramLevels(of: image)
+                // помощь в кадре — по тому же кадру и вместе с ним: подсветка не отстаёт от картинки
+                let overlay = AssistOverlay.render(image, levels: levels, input: assistInput.current)
                 guard !Task.isCancelled else { break }
-                await self?.show(image, sample: sample, levels: levels)
+                await self?.show(image, sample: sample, levels: levels, overlay: overlay)
             }
         })
     }
@@ -1994,6 +2001,7 @@ final class CameraController {
     private func apply(_ snapshot: [UInt16: SonyProperty]) {
         properties = snapshot
         followPresetMode()
+        assistInput.setVideo(mode != .photo)
         let recording = snapshot[SonyProp.movieRecordingState]?.current.intValue == 1
         if recording != (recordingStartedAt != nil) { note(recording ? "запись: камера пишет" : "запись: камера не пишет") }
         if recording, recordingStartedAt == nil { recordingStartedAt = Date() }
@@ -2005,8 +2013,9 @@ final class CameraController {
         }
     }
 
-    private func show(_ image: CGImage, sample: LiveViewSample, levels: [Int]) {
+    private func show(_ image: CGImage, sample: LiveViewSample, levels: [Int], overlay: AssistOverlay?) {
         frame = image
+        assistOverlay = overlay
         if !hasFrame { hasFrame = true }
         lastJPEG = sample.jpeg
         let now = Date()
@@ -2177,6 +2186,7 @@ final class CameraController {
         frameGaps = []
         histogram = []
         histogramStats = nil
+        assistOverlay = nil
         fps = 0
         shownFPS = 0
         frameGapMs = 0
@@ -2252,6 +2262,11 @@ final class CameraController {
     var qualityForecast: (highFPS: Double?, upInSeconds: TimeInterval?) {
         let now = Date()
         return (qualityPolicy.predictedHighFPS(now: now, window: 5), qualityPolicy.secondsUntilUpAttempt(now: now))
+    }
+
+    /// Инструменты выключили — растр по старому кадру не показываем, даже если новых кадров нет.
+    func clearAssistOverlay() {
+        assistOverlay = nil
     }
 
     /// Последний кадр с камеры, байт.

@@ -11,6 +11,10 @@ struct ZoomableVideo: View {
     let frame: CGImage
     let size: CGSize
     let dimmed: Bool
+    /// Зебра, false color и пикинг — растр поверх видимой части кадра, едет вместе с ним.
+    var overlay: AssistOverlay?
+    /// Куда сообщать, какая часть кадра видна: растр помощи считается по ней.
+    var assistInput: AssistInput?
     @State private var pinchBase: ViewZoom?
     @State private var panBase: ViewZoom?
     /// С какой точки начался жест: прерванный жест не доходит до onEnded, и новый узнаётся по другой точке.
@@ -39,10 +43,22 @@ struct ZoomableVideo: View {
                     .frame(width: area.width, height: area.height)
                     .position(x: area.midX, y: area.midY)
             }
+            if let overlay {
+                let area = CGRect(x: rect.minX + overlay.region.minX * rect.width, y: rect.minY + overlay.region.minY * rect.height,
+                                  width: overlay.region.width * rect.width, height: overlay.region.height * rect.height)
+                Image(decorative: overlay.image, scale: 1)
+                    .resizable()
+                    .interpolation(.medium)
+                    .frame(width: area.width, height: area.height)
+                    .position(x: area.midX, y: area.midY)
+            }
         }
         .opacity(dimmed ? 0.55 : 1)
         .frame(width: size.width, height: size.height)
         .onChange(of: ObjectIdentifier(frame)) { _, _ in refreshPatch() }
+        .onChange(of: screen.zoom, initial: true) { _, _ in reportView() }
+        .onChange(of: size) { _, _ in reportView() }
+        .onChange(of: frameSize) { _, _ in reportView() }
         .onChange(of: size) { _, _ in refreshPatch() }
         .onChange(of: screen.zoom) { _, _ in
             // во время жеста заплатка едет с картинкой, пересчёт — с новым кадром или по окончании жеста;
@@ -94,6 +110,11 @@ struct ZoomableVideo: View {
                         refreshPatch()
                     }
             )
+    }
+
+    /// Видимая часть кадра — для растра помощи в кадре.
+    private func reportView() {
+        assistInput?.setView(visible: screen.zoom.visibleRegion(view: size, frame: frameSize), factor: screen.zoom.factor)
     }
 
     private func refreshPatch() {

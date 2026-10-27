@@ -122,3 +122,18 @@ import Testing
     #expect(try decode(#"{"action":"moveInStrip","id":"3f2a","onto":"9c1b"}"#) == .moveInStrip("3f2a", onto: "9c1b"))
     #expect(throws: (any Error).self) { try decode(#"{"action":"selectCamera"}"#) }
 }
+
+@Test func decodesMonitorAssistActions() throws {
+    func decode(_ json: String) throws -> AutomationAction {
+        try JSONDecoder().decode(AutomationAction.self, from: Data(json.utf8))
+    }
+    #expect(try decode(#"{"action":"openAssist"}"#) == .openAssist(nil))
+    #expect(try decode(#"{"action":"openAssist","name":"peaking"}"#) == .openAssist("peaking"))
+    #expect(try decode(#"{"action":"closeAssist"}"#) == .closeAssist)
+    #expect(try decode(#"{"action":"setAssist","name":"zebra","value":"95"}"#) == .setAssist("zebra", "95"))
+    // число вместо строки — то же
+    #expect(try decode(#"{"action":"setAssist","name":"zebra","value":95}"#) == .setAssist("zebra", "95"))
+    #expect(try decode(#"{"action":"toggleAssist","name":"falseColor"}"#) == .toggleAssist("falseColor"))
+    #expect(try decode(#"{"action":"assistOff"}"#) == .assistOff)
+    #expect(throws: (any Error).self) { try decode(#"{"action":"setAssist","name":"zebra"}"#) }
+}

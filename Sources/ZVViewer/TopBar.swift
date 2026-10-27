@@ -1,7 +1,7 @@
 import SwiftUI
 import ZVCore
 
-/// Слева сверху: кнопки гистограммы и строки состояния, пресеты (кнопка со списком), «☆+» — сохранить настройки
+/// Слева сверху: кнопки гистограммы, монитора и строки состояния, пресеты (кнопка со списком), «☆+» — сохранить настройки
 /// (текущий пресет изменён — в него или новым), и настройки; справа от них — сообщение программы.
 struct TopBar: View {
     let controller: CameraController
@@ -28,6 +28,17 @@ struct TopBar: View {
                 .buttonStyle(.plain)
                 .help("Гистограмма")
                 .accessibilityLabel("Гистограмма")
+
+                // зебра, false color, пикинг и маркеры — меню внизу, на месте строки значений
+                Button(action: screen.toggleAssistMenu) {
+                    TopBarIconView(icon: .monitor)
+                        .frame(width: 30, height: 26)
+                        .background(screen.assistOpen ? Color.accentColor : Color.white.opacity(0.08),
+                                    in: RoundedRectangle(cornerRadius: 7))
+                }
+                .buttonStyle(.plain)
+                .help("Монитор: зебра, false color, пикинг, сетка и рамки (M)")
+                .accessibilityLabel("Монитор")
 
                 // строка состояния видна вместе с элементами; кнопка закрепляет её — тогда остаётся и без них
                 Button(action: screen.toggleStatusPin) {

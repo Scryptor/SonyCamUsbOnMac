@@ -116,9 +116,18 @@ final class AutomationServer {
             switch key.lowercased() {
             case "f": screen.toggleFn()
             case "escape": screen.closeOverlays()
+            case "m": screen.toggleAssistMenu()
+            case "z": screen.toggleAssist(.zebra)
+            case "p": screen.toggleAssist(.peaking)
+            case "c": screen.toggleAssist(.falseColor)
             case "left", "right":
+                let offset = key.lowercased() == "left" ? -1 : 1
+                if screen.assistOpen {
+                    screen.stepAssist(offset)
+                    return nil
+                }
                 guard screen.fnOpen else { return "Fn menu is closed" }
-                controller.requestStep(screen.selected, offset: key.lowercased() == "left" ? -1 : 1)
+                controller.requestStep(screen.selected, offset: offset)
             default:
                 guard let digit = Int(key), (1...9).contains(digit) else { return "unknown key \(key)" }
                 guard controller.presets.indices.contains(digit - 1) else { return "no preset \(digit)" }
@@ -322,9 +331,30 @@ final class AutomationServer {
                 return "both cameras must be on the strip: \(id), \(target)"
             }
             controller.moveInStrip(id, onto: target)
+        case let .openAssist(name):
+            if let name {
+                guard let tool = MonitorTool(rawValue: name) else { return Self.assistTools }
+                screen.openAssist(tool)
+            } else {
+                screen.openAssist(nil)
+            }
+        case .closeAssist:
+            if screen.assistOpen { screen.closeOverlays() }
+        case let .setAssist(name, value):
+            guard let tool = MonitorTool(rawValue: name) else { return Self.assistTools }
+            guard screen.setAssist(tool, value) else {
+                return "\(name): " + tool.options.map(\.value).joined(separator: " | ")
+            }
+        case let .toggleAssist(name):
+            guard let tool = MonitorTool(rawValue: name) else { return Self.assistTools }
+            screen.toggleAssist(tool)
+        case .assistOff:
+            screen.turnOffAssist()
         }
         return nil
     }
+
+    private static let assistTools = "tool: " + MonitorTool.allCases.map(\.rawValue).joined(separator: " | ")
 
     /// Те же настройки, что в окне ⌘, — по строковому ключу.
     private func setPreference(_ key: String, _ value: String) -> String? {
@@ -443,6 +473,11 @@ final class AutomationServer {
         ui["presetNaming"] = screen.presetNaming
         ui["presetSaving"] = screen.presetSaving
         ui["presetPeeking"] = screen.presetPeeking
+        ui["assist"] = [
+            "open": screen.assistOpen,
+            "selected": screen.assistSelected.rawValue,
+            "values": Dictionary(uniqueKeysWithValues: MonitorTool.allCases.map { ($0.rawValue, screen.assist.value($0)) }),
+        ] as [String: Any]
         ui["presetsWindow"] = screen.presetsWindowOpen ? ["selected": screen.presetsSelected ?? NSNull()] as [String: Any] : NSNull()
         var result: [String: Any] = [
             "phase": controller.phase.rawValue,
@@ -454,6 +489,12 @@ final class AutomationServer {
             "shootingMode": controller.shootingMode.rawValue,
             "slowMotion": controller.slowMotion.map { ["captureFps": $0.capture ?? NSNull(), "recordFps": $0.record ?? NSNull()] as [String: Any] } ?? NSNull(),
             "histogramBins": controller.histogram.count,
+            "assistOverlay": controller.assistOverlay.map { overlay -> [String: Any] in
+                ["width": overlay.image.width, "height": overlay.image.height,
+                 "region": ["x": overlay.region.minX, "y": overlay.region.minY, "width": overlay.region.width,
+                            "height": overlay.region.height],
+                 "zebra": overlay.zebraShare, "peaking": overlay.peakingShare]
+            } ?? NSNull(),
             "cableAccessHint": controller.cableAccessHint,
             "histogramStats": controller.histogramStats.map { stats -> [String: Any] in
                 ["shadows": stats.shadows, "midtones": stats.midtones, "highlights": stats.highlights,

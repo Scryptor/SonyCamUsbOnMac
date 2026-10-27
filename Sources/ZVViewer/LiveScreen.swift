@@ -43,11 +43,17 @@ struct LiveScreen: View {
         }
         .onAppear { zoomScroll.start(screen: screen, controller: controller) }
         .onChange(of: screen.zoom.factor, initial: true) { _, factor in controller.viewZoomFactor = factor }
+        // инструменты монитора — потоку кадров; выключили растровые — старый растр убираем сразу
+        .onChange(of: screen.assist, initial: true) { _, assist in
+            controller.assistInput.setAssist(assist)
+            if !assist.needsRaster { controller.clearAssistOverlay() }
+        }
         .task {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(500))
                 screen.tickAutoHide(enabled: Prefs.autoHide, delay: TimeInterval(Prefs.autoHideSeconds),
-                                    busy: screen.fnOpen || screen.allSettingsOpen || screen.pillInfo != nil || controller.review != nil
+                                    busy: screen.fnOpen || screen.assistOpen || screen.allSettingsOpen || screen.pillInfo != nil
+                                        || controller.review != nil
                                         || screen.galleryShot != nil || screen.presetMenuOpen || screen.presetNaming
                                         || screen.presetSaving
                                         // кнопка записи ждёт камеру или показывает отказ — не прятать её из-под взгляда
@@ -64,6 +70,19 @@ struct LiveScreen: View {
             guard screen.galleryShot == nil else { return .ignored }
             screen.toggleFn()
             screen.noteActivity()
+            return .handled
+        }
+        // инструменты монитора: M — меню, Z — зебра, P — пикинг, C — false color
+        .onKeyPress(characters: CharacterSet(charactersIn: "mMьЬ")) { _ in
+            guard screen.galleryShot == nil else { return .ignored }
+            screen.toggleAssistMenu()
+            screen.noteActivity()
+            return .handled
+        }
+        .onKeyPress(characters: CharacterSet(charactersIn: "zZяЯpPзЗcCсС")) { press in
+            guard screen.galleryShot == nil else { return .ignored }
+            let key = press.characters.lowercased()
+            screen.toggleAssist("zя".contains(key) ? .zebra : "pз".contains(key) ? .peaking : .falseColor)
             return .handled
         }
         .onKeyPress(characters: CharacterSet(charactersIn: "hHрР")) { _ in
@@ -109,7 +128,7 @@ struct LiveScreen: View {
                 controller.dismissReview()
                 return .handled
             }
-            guard screen.fnOpen || screen.allSettingsOpen else { return .ignored }
+            guard screen.fnOpen || screen.assistOpen || screen.allSettingsOpen else { return .ignored }
             screen.closeOverlays()
             return .handled
         }
@@ -208,13 +227,23 @@ struct LiveScreen: View {
 
     @ViewBuilder private func video(size: CGSize) -> some View {
         if let frame = controller.frame {
-            ZoomableVideo(screen: screen, frame: frame, size: size, dimmed: controller.linkIndicator.dimsPicture)
+            let frameSize = CGSize(width: frame.width, height: frame.height)
+            ZoomableVideo(screen: screen, frame: frame, size: size, dimmed: controller.linkIndicator.dimsPicture,
+                          overlay: screen.assist.needsRaster ? controller.assistOverlay : nil, assistInput: controller.assistInput)
                 .onAppear { zoomScroll.viewSize = size }
                 .onChange(of: size) { _, size in zoomScroll.viewSize = size }
+            if screen.assist.hasMarkers {
+                AssistMarkers(assist: screen.assist, frame: frameSize, rect: screen.zoom.imageRect(view: size, frame: frameSize))
+            }
             // рамка записи — по краю видимой картинки, при увеличении — по краю экрана
             TallyBorder(recording: controller.isRecording,
-                        rect: screen.zoom.imageRect(view: size, frame: CGSize(width: frame.width, height: frame.height))
+                        rect: screen.zoom.imageRect(view: size, frame: frameSize)
                             .intersection(CGRect(origin: .zero, size: size)))
+            if screen.assist.falseColor {
+                FalseColorLegend()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .padding(.top, showControls ? 64 : 16)
+            }
             LinkOverlay(controller: controller)
         } else {
             ProgressView().controlSize(.large)
@@ -246,20 +275,22 @@ struct LiveScreen: View {
                         .padding(.top, 8)
                 }
                 Spacer()
-                if !screen.fnOpen, !controller.shots.isEmpty {
+                if !screen.fnOpen, !screen.assistOpen, !controller.shots.isEmpty {
                     ShotsStrip(controller: controller, screen: screen)
                 }
                 HStack {
                     Spacer()
                     if screen.fnOpen {
                         FnMenu(controller: controller, screen: screen)
+                    } else if screen.assistOpen {
+                        AssistMenu(screen: screen)
                     } else if !screen.allSettingsOpen {
                         InfoLine(controller: controller) { screen.openFn($0) }
                     }
                     Spacer()
                 }
-                // справа по центру — кнопки: меню Fn не должно под них заходить
-                .padding(.trailing, screen.fnOpen ? 96 : 0)
+                // справа по центру — кнопки: меню Fn и «Монитор» не должны под них заходить
+                .padding(.trailing, screen.fnOpen || screen.assistOpen ? 96 : 0)
             }
             .padding(16)
             HStack {
@@ -280,6 +311,10 @@ struct LiveScreen: View {
     }
 
     private func step(_ offset: Int) -> KeyPress.Result {
+        if screen.assistOpen {
+            screen.stepAssist(offset)
+            return .handled
+        }
         guard screen.fnOpen else { return .ignored }
         controller.requestStep(screen.selected, offset: offset)
         return .handled

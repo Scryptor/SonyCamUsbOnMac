@@ -1,10 +1,10 @@
 import SwiftUI
 
 /// Значки верхней панели — нарисованы сами, одинаково с планшетом: значок повторяет то, что включает. Гистограмма —
-/// столбики с пунктиром на третях, строка состояния — точка, Wi-Fi и батарея, сохранить пресет — звезда с плюсом,
-/// настройки — шестерёнка. Геометрия — в квадрате 52×52, как кнопка планшета, и масштабируется под кнопку.
+/// столбики с пунктиром на третях, монитор — кадр с полосами зебры, строка состояния — точка, Wi-Fi и батарея,
+/// сохранить пресет — звезда с плюсом, настройки — шестерёнка. Геометрия — в квадрате 52×52, как кнопка планшета, и масштабируется под кнопку.
 enum TopBarIcon {
-    case histogram, statusBar, savePreset, settings
+    case histogram, monitor, statusBar, savePreset, settings
 }
 
 struct TopBarIconView: View {
@@ -39,6 +39,18 @@ struct TopBarIconView: View {
                 thirds.addLine(to: CGPoint(x: x, y: 35))
             }
             context.stroke(thirds, with: .color(.white.opacity(0.55)), style: StrokeStyle(lineWidth: 1, dash: [2, 2]))
+        case .monitor:
+            let frame = CGRect(x: 15, y: 18, width: 22, height: 16)
+            context.stroke(Path(roundedRect: frame, cornerRadius: 2.5), with: white, style: round(1.8))
+            // полосы зебры наискось в правой половине кадра
+            var stripes = Path()
+            for x in [24.0, 29, 34] as [CGFloat] {
+                stripes.move(to: CGPoint(x: x - 4, y: 34))
+                stripes.addLine(to: CGPoint(x: x + 4, y: 18))
+            }
+            var clipped = context
+            clipped.clip(to: Path(frame.insetBy(dx: 1.5, dy: 1.5)))
+            clipped.stroke(stripes, with: white, style: StrokeStyle(lineWidth: 2))
         case .statusBar:
             context.fill(Path(ellipseIn: CGRect(x: 13.3, y: 24.8, width: 4.4, height: 4.4)), with: white)
             var wifi = Path()

@@ -79,6 +79,13 @@ public enum AutomationAction: Equatable, Sendable, Decodable {
     case linkCamera(String, Bool)
     /// Плитку ленты `id` перетащили на плитку `onto`: она встаёт на её место.
     case moveInStrip(String, onto: String)
+    /// Монитор: меню инструментов (на инструменте), закрыть его; значение инструмента, включить или выключить его,
+    /// выключить всё.
+    case openAssist(String?)
+    case closeAssist
+    case setAssist(String, String)
+    case toggleAssist(String)
+    case assistOff
 
     private enum Keys: String, CodingKey {
         case action, key, setting, offset, value, group, name, index, confirm, mode, x, y, factor, included, from, to, id, linked, onto
@@ -153,6 +160,14 @@ public enum AutomationAction: Equatable, Sendable, Decodable {
         case "removeFromStrip": self = .removeFromStrip(try c.decode(String.self, forKey: .id))
         case "linkCamera": self = .linkCamera(try c.decode(String.self, forKey: .id), try c.decodeIfPresent(Bool.self, forKey: .included) ?? (try c.decode(Bool.self, forKey: .linked)))
         case "moveInStrip": self = .moveInStrip(try c.decode(String.self, forKey: .id), onto: try c.decode(String.self, forKey: .onto))
+        case "openAssist": self = .openAssist(try c.decodeIfPresent(String.self, forKey: .name))
+        case "closeAssist": self = .closeAssist
+        case "setAssist":
+            // значение — строкой («95», «9:16», «on»), но и числом: {"value": 95}
+            let value = try (try? c.decode(String.self, forKey: .value)) ?? String(c.decode(Int.self, forKey: .value))
+            self = .setAssist(try c.decode(String.self, forKey: .name), value)
+        case "toggleAssist": self = .toggleAssist(try c.decode(String.self, forKey: .name))
+        case "assistOff": self = .assistOff
         default:
             throw DecodingError.dataCorruptedError(forKey: .action, in: c, debugDescription: "неизвестная команда \(action)")
         }
