@@ -126,8 +126,7 @@ private struct GrabButton: View {
 
     var body: some View {
         Button(action: controller.grabFrame) {
-            Image(systemName: "camera.viewfinder")
-                .font(.system(size: 18))
+            FilmFrameIcon()
                 .frame(width: 42, height: 42)
                 .background(.ultraThinMaterial, in: Circle())
         }
@@ -135,6 +134,30 @@ private struct GrabButton: View {
         .captureFeedback(controller, .grab, color: .white)
         .disabled(controller.frame == nil)
         .help("Стоп-кадр из видео (S) — запись не прерывается")
+    }
+}
+
+/// Кадр киноплёнки — «кадр из видео»: рамка и перфорация сверху и снизу; рамка видоискателя читалась как «навести
+/// фокус». Числа — в единицах 28 × 26, как у макета значка (и на Android).
+private struct FilmFrameIcon: View {
+    var body: some View {
+        Canvas { context, size in
+            let sx = size.width / 28, sy = size.height / 26
+            context.stroke(Path(roundedRect: CGRect(x: 1.5 * sx, y: 1.5 * sy, width: 25 * sx, height: 23 * sy),
+                                cornerRadius: 3 * sx), with: .foreground, lineWidth: 2.3 * sx)
+            for y in [6.5, 19.5] {
+                var line = Path()
+                line.move(to: CGPoint(x: 1.5 * sx, y: y * sy))
+                line.addLine(to: CGPoint(x: 26.5 * sx, y: y * sy))
+                context.stroke(line, with: .foreground, lineWidth: 2 * sx)
+            }
+            for x in [5.0, 10, 15, 20] {
+                for y in [3.0, 21] {
+                    context.fill(Path(CGRect(x: x * sx, y: y * sy, width: 2.4 * sx, height: 2 * sy)), with: .foreground)
+                }
+            }
+        }
+        .frame(width: 22, height: 20.5)
     }
 }
 

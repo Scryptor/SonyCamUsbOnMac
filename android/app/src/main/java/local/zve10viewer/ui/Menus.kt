@@ -439,18 +439,19 @@ private fun GrabButton(controller: CameraController, feedback: FeedbackState) {
     CaptureButton(58.dp, FeedbackTarget.grab, feedback, enabled = controller.frame != null, waveColor = Color.White, caption = null,
         onClick = { controller.grabFrame() }) {
         Box(Modifier.fillMaxSize().background(Panel, CircleShape))
-        // рамка видоискателя с объективом — «снимок кадра»
-        Canvas(Modifier.size(26.dp)) {
-            val c = size.width * 0.28f
-            val stroke = Stroke(width = 2.5.dp.toPx())
-            val w = size.width
-            listOf(
-                Offset(0f, c) to Offset(0f, 0f), Offset(0f, 0f) to Offset(c, 0f),
-                Offset(w - c, 0f) to Offset(w, 0f), Offset(w, 0f) to Offset(w, c),
-                Offset(0f, w - c) to Offset(0f, w), Offset(0f, w) to Offset(c, w),
-                Offset(w - c, w) to Offset(w, w), Offset(w, w) to Offset(w, w - c),
-            ).forEach { (a, b) -> drawLine(Color.White, a, b, strokeWidth = stroke.width) }
-            drawCircle(Color.White, radius = w * 0.18f, style = stroke)
+        // кадр киноплёнки — «кадр из видео»: рамка и перфорация сверху и снизу; рамка видоискателя читалась как «навести
+        // фокус». Числа — в единицах 28 × 26, как у макета значка
+        Canvas(Modifier.size(width = 28.dp, height = 26.dp)) {
+            val sx = size.width / 28f
+            val sy = size.height / 26f
+            drawRoundRect(Color.White, topLeft = Offset(1.5f * sx, 1.5f * sy), size = Size(25f * sx, 23f * sy),
+                cornerRadius = CornerRadius(3f * sx), style = Stroke(2.3f * sx))
+            for (y in listOf(6.5f, 19.5f)) {
+                drawLine(Color.White, Offset(1.5f * sx, y * sy), Offset(26.5f * sx, y * sy), strokeWidth = 2f * sx)
+            }
+            for (x in listOf(5f, 10f, 15f, 20f)) {
+                for (y in listOf(3f, 21f)) drawRect(Color.White, topLeft = Offset(x * sx, y * sy), size = Size(2.4f * sx, 2f * sy))
+            }
         }
     }
 }
