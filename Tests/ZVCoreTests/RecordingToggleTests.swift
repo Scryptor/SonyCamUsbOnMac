@@ -161,6 +161,15 @@ private func at(_ seconds: TimeInterval) -> Date { t0.addingTimeInterval(seconds
     #expect(after == nil)
 }
 
+@Test func recordingRefusalsShowAtTheButton() {
+    // отказ — ответ на нажатие: рядом с кнопкой; конец записи на камере бывает когда угодно — в строке состояния
+    #expect(RecordingToggle.showsAtButton(.failed(.starting)))
+    #expect(RecordingToggle.showsAtButton(.failed(.stopping)))
+    #expect(RecordingToggle.showsAtButton(.aborted))
+    #expect(!RecordingToggle.showsAtButton(.stoppedByCamera))
+    #expect(!RecordingToggle.showsAtButton(.started))
+}
+
 @Test func recordingMessages() {
     #expect(RecordingToggle.message(.started, refusal: nil) == nil)
     #expect(RecordingToggle.message(.stopped, refusal: nil) == nil)

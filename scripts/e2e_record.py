@@ -3,8 +3,8 @@
 
 Для каждого сценария scripts/fake_camera.py --record … запускает камеру и программу для Mac (API автоматизации, адрес
 камеры подменён на 127.0.0.1), нажимает запись и каждые 40 мс снимает с /state: ждёт ли кнопка камеру
-(recordingRequest), идёт ли запись, строку состояния, отклик кнопки и записи журнала о записи. Рядом — журнал камеры
-по тем же часам.
+(recordingRequest), идёт ли запись, подпись у кнопки, строку состояния, отклик кнопки и записи журнала о записи.
+Рядом — журнал камеры по тем же часам.
 
   scripts/e2e_record.py [--app "build/Sony Cam Viewer.app"] [--out /tmp/rec] [--only blip-fast,press-busy] [--twice 1.0]
 
@@ -38,8 +38,8 @@ def state():
 
 def seen(s):
     """То, что видит человек у кнопки записи."""
-    return {"ждёт": s.get("recordingRequest"), "запись": s.get("recording"), "строка": s.get("status"),
-            "отклик": s.get("feedback")}
+    return {"ждёт": s.get("recordingRequest"), "запись": s.get("recording"), "у кнопки": s.get("recordingNotice"),
+            "строка": s.get("status"), "отклик": s.get("feedback")}
 
 
 def fresh(before, now):

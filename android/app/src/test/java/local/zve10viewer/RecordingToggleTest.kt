@@ -144,6 +144,15 @@ class RecordingToggleTest {
         assertNull(toggle.observe(recording = false, now = 2_600))
     }
 
+    @Test fun refusalsShowAtTheButton() {
+        // отказ — ответ на нажатие: рядом с кнопкой; конец записи на камере бывает когда угодно — в строке состояния
+        assertTrue(RecordingToggle.showsAtButton(Outcome.Failed(Request.starting)))
+        assertTrue(RecordingToggle.showsAtButton(Outcome.Failed(Request.stopping)))
+        assertTrue(RecordingToggle.showsAtButton(Outcome.Aborted))
+        assertFalse(RecordingToggle.showsAtButton(Outcome.StoppedByCamera))
+        assertFalse(RecordingToggle.showsAtButton(Outcome.Started))
+    }
+
     @Test fun messages() {
         assertNull(RecordingToggle.message(Outcome.Started, refusal = null))
         assertNull(RecordingToggle.message(Outcome.Stopped, refusal = null))

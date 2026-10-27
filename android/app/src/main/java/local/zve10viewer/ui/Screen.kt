@@ -368,7 +368,9 @@ private fun LiveScreen(controller: CameraController, screen: ScreenState) {
     LaunchedEffect(Unit) {
         while (true) {
             delay(500)
-            val busy = screen.overlayOpen || controller.review != null || screen.galleryShot != null
+            // и пока кнопка записи ждёт камеру или показывает отказ — не прятать её из-под взгляда
+            val busy = screen.overlayOpen || controller.review != null || screen.galleryShot != null ||
+                controller.recordingRequest != null || controller.recordingNotice != null
             if (busy || !controller.prefs.autoHide) {
                 screen.autoHidden = false
             } else if (!screen.autoHidden && System.currentTimeMillis() - screen.lastActivity > controller.prefs.autoHideSeconds * 1000L) {

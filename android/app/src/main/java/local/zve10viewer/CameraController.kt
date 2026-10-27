@@ -273,6 +273,9 @@ class CameraController(private val context: Context, private val scope: Coroutin
     /** Короткое сообщение: пресет применён, снимок сохранён и т.п. */
     var statusMessage by mutableStateOf<String?>(null)
         private set
+    /** Отказ записи — подпись слева от кнопки записи, на месте «Запуск записи…»: на кнопку в этот миг и смотрят. */
+    var recordingNotice by mutableStateOf<String?>(null)
+        private set
     /** Когда началась запись (для таймера «● REC»). */
     var recordingStartedAt by mutableStateOf<Long?>(null)
         private set
@@ -402,6 +405,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
     /** Ведёт камеру к выбранному режиму записи; от его цели считаются быстрые шаги колесом. */
     private val recordingDriver = RecordingModeDriver()
     private var statusJob: Job? = null
+    private var recordingNoticeJob: Job? = null
     private val frameTimes = ArrayDeque<Long>()
     private var lastFrameAt = 0L
     /** Паузы между кадрами за последние 10 с: (когда пришёл кадр, пауза перед ним). */
@@ -695,13 +699,15 @@ class CameraController(private val context: Context, private val scope: Coroutin
         // первым, когда связь вернётся, — запуск и сразу остановка, лишний ролик на карте
         if (recordingCall?.isActive == true) {
             feedback(FeedbackEvent.Failed(FeedbackTarget.record))
-            showStatus("Камера ещё не ответила на прошлое нажатие")
+            showRecordingNotice("Камера ещё не ответила на прошлое нажатие")
             return
         }
         val toggle = recordingToggle
         if (!toggle.press(isRecording, System.currentTimeMillis())) return
         recordingRequest = toggle.request
         recordingRefusal = null
+        recordingNoticeJob?.cancel()
+        recordingNotice = null
         feedback(FeedbackEvent.Accepted(FeedbackTarget.record))
         // связанные — к тому же состоянию, что будет на главной, и сразу, а не после неё
         val target = !isRecording
@@ -751,8 +757,18 @@ class CameraController(private val context: Context, private val scope: Coroutin
             RecordingToggle.Outcome.StoppedByCamera -> Unit
         }
         RecordingToggle.message(outcome, recordingRefusal)?.let { message ->
-            showStatus(message)
+            if (RecordingToggle.showsAtButton(outcome)) showRecordingNotice(message) else showStatus(message)
             journal("запись: $message")
+        }
+    }
+
+    /** Подпись у кнопки записи — 5 с, как сообщение в строке состояния. */
+    private fun showRecordingNotice(text: String) {
+        recordingNotice = text
+        recordingNoticeJob?.cancel()
+        recordingNoticeJob = scope.launch {
+            delay(5000)
+            recordingNotice = null
         }
     }
 

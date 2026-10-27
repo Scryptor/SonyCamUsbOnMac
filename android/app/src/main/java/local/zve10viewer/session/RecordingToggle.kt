@@ -96,8 +96,14 @@ class RecordingToggle {
         const val ABORT_WINDOW_MS = 3000L
 
         /**
-         * Что сказать в строке состояния; null — исход виден и так (кнопка, рамка записи). refusal — код, которым камера
-         * отклонила нажатие.
+         * Сообщение — рядом с кнопкой записи, на месте «Запуск записи…»: отказ — ответ на нажатие, и смотрят в этот миг
+         * на кнопку. Конец записи на камере бывает когда угодно — его место в строке состояния.
+         */
+        fun showsAtButton(outcome: Outcome): Boolean = outcome is Outcome.Failed || outcome == Outcome.Aborted
+
+        /**
+         * Что сказать (у кнопки или в строке состояния — showsAtButton); null — исход виден и так (кнопка, рамка
+         * записи). refusal — код, которым камера отклонила нажатие.
          */
         fun message(outcome: Outcome, refusal: Int?): String? = when (outcome) {
             Outcome.Started, Outcome.Stopped -> null

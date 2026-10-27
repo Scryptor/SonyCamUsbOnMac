@@ -465,10 +465,11 @@ private fun RecordButton(controller: CameraController, feedback: FeedbackState) 
     val request = controller.recordingRequest
     val morph by animateFloatAsState(if (controller.isRecording) 1f else 0f, tween(250), label = "record")
     CaptureButton(72.dp, FeedbackTarget.record, feedback, enabled = ready && request == null, waveColor = Color.Red,
+        // пока камера не ответила — что ждём; отказала — почему, там же, где смотрели
         caption = when (request) {
             RecordingToggle.Request.starting -> "Запуск записи…"
             RecordingToggle.Request.stopping -> "Остановка…"
-            null -> null
+            null -> controller.recordingNotice
         },
         onClick = { controller.toggleRecording() }, modifier = Modifier.alpha(if (ready) 1f else 0.4f)) {
         if (request != null) {

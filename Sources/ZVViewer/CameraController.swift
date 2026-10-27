@@ -52,6 +52,8 @@ final class CameraController {
     private(set) var previewReturning = false
     /// Короткое сообщение: пресет применён, снимок сохранён и т.п.
     private(set) var statusMessage: String?
+    /// Отказ записи — подпись слева от кнопки записи, на месте «Запуск записи…»: на кнопку в этот миг и смотрят.
+    private(set) var recordingNotice: String?
     /// Когда началась запись (для таймера «● REC»).
     private(set) var recordingStartedAt: Date?
     private(set) var isCapturing = false
@@ -129,6 +131,7 @@ final class CameraController {
     /// Связь по Wi-Fi — для подсказки с адресами.
     @ObservationIgnored private var wifiTransport: PTPIPTransport?
     @ObservationIgnored private var statusTask: Task<Void, Never>?
+    @ObservationIgnored private var recordingNoticeTask: Task<Void, Never>?
     @ObservationIgnored private let presetsKey = "presets"
     @ObservationIgnored private let presetModeKey = "presetMode"
     @ObservationIgnored private var previewApply: Task<Void, Never>?
@@ -489,12 +492,13 @@ final class CameraController {
         // прошлое нажатие ещё не дошло (провал связи): второе дошло бы следом и остановило бы запись
         guard !recordCallInFlight else {
             emit(.failed(.record))
-            showStatus("Камера ещё не ответила на прошлое нажатие")
+            showRecordingNotice("Камера ещё не ответила на прошлое нажатие")
             return
         }
         guard recordingToggle.press(recording: isRecording, at: Date()) else { return }
         recordCallInFlight = true
         recordingRefusal = nil
+        clearRecordingNotice()
         emit(.accepted(.record))
         // связанные — к тому же состоянию, что будет на главной, и сразу, а не после неё
         let target = !isRecording
@@ -540,9 +544,24 @@ final class CameraController {
         case .stoppedByCamera: break
         }
         if let message = RecordingToggle.message(outcome, refusal: recordingRefusal) {
-            showStatus(message)
+            if RecordingToggle.showsAtButton(outcome) { showRecordingNotice(message) } else { showStatus(message) }
             note("запись: \(message)")
         }
+    }
+
+    /// Подпись у кнопки записи — 5 с, как сообщение в строке состояния.
+    private func showRecordingNotice(_ text: String) {
+        recordingNotice = text
+        recordingNoticeTask?.cancel()
+        recordingNoticeTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(5))
+            if !Task.isCancelled { self?.recordingNotice = nil }
+        }
+    }
+
+    private func clearRecordingNotice() {
+        recordingNoticeTask?.cancel()
+        recordingNotice = nil
     }
 
     private func emit(_ kind: FeedbackEvent.Kind) {

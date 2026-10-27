@@ -67,8 +67,8 @@ public struct RecordingToggle: Equatable, Sendable {
         return finish(.failed(request))
     }
 
-    /// Что сказать в строке состояния; nil — исход виден и так (кнопка, рамка записи). refusal — код, которым камера
-    /// отклонила нажатие.
+    /// Что сказать (у кнопки или в строке состояния — showsAtButton); nil — исход виден и так (кнопка, рамка записи).
+    /// refusal — код, которым камера отклонила нажатие.
     public static func message(_ outcome: Outcome, refusal: UInt16?) -> String? {
         switch outcome {
         case .started, .stopped: return nil
@@ -82,6 +82,15 @@ public struct RecordingToggle: Equatable, Sendable {
     }
 
     /// Подтверждает запрос; тогда и запоминает состояние — чтобы конец нашей же остановки не сочли концом «на камере».
+    /// Сообщение — рядом с кнопкой записи, на месте «Запуск записи…»: отказ — ответ на нажатие, и смотрят в этот миг
+    /// на кнопку. Конец записи на камере бывает когда угодно — его место в строке состояния.
+    public static func showsAtButton(_ outcome: Outcome) -> Bool {
+        switch outcome {
+        case .failed, .aborted: return true
+        case .started, .stopped, .stoppedByCamera: return false
+        }
+    }
+
     private mutating func confirm(recording: Bool, at now: Date) -> Outcome? {
         switch (request, recording) {
         case (.starting, true):

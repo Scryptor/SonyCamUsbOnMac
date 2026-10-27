@@ -162,7 +162,8 @@ struct RecordButton: View {
         }
         .buttonStyle(CaptureButtonStyle())
         .captureFeedback(controller, .record, color: .red)
-        .pendingCaption(request.map { $0 == .starting ? "Запуск записи…" : "Остановка…" })
+        // пока камера не ответила — что ждём; отказала — почему, там же, где смотрели
+        .pendingCaption(request.map { $0 == .starting ? "Запуск записи…" : "Остановка…" } ?? controller.recordingNotice)
         .disabled(controller.phase != .ready)
         .opacity(controller.phase == .ready ? 1 : 0.4)
         .help(recording ? "Остановить запись" : "Начать запись")

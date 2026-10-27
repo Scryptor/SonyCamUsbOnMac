@@ -49,7 +49,9 @@ struct LiveScreen: View {
                 screen.tickAutoHide(enabled: Prefs.autoHide, delay: TimeInterval(Prefs.autoHideSeconds),
                                     busy: screen.fnOpen || screen.allSettingsOpen || screen.pillInfo != nil || controller.review != nil
                                         || screen.galleryShot != nil || screen.presetMenuOpen || screen.presetNaming
-                                        || screen.presetSaving)
+                                        || screen.presetSaving
+                                        // кнопка записи ждёт камеру или показывает отказ — не прятать её из-под взгляда
+                                        || controller.recordingToggle.request != nil || controller.recordingNotice != nil)
             }
         }
         .environment(\.colorScheme, .dark)

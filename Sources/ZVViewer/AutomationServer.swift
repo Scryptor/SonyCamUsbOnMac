@@ -473,6 +473,7 @@ final class AutomationServer {
                 }
             } ?? NSNull(),
             "recordingRequest": controller.recordingToggle.request?.rawValue ?? NSNull(),
+            "recordingNotice": controller.recordingNotice ?? NSNull(),
             // журнал панели отладки, последние события
             "journal": controller.debugEvents.suffix(30).map(\.text),
             "feedback": controller.feedback.map { "\($0.kind)" },
