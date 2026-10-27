@@ -46,16 +46,14 @@ struct LiveScreen: View {
         }
         .onAppear { zoomScroll.start(screen: screen, controller: controller) }
         .onChange(of: screen.zoom.factor, initial: true) { _, factor in controller.viewZoomFactor = factor }
-        // инструменты монитора — потоку кадров; выключили растровые — старый растр убираем сразу
+        // инструменты монитора поток кадров получает от ScreenState сам; здесь — выключили растровые: старый растр убираем
+        // сразу, наложение включили — эталон нужен: прошлый из файла или текущий кадр
         .onChange(of: screen.assist, initial: true) { _, assist in
-            controller.assistInput.setAssist(assist)
             if !assist.needsRaster { controller.clearAssistOverlay() }
-            // наложение включили — эталон нужен: прошлый из файла или текущий кадр
             if assist.overlay != .off { controller.ensureReference() }
         }
-        .onChange(of: screen.waveformOn ? screen.waveformMode : nil, initial: true) { _, mode in
-            controller.assistInput.setWaveform(mode)
-            if mode == nil { controller.clearWaveform() }
+        .onChange(of: screen.waveformOn) { _, on in
+            if !on { controller.clearWaveform() }
         }
         .task {
             while !Task.isCancelled {

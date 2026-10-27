@@ -3,16 +3,16 @@
 камеры в зоне «Широкая», точка AF в зоне «Точка»), рамки фокуса камеры, моторный зум, шкала фокуса в MF.
 
 Запускает scripts/fake_camera.py на 127.0.0.1:15741 и программу с API автоматизации (адрес камеры подменён), проверяет
-/state и снимает скриншоты в --out. Зону и режим фокуса поддельной камеры возвращает, режим «фокус касанием» программы —
-тоже.
+/state и снимает скриншоты в --out. Зону и режим фокуса поддельной камеры возвращает, настройки программы (они общие с
+установленной) — тоже.
 
   scripts/e2e_lens.py [--app "build/Sony Cam Viewer.app"] [--out /tmp/lens]
 """
-import argparse, os, plistlib, signal, subprocess, sys, time
+import argparse, os, signal, subprocess, sys, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
-from e2e_monitor import CAMERA, DOMAIN, act, check, shot, state, wait  # noqa: E402
+from e2e_monitor import CAMERA, act, check, restore_prefs, save_prefs, shot, state, wait  # noqa: E402
 import e2e_monitor  # noqa: E402
 
 FOCUS_MODE_AFC, FOCUS_MODE_MF = 0x8004, 1
@@ -120,7 +120,7 @@ def main():
     ap.add_argument("--out", default="/tmp/lens")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
-    saved = plistlib.loads(subprocess.run(["defaults", "export", DOMAIN, "-"], capture_output=True).stdout or plistlib.dumps({}))
+    before = save_prefs()
     cam = subprocess.Popen([sys.executable, os.path.join(ROOT, "scripts/fake_camera.py"), "--listen", CAMERA],
                            stdout=open(os.path.join(args.out, "camera.log"), "w"), stderr=subprocess.STDOUT)
     time.sleep(0.5)
@@ -147,11 +147,7 @@ def main():
             proc.kill()
         cam.terminate()
         cam.wait()
-        # режим «фокус касанием» — как был
-        if "touchFocusOn" in saved:
-            subprocess.run(["defaults", "write", DOMAIN, "touchFocusOn", "-bool", "true" if saved["touchFocusOn"] else "false"])
-        else:
-            subprocess.run(["defaults", "delete", DOMAIN, "touchFocusOn"], capture_output=True)
+        restore_prefs(before)
     print(f"\n{e2e_monitor.passed} из {e2e_monitor.passed + e2e_monitor.failed} проверок прошли; скриншоты — {args.out}")
     return 0 if e2e_monitor.failed == 0 else 1
 

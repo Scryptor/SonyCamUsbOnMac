@@ -69,6 +69,8 @@ struct RootView: View {
                 LiveScreen(controller: controller, screen: screen)
             }
         }
+        // инструменты монитора и волновая форма — потоку кадров, прямо из ScreenState при каждом изменении
+        .onAppear { screen.attach(controller.assistInput) }
         // окно пресетов просят открыть список и API, а открыть окно может только вид
         .onChange(of: screen.presetsWindowRequest) { openWindow(id: PresetsWindow.id) }
         // камера сменила режим — в окне пресетов другой список: выбран его текущий пресет, иначе первый. Здесь, а не в

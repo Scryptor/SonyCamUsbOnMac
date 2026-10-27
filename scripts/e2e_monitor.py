@@ -5,7 +5,8 @@ RGB-парад) и наложение эталонного кадра.
 
 Запускает scripts/fake_camera.py на 127.0.0.1:15741 и программу с API автоматизации (адрес камеры подменён), проверяет
 /state и снимает скриншоты в --out. Эталоном для наложения подкладывает другой план той же сцены
-(scripts/assets/viewfinder-pan.jpg). Настройки инструментов и эталон, какие были до запуска, возвращает.
+(scripts/assets/viewfinder-pan.jpg). Настройки программы (они общие с установленной) и эталон, какие были до запуска,
+возвращает.
 
   scripts/e2e_monitor.py [--app "build/Sony Cam Viewer.app"] [--out /tmp/monitor]
 """
@@ -16,7 +17,6 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CAMERA = "127.0.0.1:15741"
 INFO = os.path.expanduser("~/Library/Application Support/Sony Cam Viewer/automation.json")
 DOMAIN = "local.zve10viewer"
-KEYS = ("monitorAssist", "waveformOn", "waveformMode", "waveformPlacement", "referenceSource")
 REFERENCE = os.path.expanduser("~/Library/Application Support/Sony Cam Viewer/reference.jpg")
 
 passed = failed = 0
@@ -73,6 +73,37 @@ def shot(out, name):
     png = call("/screenshot", raw=True)
     with open(os.path.join(out, name + ".png"), "wb") as f:
         f.write(png)
+
+
+def save_prefs():
+    """Все настройки программы — общие с установленной программой (тот же bundle id)."""
+    data = subprocess.run(["defaults", "export", DOMAIN, "-"], capture_output=True).stdout
+    return plistlib.loads(data) if data else {}
+
+
+def restore_prefs(before):
+    """Настройки — как были: и инструменты, и то, что программа запомнила о поддельной камере (`cameras`), и окно."""
+    now = save_prefs()
+    for key in set(now) | set(before):
+        value = before.get(key)
+        if now.get(key) == value:
+            continue
+        if value is None:
+            args = ["delete", DOMAIN, key]
+        elif isinstance(value, bool):
+            args = ["write", DOMAIN, key, "-bool", "true" if value else "false"]
+        elif isinstance(value, int):
+            args = ["write", DOMAIN, key, "-int", str(value)]
+        elif isinstance(value, float):
+            args = ["write", DOMAIN, key, "-float", repr(value)]
+        elif isinstance(value, bytes):
+            args = ["write", DOMAIN, key, "-data", value.hex()]
+        elif isinstance(value, str):
+            args = ["write", DOMAIN, key, "-string", value]
+        else:
+            print(f"  ! настройку {key} вернуть не умею — проверьте её сами")
+            continue
+        subprocess.run(["defaults", *args], capture_output=True)
 
 
 def overlay(s):
@@ -268,8 +299,7 @@ def main():
     ap.add_argument("--out", default="/tmp/monitor")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
-    saved = plistlib.loads(subprocess.run(["defaults", "export", DOMAIN, "-"], capture_output=True).stdout or plistlib.dumps({}))
-    before = {key: saved.get(key) for key in KEYS}
+    before = save_prefs()
     reference = open(REFERENCE, "rb").read() if os.path.exists(REFERENCE) else None
     # эталон «прошлого раза» — другой план той же сцены: наложение видно на снимке
     os.makedirs(os.path.dirname(REFERENCE), exist_ok=True)
@@ -301,16 +331,8 @@ def main():
             proc.kill()
         cam.terminate()
         cam.wait()
-        # настройки инструментов и эталон — как были до запуска
-        for key, value in before.items():
-            if value is None:
-                subprocess.run(["defaults", "delete", DOMAIN, key], capture_output=True)
-            elif isinstance(value, bool):
-                subprocess.run(["defaults", "write", DOMAIN, key, "-bool", "true" if value else "false"])
-            elif isinstance(value, bytes):
-                subprocess.run(["defaults", "write", DOMAIN, key, "-data", value.hex()])
-            else:
-                subprocess.run(["defaults", "write", DOMAIN, key, "-string", str(value)])
+        # настройки и эталон — как были до запуска
+        restore_prefs(before)
         if reference is None:
             os.remove(REFERENCE)
         else:

@@ -194,6 +194,21 @@ final class ScreenState {
     private func saveAssist(_ next: MonitorAssist) {
         assist = next
         if let data = try? JSONEncoder().encode(next) { defaults.set(data, forKey: "monitorAssist") }
+        pushToFrames()
+    }
+
+    /// Куда передавать инструменты и волновую форму для потока кадров — сразу при изменении, а не через обновление вида:
+    /// так поток кадров всегда считает то, что включено сейчас.
+    @ObservationIgnored private var frameInput: AssistInput?
+
+    func attach(_ input: AssistInput) {
+        frameInput = input
+        pushToFrames()
+    }
+
+    private func pushToFrames() {
+        frameInput?.setAssist(assist)
+        frameInput?.setWaveform(waveformOn ? waveformMode : nil)
     }
 
     func toggleTouchFocus() {
@@ -204,11 +219,13 @@ final class ScreenState {
     func toggleWaveform() {
         waveformOn.toggle()
         defaults.set(waveformOn, forKey: "waveformOn")
+        pushToFrames()
     }
 
     func setWaveformMode(_ mode: Waveform.Mode) {
         waveformMode = mode
         defaults.set(mode.rawValue, forKey: "waveformMode")
+        pushToFrames()
     }
 
     func placeWaveform(_ placement: FloatingPlacement) {
