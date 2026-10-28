@@ -75,6 +75,7 @@ import local.zve10viewer.session.CapturePhase
 import local.zve10viewer.session.LiveViewQuality
 import local.zve10viewer.session.LiveViewQualityPolicy
 import local.zve10viewer.session.LiveViewSample
+import local.zve10viewer.session.PreviewQualityMode
 import local.zve10viewer.session.RecordingToggle
 import local.zve10viewer.session.SessionException
 import local.zve10viewer.settings.CameraBook
@@ -439,8 +440,8 @@ class CameraController(private val context: Context, private val scope: Coroutin
     /** Каким качеством идут кадры (по их ширине); null — кадров нет. */
     var liveViewQuality by mutableStateOf<LiveViewQuality?>(null)
         private set
-    /** Снижать качество превью при слабом Wi-Fi (настройка). */
-    var adaptiveQuality by mutableStateOf(prefs.adaptiveLiveViewQuality)
+    /** Качество превью по Wi-Fi: авто или вручную — выбор в подсказке к счётчику кадров и в настройках. */
+    var previewQualityMode by mutableStateOf(prefs.previewQualityMode)
         private set
 
     /**
@@ -2978,15 +2979,19 @@ class CameraController(private val context: Context, private val scope: Coroutin
 
     // MARK: - Качество превью по Wi-Fi
 
-    /** Начало сеанса по Wi-Fi: камера на низком качестве превью — сначала высокое, дальше решает канал. */
+    /**
+     * Начало сеанса по Wi-Fi: качество — выбранное вручную, в авто — высокое (камера могла остаться на низком); дальше авто
+     * ведёт канал.
+     */
     private fun startQuality(session: CameraSession) {
         // свойства — прямо из сеанса: копия у контроллера обновится только на следующем шаге главного потока
         val current = LiveViewQuality.of(session.properties.value[SonyProp.LIVE_VIEW_IMAGE_QUALITY]?.current?.intValue)
-            ?: liveViewQuality
-        if (current != LiveViewQuality.low) return
-        journal("качество превью: камера на низком — начинаю с высокого")
-        qualityPolicy.requested(System.currentTimeMillis(), LiveViewQuality.high)
-        writeQuality(session, LiveViewQuality.high)
+            ?: liveViewQuality ?: return
+        val wanted = previewQualityMode.fixed ?: LiveViewQuality.high
+        if (current == wanted) return
+        journal("качество превью: камера на ${current.title} — начинаю с ${wanted.title}")
+        qualityPolicy.requested(System.currentTimeMillis(), wanted)
+        writeQuality(session, wanted)
     }
 
     /** Дважды в секунду: решение политики (или, если настройка выключена, всегда высокое) — в камеру. По USB не трогаем. */
@@ -2997,10 +3002,12 @@ class CameraController(private val context: Context, private val scope: Coroutin
         if (qualityJob?.isActive == true) return
         val now = System.currentTimeMillis()
         val policy = qualityPolicy
-        val target = if (adaptiveQuality) {
+        val fixed = previewQualityMode.fixed
+        val target = if (fixed == null) {
             policy.decide(now, linkOutage, sharp = sharpPreview)
-        } else if (policy.level == LiveViewQuality.low && !policy.isSwitching(now)) {
-            LiveViewQuality.high.also { policy.requested(now, it) }
+        } else if (policy.level != fixed && !policy.isSwitching(now)) {
+            // выбрано вручную — держим его
+            fixed.also { policy.requested(now, it) }
         } else {
             null
         }
@@ -3032,10 +3039,12 @@ class CameraController(private val context: Context, private val scope: Coroutin
         }
     }
 
-    fun applyAdaptiveQuality(on: Boolean) {
-        adaptiveQuality = on
-        prefs.adaptiveLiveViewQuality = on
-        // выключили — на ближайшем шаге tickQuality вернёт высокое
+    /** Выбор в подсказке к счётчику кадров или в настройках: камера переходит на ближайшем шаге tickQuality. */
+    fun applyPreviewQuality(mode: PreviewQualityMode) {
+        if (mode == previewQualityMode) return
+        previewQualityMode = mode
+        prefs.previewQualityMode = mode
+        journal("качество превью: ${mode.name}")
     }
 
     /** Копия кадра на экране: сам он — из пула, следующие кадры его перезапишут. */
@@ -3312,8 +3321,15 @@ class CameraController(private val context: Context, private val scope: Coroutin
         rows += DebugRow("Кадров/с", DebugFormat.decimal(fps))
         frameBitmap?.let { rows += DebugRow("Кадр", "${it.width}×${it.height}, ${lastFrameBytes / 1024} КБ") }
         if (transportKind == TransportKind.wifi) {
-            val quality = if (liveViewQuality == LiveViewQuality.low) "низкое — сигнала не хватает" else "высокое"
-            rows += DebugRow("Качество", "$quality (${if (adaptiveQuality) "авто" else "авто выключено"})")
+            val quality = if (liveViewQuality == LiveViewQuality.low) {
+                if (previewQualityMode == PreviewQualityMode.auto) "низкое — сигнала не хватает" else "низкое"
+            } else "высокое"
+            val mode = when (previewQualityMode) {
+                PreviewQualityMode.auto -> "авто"
+                PreviewQualityMode.high -> "вручную — высокое"
+                PreviewQualityMode.low -> "вручную — низкое"
+            }
+            rows += DebugRow("Качество", "$quality ($mode)")
             qualityPolicy.predictedHighFps(now, 5000)?.let { rows += DebugRow("Прогноз на высоком", DebugFormat.decimal(it) + " к/с") }
             qualityPolicy.upAttemptInMs(now)?.let { rows += DebugRow("Вернуть высокое", "попытка через ${(it + 999) / 1000} с") }
         }

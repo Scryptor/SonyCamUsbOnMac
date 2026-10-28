@@ -177,9 +177,13 @@ enum DebugReport {
             rows.append(Row(label: "Кадр", value: "\(frame.width)×\(frame.height)" + (c.lastFrameBytes.map { ", \($0 / 1024) КБ" } ?? "")))
         }
         if c.transportKind == .wifi {
-            let auto = Prefs.wifiAdaptiveQuality ? "авто" : "авто выключено"
-            let quality = c.previewQuality == .low ? "низкое — сигнала не хватает" : "высокое"
-            rows.append(Row(label: "Качество", value: "\(quality) (\(auto))"))
+            let mode = switch c.previewQualityMode {
+            case .auto: "авто"
+            case .high: "вручную — высокое"
+            case .low: "вручную — низкое"
+            }
+            let quality = c.previewQuality == .low ? (c.previewQualityMode == .auto ? "низкое — сигнала не хватает" : "низкое") : "высокое"
+            rows.append(Row(label: "Качество", value: "\(quality) (\(mode))"))
             let forecast = c.qualityForecast
             if let fps = forecast.highFPS {
                 rows.append(Row(label: "Прогноз на высоком", value: String(format: "%.1f к/с", fps).replacingOccurrences(of: ".", with: ",")))

@@ -1,4 +1,5 @@
 import Foundation
+import ZVCore
 
 /// Настройки программы (окно ⌘, и API автоматизации). Хранятся в UserDefaults.
 enum Prefs {
@@ -51,7 +52,9 @@ enum Prefs {
         static let wifiEnabled = "wifiEnabled"
         static let wifiHost = "wifiHost"
         static let wifiCameraName = "wifiCameraName"
+        /// Прежний переключатель «снижать качество при слабом Wi-Fi» — читается только для переноса в previewQuality.
         static let wifiAdaptiveQuality = "wifiAdaptiveQuality"
+        static let previewQuality = "previewQuality"
         static let tallyEnabled = "tallyEnabled"
         static let tallyWidth = "tallyWidth"
         static let tallyOpacity = "tallyOpacity"
@@ -143,8 +146,16 @@ enum Prefs {
         set { defaults.set(newValue, forKey: Key.tallyBlink) }
     }
 
-    static var wifiAdaptiveQuality: Bool {
-        get { defaults.object(forKey: Key.wifiAdaptiveQuality) as? Bool ?? true }
-        set { defaults.set(newValue, forKey: Key.wifiAdaptiveQuality) }
+    /// Качество превью по Wi-Fi: авто, всегда высокое или всегда низкое. Без своего значения — по прежнему переключателю:
+    /// выключенный «снижать при слабом Wi-Fi» значил «всегда высокое».
+    static var previewQuality: PreviewQualityMode {
+        get {
+            PreviewQualityMode.restored(defaults.string(forKey: Key.previewQuality),
+                                        legacyAdaptive: defaults.object(forKey: Key.wifiAdaptiveQuality) as? Bool)
+        }
+        set {
+            defaults.set(newValue.rawValue, forKey: Key.previewQuality)
+            defaults.removeObject(forKey: Key.wifiAdaptiveQuality)
+        }
     }
 }

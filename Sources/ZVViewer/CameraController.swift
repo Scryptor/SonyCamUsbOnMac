@@ -187,8 +187,10 @@ final class CameraController {
     @ObservationIgnored private var linkRTT: TimeInterval?
     @ObservationIgnored private var qualityPolicy = LiveViewQualityPolicy(now: Date())
     @ObservationIgnored private var qualityWriting = false
-    /// Когда в последний раз просили камеру вернуть высокое при выключенной адаптации: кадры меняются не сразу.
-    @ObservationIgnored private var forcedHighAt: Date?
+    /// Когда в последний раз просили камеру выбранное вручную качество: кадры меняются не сразу.
+    @ObservationIgnored private var forcedQualityAt: Date?
+    /// Качество превью по Wi-Fi: авто или вручную — выбор в подсказке к счётчику кадров и в настройках.
+    private(set) var previewQualityMode = Prefs.previewQuality
     @ObservationIgnored private var reconnectTask: Task<Void, Never>?
     @ObservationIgnored private var reconnectAttempt = 0
     /// Пока идёт сеанс, macOS не усыпляет программу (App Nap душил превью до 6–12 к/с), систему и экран.
@@ -1925,11 +1927,20 @@ final class CameraController {
 
     // MARK: - Качество превью
 
-    /// Сеанс по Wi-Fi готов: качество — высокое; дальше его ведёт политика по каналу.
+    /// Сеанс по Wi-Fi готов: качество — выбранное вручную, в авто — высокое; дальше авто ведёт политика по каналу.
     private func startQuality(_ session: CameraSession) {
-        guard transportKind == .wifi,
-              properties[SonyProp.liveViewImageQuality]?.current.intValue == LiveViewQuality.low.rawValue else { return }
-        writeQuality(.high, session)
+        guard transportKind == .wifi, let current = properties[SonyProp.liveViewImageQuality]?.current.intValue else { return }
+        let wanted = previewQualityMode.fixed ?? .high
+        if current != wanted.rawValue { writeQuality(wanted, session) }
+    }
+
+    /// Выбор в подсказке к счётчику кадров или в настройках: камера переходит на ближайшем шаге (раз в полсекунды).
+    func setPreviewQuality(_ mode: PreviewQualityMode) {
+        guard mode != previewQualityMode else { return }
+        previewQualityMode = mode
+        Prefs.previewQuality = mode
+        forcedQualityAt = nil
+        note("качество превью: \(mode.rawValue)")
     }
 
     /// Раз в полсекунды: снизить качество превью, если канал его не тянет, или вернуть, когда тянет снова.
@@ -1937,14 +1948,17 @@ final class CameraController {
         guard transportKind == .wifi, phase == .ready, reconnectingSince == nil, let session, !qualityWriting,
               let current = previewQuality else { return }
         let wanted: LiveViewQuality?
-        if Prefs.wifiAdaptiveQuality {
+        if let fixed = previewQualityMode.fixed {
+            // выбрано вручную: держим его; камера переходит не сразу — просим не чаще раза в 5 с
+            if current != fixed, forcedQualityAt.map({ Date().timeIntervalSince($0) > 5 }) ?? true {
+                forcedQualityAt = Date()
+                wanted = fixed
+            } else {
+                wanted = nil
+            }
+        } else {
             // картинка увеличена на экране — чёткость важнее плавности: высокое держим дольше
             wanted = qualityPolicy.decide(now: Date(), outage: linkOutageSince != nil, sharp: viewZoomFactor >= 1.5)
-        } else if current == .low, forcedHighAt.map({ Date().timeIntervalSince($0) > 5 }) ?? true {
-            forcedHighAt = Date()
-            wanted = .high
-        } else {
-            wanted = nil
         }
         guard let wanted, wanted != current else { return }
         let predicted = qualityPolicy.predictedHighFPS(now: Date(), window: 5)

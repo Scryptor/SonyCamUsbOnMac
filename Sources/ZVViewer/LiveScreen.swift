@@ -419,8 +419,8 @@ private struct StatusPill: View {
                 ConnectionInfo(controller: controller, screen: screen)
             }
             PillButton(info: .frames, screen: screen) {
-                // превью снижено из-за слабого Wi-Fi — видно сразу
-                Text("\(controller.shownFPS) к/с" + (controller.previewQuality == .low ? " · \(controller.frame?.height ?? 360)p" : ""))
+                // и частота, и разрешение превью — всегда, и в авто: снижение из-за слабого Wi-Fi видно сразу
+                Text("\(controller.shownFPS) к/с" + (controller.frame.map { " · \($0.height)p" } ?? ""))
                     .monospacedDigit()
             } popover: {
                 FramesInfo(controller: controller)
@@ -536,11 +536,38 @@ private struct ConnectionInfo: View {
     }
 }
 
+/// Подсказка к счётчику кадров: сверху — качество превью (авто или вручную) и что сейчас, ниже — сводка о кадрах.
 private struct FramesInfo: View {
     let controller: CameraController
 
+    private var wifi: Bool { controller.transportKind == .wifi }
+    /// Форма кадра — для подписей размеров: в видео 16:9, в фото — по формату снимка.
+    private var aspect: Double { controller.frame.map { Double($0.width) / Double(max($0.height, 1)) } ?? 16.0 / 9 }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            Text("Качество превью").font(.headline)
+            Picker("Качество превью", selection: Binding(get: { controller.previewQualityMode },
+                                                         set: { controller.setPreviewQuality($0) })) {
+                Text("Авто").tag(PreviewQualityMode.auto)
+                Text(LiveViewQuality.high.sizeLabel(aspect: aspect)).tag(PreviewQualityMode.high)
+                Text(LiveViewQuality.low.sizeLabel(aspect: aspect)).tag(PreviewQualityMode.low)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .disabled(!wifi)
+            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
+                if let frame = controller.frame { InfoRow(label: "Сейчас", value: "\(frame.width)×\(frame.height)") }
+                if wifi, let throughput = controller.throughput {
+                    InfoRow(label: "Поток превью", value: String(format: "%.1f Мбит/с", throughput * 8 / 1_000_000)
+                            .replacingOccurrences(of: ".", with: ","))
+                }
+            }
+            Text(qualityNote)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Divider()
             Text("Кадры трансляции").font(.headline)
             Group {
                 Text("Столько кадров в секунду (сейчас \(controller.shownFPS)) доходит до Mac \(controller.transportKind == .wifi ? "по Wi-Fi" : "по USB"). Это картинка для просмотра, а не съёмка.")
@@ -557,6 +584,18 @@ private struct FramesInfo: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var qualityNote: String {
+        guard wifi else { return "По кабелю камера всегда отдаёт полное превью — выбор качества действует по Wi-Fi." }
+        switch controller.previewQualityMode {
+        case .auto:
+            return controller.previewQuality == .low
+                ? "Авто: сигнала не хватает на полное качество — превью облегчено. Полное вернётся само, когда канал потянет."
+                : "Авто: полное качество, а когда Wi-Fi его не тянет — облегчённое, чтобы картинка шла плавно."
+        case .high: return "Всегда полное качество. На слабом Wi-Fi картинка может дёргаться."
+        case .low: return "Всегда облегчённое превью: вдвое меньше трафика и плавнее на слабом Wi-Fi, но мельче."
         }
     }
 }

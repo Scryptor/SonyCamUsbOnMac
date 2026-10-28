@@ -416,9 +416,13 @@ final class AutomationServer {
         case "wifiEnabled":
             guard let b = Bool(value) else { return "wifiEnabled: true | false" }
             Prefs.wifiEnabled = b
+        case "previewQuality":
+            guard let mode = PreviewQualityMode(rawValue: value) else { return "previewQuality: auto | high | low" }
+            controller.setPreviewQuality(mode)
         case "wifiAdaptiveQuality":
+            // прежний переключатель: true — авто, false — всегда высокое
             guard let b = Bool(value) else { return "wifiAdaptiveQuality: true | false" }
-            Prefs.wifiAdaptiveQuality = b
+            controller.setPreviewQuality(b ? .auto : .high)
         case "autoHide":
             guard let b = Bool(value) else { return "autoHide: true | false" }
             Prefs.autoHide = b
@@ -606,7 +610,8 @@ final class AutomationServer {
                 "destination": Prefs.destination.rawValue, "folder": Prefs.folderURL.path,
                 "reviewEnabled": Prefs.reviewEnabled, "reviewSeconds": Prefs.reviewSeconds,
                 "reviewSource": Prefs.reviewSource.rawValue, "autoHide": Prefs.autoHide, "autoHideSeconds": Prefs.autoHideSeconds,
-                "wifiAdaptiveQuality": Prefs.wifiAdaptiveQuality,
+                "previewQuality": controller.previewQualityMode.rawValue,
+                "wifiAdaptiveQuality": controller.previewQualityMode == .auto,
                 "tallyEnabled": Prefs.tallyEnabled, "tallyWidth": Prefs.tallyWidth, "tallyOpacity": Prefs.tallyOpacity,
                 "tallyBlink": Prefs.tallyBlink,
             ] as [String: Any],

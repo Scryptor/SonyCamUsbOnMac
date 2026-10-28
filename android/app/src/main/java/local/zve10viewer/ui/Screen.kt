@@ -98,6 +98,7 @@ import local.zve10viewer.CameraController.FrameNotice
 import local.zve10viewer.Prefs
 import local.zve10viewer.debug.DebugTab
 import local.zve10viewer.session.LiveViewQuality
+import local.zve10viewer.session.PreviewQualityMode
 import local.zve10viewer.settings.CaptureMode
 import local.zve10viewer.settings.SettingCatalog
 import local.zve10viewer.settings.SettingGroup
@@ -760,9 +761,9 @@ private fun StatusPill(controller: CameraController, screen: ScreenState) {
         // касание — подсказка: адреса и сигнал / что это за кадры
         PillText("${controller.cameraName} · ${transportLabel(controller)}",
             Modifier.clickable { screen.togglePillInfo(PillInfo.connection) })
-        // превью снижено из-за слабого сигнала — видно сразу, рядом с частотой
-        val reduced = if (controller.liveViewQuality == LiveViewQuality.low) " · 360p" else ""
-        PillText("${controller.shownFps} к/с$reduced", Modifier.clickable { screen.togglePillInfo(PillInfo.frames) })
+        // и частота, и разрешение превью — всегда, и в авто: снижение из-за слабого Wi-Fi видно сразу
+        val size = controller.frame?.let { " · ${it.height}p" } ?: ""
+        PillText("${controller.shownFps} к/с$size", Modifier.clickable { screen.togglePillInfo(PillInfo.frames) })
         PillText(ValueFormatter.label(SettingID.exposureProgram, controller.property(SettingID.exposureProgram)))
         controller.slowMotion?.let { slow ->
             PillText(slowMotionSummary(slow), Modifier.clickable { screen.togglePillInfo(PillInfo.slowMotion) })
@@ -849,6 +850,12 @@ private fun PillInfoCard(controller: CameraController, info: PillInfo) {
                     "длиннее кадра. В режимах S&Q P и A выдержку выбирает камера, и частоту не видно.")
             }
             PillInfo.frames -> {
+                // сверху — качество превью: авто или вручную, и что сейчас; ниже — сводка о кадрах
+                InfoTitle("Качество превью")
+                QualityChoice(controller, enabled = wifi)
+                controller.frame?.let { InfoRow("Сейчас", "${it.width}×${it.height}") }
+                InfoNote(qualityNote(controller, wifi))
+                Box(Modifier.fillMaxWidth().height(1.dp).background(PanelLight))
                 InfoTitle("Кадры трансляции")
                 InfoNote("Столько кадров в секунду (сейчас ${controller.shownFps}) доходит до планшета ${if (wifi) "по Wi-Fi" else "по USB"}. " +
                     "Это картинка для просмотра, а не съёмка.", Color.White)
@@ -861,6 +868,37 @@ private fun PillInfoCard(controller: CameraController, info: PillInfo) {
             }
         }
     }
+}
+
+/** Выбор качества превью: «Авто», «1024×576», «640×360» — размеры по форме кадра (в фото 3:2 — «1024×683»). */
+@Composable
+private fun QualityChoice(controller: CameraController, enabled: Boolean) {
+    val frame = controller.frame
+    val aspect = if (frame != null && frame.height > 0) frame.width.toDouble() / frame.height else 16.0 / 9
+    Row(Modifier.alpha(if (enabled) 1f else 0.45f), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        for (mode in PreviewQualityMode.entries) {
+            val label = mode.fixed?.sizeLabel(aspect) ?: "Авто"
+            val current = controller.previewQualityMode == mode
+            Text(label, color = if (current) Color.Black else Color.White, fontSize = 16.sp,
+                fontWeight = if (current) FontWeight.Bold else FontWeight.Normal,
+                style = TextStyle(fontFeatureSettings = "tnum"),
+                modifier = Modifier.background(if (current) Color.White else PanelLight, RoundedCornerShape(9.dp))
+                    .semantics { contentDescription = "Качество превью: $label" }
+                    .clickable(enabled = enabled) { controller.applyPreviewQuality(mode) }
+                    .padding(horizontal = 14.dp, vertical = 9.dp))
+        }
+    }
+}
+
+/** Что делает выбранное качество — как у программы для Mac. */
+private fun qualityNote(controller: CameraController, wifi: Boolean): String = when {
+    !wifi -> "По кабелю камера всегда отдаёт полное превью — выбор качества действует по Wi-Fi."
+    controller.previewQualityMode == PreviewQualityMode.high -> "Всегда полное качество. На слабом Wi-Fi картинка может дёргаться."
+    controller.previewQualityMode == PreviewQualityMode.low ->
+        "Всегда облегчённое превью: вдвое меньше трафика и плавнее на слабом Wi-Fi, но мельче."
+    controller.liveViewQuality == LiveViewQuality.low ->
+        "Авто: сигнала не хватает на полное качество — превью облегчено. Полное вернётся само, когда канал потянет."
+    else -> "Авто: полное качество, а когда Wi-Fi его не тянет — облегчённое, чтобы картинка шла плавно."
 }
 
 @Composable
@@ -1218,7 +1256,6 @@ private fun SettingsPanel(controller: CameraController, modifier: Modifier, onDe
     var autoHide by remember { mutableStateOf(prefs.autoHide) }
     var autoHideSeconds by remember { mutableIntStateOf(prefs.autoHideSeconds) }
     var wifiEnabled by remember { mutableStateOf(prefs.wifiEnabled) }
-    var adaptiveQuality by remember { mutableStateOf(controller.adaptiveQuality) }
     // переключатель вибрации — только если у планшета есть мотор
     val context = LocalContext.current
     val hasVibrator = remember { Haptics.deviceHasVibrator(context) }
@@ -1285,11 +1322,10 @@ private fun SettingsPanel(controller: CameraController, modifier: Modifier, onDe
         Spacer(Modifier.height(8.dp))
         Text("Wi-Fi", color = Secondary, fontSize = 15.sp)
         Toggle("Подключаться по Wi-Fi, когда камеры нет на кабеле", wifiEnabled) { wifiEnabled = it; prefs.wifiEnabled = it }
-        Toggle("Снижать качество превью при слабом Wi-Fi", adaptiveQuality) {
-            adaptiveQuality = it
-            controller.applyAdaptiveQuality(it)
-        }
-        Text("1024×576 → 640×360, только когда сигнала не хватает", color = Secondary, fontSize = 13.sp)
+        Text("Качество превью по Wi-Fi", color = Color.White, fontSize = 16.sp)
+        QualityChoice(controller, enabled = true)
+        Text("Авто — 1024×576, а когда сигнала не хватает — 640×360: картинка идёт плавнее. 1024×576 и 640×360 — всегда это " +
+            "качество. То же — по касанию счётчика кадров в строке состояния.", color = Secondary, fontSize = 13.sp)
         val paired = controller.cameraBook.cameras.filter { it.paired }
         if (paired.isNotEmpty()) {
             Row(verticalAlignment = Alignment.CenterVertically) {

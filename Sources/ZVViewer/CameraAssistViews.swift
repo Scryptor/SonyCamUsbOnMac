@@ -56,17 +56,24 @@ struct TouchFocusButton: View {
 
     var body: some View {
         let method = controller.touchFocusMethod
-        Button { screen.toggleTouchFocus() } label: {
-            TouchFocusIcon()
-                .foregroundStyle(.white)
-                .frame(width: 42, height: 42)
-                .background(screen.touchFocusOn ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.ultraThinMaterial), in: Circle())
-                .opacity(method == nil ? 0.5 : 1)
+        // подпись под кнопкой — как «Зум» и режим съёмки: значок сам по себе не говорит, что это
+        VStack(spacing: 5) {
+            Button { screen.toggleTouchFocus() } label: {
+                TouchFocusIcon()
+                    .foregroundStyle(.white)
+                    .frame(width: 42, height: 42)
+                    .background(screen.touchFocusOn ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.ultraThinMaterial), in: Circle())
+                    .opacity(method == nil ? 0.5 : 1)
+            }
+            .buttonStyle(.plain)
+            .help(method == nil ? controller.touchRefusal
+                  : screen.touchFocusOn ? "Фокус касанием включён: щелчок по кадру ставит фокус" : "Фокус касанием: щелчок по кадру ставит фокус")
+            .accessibilityLabel("Фокус касанием")
+            Text("Фокус")
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.8))
+                .accessibilityHidden(true)
         }
-        .buttonStyle(.plain)
-        .help(method == nil ? controller.touchRefusal
-              : screen.touchFocusOn ? "Фокус касанием включён: щелчок по кадру ставит фокус" : "Фокус касанием: щелчок по кадру ставит фокус")
-        .accessibilityLabel("Фокус касанием")
     }
 }
 

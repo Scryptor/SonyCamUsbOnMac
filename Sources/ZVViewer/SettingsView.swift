@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import ZVCore
 
 /// Окно настроек (⌘,).
 struct SettingsView: View {
@@ -14,7 +15,6 @@ struct SettingsView: View {
     @AppStorage(Prefs.Key.wifiEnabled) private var wifiEnabled = true
     @AppStorage(Prefs.Key.wifiCameraName) private var wifiCameraName: String?
     @AppStorage(Prefs.Key.wifiHost) private var wifiHost: String?
-    @AppStorage(Prefs.Key.wifiAdaptiveQuality) private var wifiAdaptiveQuality = true
     @AppStorage(Prefs.Key.tallyEnabled) private var tallyEnabled = true
     @AppStorage(Prefs.Key.tallyWidth) private var tallyWidth = 3.0
     @AppStorage(Prefs.Key.tallyOpacity) private var tallyOpacity = 0.7
@@ -103,8 +103,15 @@ struct SettingsView: View {
                      + "строке состояния). Камера помнит его, пока её не сбросят.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Toggle("Снижать качество превью при слабом Wi-Fi", isOn: $wifiAdaptiveQuality)
-                Text("1024×576 → 640×360, только когда сигнала не хватает: картинка идёт плавнее. При хорошем сигнале — всегда полное качество.")
+                Picker("Качество превью по Wi-Fi", selection: Binding(get: { controller.previewQualityMode },
+                                                                      set: { controller.setPreviewQuality($0) })) {
+                    Text("Авто").tag(PreviewQualityMode.auto)
+                    Text("1024×576").tag(PreviewQualityMode.high)
+                    Text("640×360").tag(PreviewQualityMode.low)
+                }
+                .pickerStyle(.segmented)
+                Text("Авто — 1024×576, а когда сигнала не хватает — 640×360: картинка идёт плавнее. 1024×576 и 640×360 — всегда это "
+                     + "качество. То же — по щелчку на счётчике кадров в строке состояния.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

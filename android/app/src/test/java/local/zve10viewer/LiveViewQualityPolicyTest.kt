@@ -4,6 +4,7 @@ import local.zve10viewer.session.LiveViewQuality
 import local.zve10viewer.session.LiveViewQuality.high
 import local.zve10viewer.session.LiveViewQuality.low
 import local.zve10viewer.session.LiveViewQualityPolicy
+import local.zve10viewer.session.PreviewQualityMode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -196,5 +197,23 @@ class LiveViewQualityPolicyTest {
         policy.rtt(14_000, 30.0)
         // старые — дольше 10 с назад — не в счёт
         assertEquals(30.0, policy.rttMs(14_000), 1e-9)
+    }
+
+    @Test fun previewQualityModeRestoresAndLabelsSizes() {
+        // новое значение — как есть; без него — прежний переключатель: выключенный — всегда высокое, иначе авто
+        assertEquals(PreviewQualityMode.low, PreviewQualityMode.restored("low", legacyAdaptive = true))
+        assertEquals(PreviewQualityMode.high, PreviewQualityMode.restored(null, legacyAdaptive = false))
+        assertEquals(PreviewQualityMode.auto, PreviewQualityMode.restored(null, legacyAdaptive = true))
+        assertEquals(PreviewQualityMode.auto, PreviewQualityMode.restored(null, legacyAdaptive = null))
+        assertEquals(PreviewQualityMode.high, PreviewQualityMode.restored("bogus", legacyAdaptive = false))
+        assertNull(PreviewQualityMode.auto.fixed)
+        assertEquals(low, PreviewQualityMode.low.fixed)
+        assertEquals(high, PreviewQualityMode.high.fixed)
+        // подписи — по форме кадра: видео 16:9, фото 3:2 и 1:1; как у программы для Mac
+        assertEquals("1024×576", high.sizeLabel(1024.0 / 576))
+        assertEquals("640×360", low.sizeLabel(1024.0 / 576))
+        assertEquals("1024×683", high.sizeLabel(1.5))
+        assertEquals("640×640", low.sizeLabel(1.0))
+        assertEquals("1024×576", high.sizeLabel(0.0))
     }
 }

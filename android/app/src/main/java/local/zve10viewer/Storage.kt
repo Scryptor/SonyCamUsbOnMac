@@ -18,6 +18,7 @@ import local.zve10viewer.settings.Preset
 import local.zve10viewer.settings.PresetCatalog
 import local.zve10viewer.monitor.Waveform
 import local.zve10viewer.view.FloatingPlacement
+import local.zve10viewer.session.PreviewQualityMode
 
 /** Настройки программы. Хранятся в SharedPreferences; имена и значения — как у программы для Mac. */
 class Prefs(context: Context) {
@@ -181,9 +182,14 @@ class Prefs(context: Context) {
         set(value) = prefs.edit().putString("preferredCamera", value).apply()
 
     /** Снижать качество превью по Wi-Fi (1024×576 → 640×360), только когда сигнала на полное не хватает. */
-    var adaptiveLiveViewQuality: Boolean
-        get() = prefs.getBoolean("adaptiveLiveViewQuality", true)
-        set(value) = prefs.edit().putBoolean("adaptiveLiveViewQuality", value).apply()
+    /**
+     * Качество превью по Wi-Fi: авто, всегда высокое или всегда низкое. Без своего значения — по прежнему переключателю
+     * «снижать при слабом Wi-Fi» (adaptiveLiveViewQuality): выключенный значил «всегда высокое».
+     */
+    var previewQualityMode: PreviewQualityMode
+        get() = PreviewQualityMode.restored(prefs.getString("previewQuality", null),
+            if (prefs.contains("adaptiveLiveViewQuality")) prefs.getBoolean("adaptiveLiveViewQuality", true) else null)
+        set(value) = prefs.edit().putString("previewQuality", value.name).remove("adaptiveLiveViewQuality").apply()
 
     var presets: List<Preset>
         get() = PresetCatalog.fromJson(prefs.getString("presets", "[]")!!)

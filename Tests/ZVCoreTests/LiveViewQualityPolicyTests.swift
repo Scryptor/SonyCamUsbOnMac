@@ -137,3 +137,20 @@ private let weak = Link(bytesPerSecond: 0.5e6)
     var sharp = LiveViewQualityPolicy(now: start)
     #expect(simulate(&sharp, from: start, seconds: 60, link: link, sharp: true).map(\.to) == [.low, .high])
 }
+
+@Test func previewQualityModeRestoresAndLabelsSizes() {
+    // новое значение — как есть; без него — прежний переключатель: выключенный — всегда высокое, иначе авто
+    #expect(PreviewQualityMode.restored("low", legacyAdaptive: true) == .low)
+    #expect(PreviewQualityMode.restored(nil, legacyAdaptive: false) == .high)
+    #expect(PreviewQualityMode.restored(nil, legacyAdaptive: true) == .auto)
+    #expect(PreviewQualityMode.restored(nil, legacyAdaptive: nil) == .auto)
+    #expect(PreviewQualityMode.restored("bogus", legacyAdaptive: false) == .high)
+    #expect(PreviewQualityMode.auto.fixed == nil && PreviewQualityMode.low.fixed == .low && PreviewQualityMode.high.fixed == .high)
+    // подписи — по форме кадра: видео 16:9, фото 3:2 и 1:1
+    #expect(LiveViewQuality.high.sizeLabel(aspect: 1024.0 / 576) == "1024×576")
+    #expect(LiveViewQuality.low.sizeLabel(aspect: 1024.0 / 576) == "640×360")
+    #expect(LiveViewQuality.high.sizeLabel(aspect: 1.5) == "1024×683")
+    #expect(LiveViewQuality.low.sizeLabel(aspect: 1) == "640×640")
+    #expect(LiveViewQuality.high.sizeLabel(aspect: 0) == "1024×576")
+}
+

@@ -15,6 +15,41 @@ public enum LiveViewQuality: Int64, Sendable {
         default: return nil
         }
     }
+
+    /// Ширина кадра превью этого качества.
+    public var frameWidth: Int { self == .high ? 1024 : 640 }
+
+    /// Размер кадра этого качества при такой форме кадра (ширина к высоте): «1024×576», в фото 3:2 — «1024×683».
+    public func sizeLabel(aspect: Double) -> String {
+        let shape = aspect > 0 ? aspect : 16.0 / 9
+        return "\(frameWidth)×\(Int((Double(frameWidth) / shape).rounded()))"
+    }
+}
+
+/// Какое качество превью держать по Wi-Fi — выбор в подсказке к счётчику кадров и в настройках. По USB камера всегда
+/// отдаёт полное: свойство качества там картинку не меняет.
+public enum PreviewQualityMode: String, CaseIterable, Sendable {
+    /// Решает программа: снижает до низкого, когда канал не тянет высокое, и возвращает, когда тянет снова.
+    case auto
+    /// Всегда высокое (1024 точки по ширине), даже если на слабом Wi-Fi картинка дёргается.
+    case high
+    /// Всегда низкое (640 точек): вдвое меньше трафика, плавнее на слабом Wi-Fi, но мельче.
+    case low
+
+    /// Что держать; nil — решает политика по каналу.
+    public var fixed: LiveViewQuality? {
+        switch self {
+        case .auto: return nil
+        case .high: return .high
+        case .low: return .low
+        }
+    }
+
+    /// Из настроек: новое значение, иначе прежний переключатель «снижать при слабом Wi-Fi» (выключен — всегда высокое).
+    public static func restored(_ raw: String?, legacyAdaptive: Bool?) -> PreviewQualityMode {
+        if let raw, let mode = PreviewQualityMode(rawValue: raw) { return mode }
+        return legacyAdaptive == false ? .high : .auto
+    }
 }
 
 /// Когда снижать и когда возвращать качество превью по Wi-Fi. Высокое при 25 к/с — ~14 Мбит/с, почти потолок

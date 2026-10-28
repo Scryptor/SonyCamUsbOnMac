@@ -40,6 +40,7 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -105,25 +106,29 @@ private fun ZoomKey(controller: CameraController, title: String, direction: Int)
 @Composable
 fun TouchFocusButton(controller: CameraController) {
     val available = controller.touchFocusMethod != null
-    Box(
-        Modifier.size(58.dp).background(if (controller.touchFocusOn) Accent else Panel, CircleShape)
-            .alpha(if (available) 1f else 0.5f)
-            .semantics {
-                contentDescription = if (available) "Фокус касанием" else controller.touchRefusal
+    // подпись под кнопкой — как «Зум» и режим съёмки: значок сам по себе не говорит, что это
+    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Box(
+            Modifier.size(58.dp).background(if (controller.touchFocusOn) Accent else Panel, CircleShape)
+                .alpha(if (available) 1f else 0.5f)
+                .semantics {
+                    contentDescription = if (available) "Фокус касанием" else controller.touchRefusal
+                }
+                .clickable { controller.toggleTouchFocus() },
+            contentAlignment = Alignment.Center,
+        ) {
+            // уголки рамки фокуса и точка в середине
+            Canvas(Modifier.size(26.dp)) {
+                val s = size.minDimension / 24f
+                val stroke = 2f * s
+                for ((cx, cy, dx, dy) in listOf(listOf(4f, 4f, 1f, 1f), listOf(20f, 4f, -1f, 1f), listOf(4f, 20f, 1f, -1f), listOf(20f, 20f, -1f, -1f))) {
+                    drawLine(Color.White, Offset(cx * s, (cy + 5 * dy) * s), Offset(cx * s, cy * s), stroke, StrokeCap.Round)
+                    drawLine(Color.White, Offset(cx * s, cy * s), Offset((cx + 5 * dx) * s, cy * s), stroke, StrokeCap.Round)
+                }
+                drawCircle(Color.White, 2.5f * s, Offset(12f * s, 12f * s))
             }
-            .clickable { controller.toggleTouchFocus() },
-        contentAlignment = Alignment.Center,
-    ) {
-        // уголки рамки фокуса и точка в середине
-        Canvas(Modifier.size(26.dp)) {
-            val s = size.minDimension / 24f
-            val stroke = 2f * s
-            for ((cx, cy, dx, dy) in listOf(listOf(4f, 4f, 1f, 1f), listOf(20f, 4f, -1f, 1f), listOf(4f, 20f, 1f, -1f), listOf(20f, 20f, -1f, -1f))) {
-                drawLine(Color.White, Offset(cx * s, (cy + 5 * dy) * s), Offset(cx * s, cy * s), stroke, StrokeCap.Round)
-                drawLine(Color.White, Offset(cx * s, cy * s), Offset((cx + 5 * dx) * s, cy * s), stroke, StrokeCap.Round)
-            }
-            drawCircle(Color.White, 2.5f * s, Offset(12f * s, 12f * s))
         }
+        Text("Фокус", color = Color.White.copy(alpha = 0.8f), fontSize = 14.sp, modifier = Modifier.clearAndSetSemantics { })
     }
 }
 

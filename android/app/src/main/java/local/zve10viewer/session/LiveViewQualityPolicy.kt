@@ -17,6 +17,41 @@ enum class LiveViewQuality(val cameraValue: Long, val title: String) {
 
         fun of(cameraValue: Long?): LiveViewQuality? = entries.firstOrNull { it.cameraValue == cameraValue }
     }
+
+    /** Ширина кадра превью этого качества. */
+    val frameWidth: Int get() = if (this == high) 1024 else 640
+
+    /** Размер кадра этого качества при такой форме кадра (ширина к высоте): «1024×576», в фото 3:2 — «1024×683». */
+    fun sizeLabel(aspect: Double): String {
+        val shape = if (aspect > 0) aspect else 16.0 / 9
+        return "$frameWidth×${Math.round(frameWidth / shape)}"
+    }
+}
+
+/**
+ * Какое качество превью держать по Wi-Fi — выбор в подсказке к счётчику кадров и в настройках, как у программы для Mac.
+ * По USB камера всегда отдаёт полное: свойство качества там картинку не меняет.
+ */
+enum class PreviewQualityMode {
+    /** Решает программа: снижает до низкого, когда канал не тянет высокое, и возвращает, когда тянет снова. */
+    auto,
+    /** Всегда высокое (1024 точки по ширине), даже если на слабом Wi-Fi картинка дёргается. */
+    high,
+    /** Всегда низкое (640 точек): вдвое меньше трафика, плавнее на слабом Wi-Fi, но мельче. */
+    low;
+
+    /** Что держать; null — решает политика по каналу. */
+    val fixed: LiveViewQuality? get() = when (this) {
+        auto -> null
+        high -> LiveViewQuality.high
+        low -> LiveViewQuality.low
+    }
+
+    companion object {
+        /** Из настроек: новое значение, иначе прежний переключатель «снижать при слабом Wi-Fi» (выключен — всегда высокое). */
+        fun restored(raw: String?, legacyAdaptive: Boolean?): PreviewQualityMode =
+            entries.firstOrNull { it.name == raw } ?: if (legacyAdaptive == false) high else auto
+    }
 }
 
 /** Пороги политики качества; время — в миллисекундах. Те же, что у программы для Mac. */
