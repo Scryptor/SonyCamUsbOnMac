@@ -108,6 +108,7 @@ import local.zve10viewer.settings.ValueFormatter
 import local.zve10viewer.settings.LumaStats
 import local.zve10viewer.sony.SonyProp
 import kotlin.math.sqrt
+import local.zve10viewer.monitor.MonitorAssist
 import local.zve10viewer.monitor.MonitorTool
 import local.zve10viewer.monitor.Waveform
 import androidx.compose.ui.unit.IntOffset
@@ -153,6 +154,7 @@ class ScreenState {
     /** Где гистограмма и волновая форма на экране: касания по ним не возвращают скрытые элементы. */
     var histogramRect: Rect? = null
     var waveformRect: Rect? = null
+    var overlayRect: Rect? = null
     /** Высота ленты снимков (как её разложили) — гистограмма по умолчанию стоит над ней. */
     var stripHeight by mutableStateOf<Float?>(null)
     /** Где меню Fn, пока оно открыто: гистограмма поднимается над ним, а не прячется под ним. */
@@ -297,6 +299,7 @@ fun App(controller: CameraController) {
                         if (mode != null) controller.chooseWaveformMode(mode)
                     }
                     if (command.reference) controller.takeReferenceFromFrame()
+                    if (command.overlayToggle) controller.toggleOverlayVisible()
                     command.shot?.let { index -> controller.shots.getOrNull(index)?.let { controller.takeReference(it) } }
                     when {
                         command.off -> controller.assistOff()
@@ -447,7 +450,7 @@ private fun LiveScreen(controller: CameraController, screen: ScreenState) {
                         if (event.type == PointerEventType.Press && event.changes.count { it.pressed } == 1) {
                             val at = event.changes.first().position
                             onPanel = screen.histogramRect?.contains(at) == true || screen.waveformRect?.contains(at) == true ||
-                                screen.zoomBadgeRect?.contains(at) == true
+                                screen.overlayRect?.contains(at) == true || screen.zoomBadgeRect?.contains(at) == true
                             if (!onPanel) screen.revealTap = screen.controlsHidden
                         }
                         if (!onPanel) screen.noteActivity()
@@ -473,6 +476,8 @@ private fun LiveScreen(controller: CameraController, screen: ScreenState) {
         // гистограмма — над видео, под кнопками и меню; не прячется вместе с элементами
         if (controller.histogramOn) FloatingHistogram(controller, screen, feedback)
         if (controller.waveformOn) FloatingWaveform(controller, screen, feedback)
+        // панель наложения — тоже не среди элементов: касание миниатюры нужно и когда они спрятаны
+        if (controller.assist.overlay != MonitorAssist.Overlay.off) FloatingOverlay(controller, screen, feedback)
         // плашка увеличения — видна и при скрытых элементах: увеличенная картинка — не весь кадр
         val zoomFrame = controller.frame
         if (screen.zoom.isZoomed && zoomFrame != null) {
@@ -602,7 +607,7 @@ private fun Video(controller: CameraController, screen: ScreenState, feedback: F
             val bicubic = renderer != null && screen.bicubic && (BICUBIC_AT_IDENTITY || screen.zoom.isZoomed)
             val assist = controller.assist
             val overlay = if (assist.needsRaster) controller.assistOverlay else null
-            val reference = assist.overlay.opacity?.let { opacity -> controller.reference?.let { it to opacity } }
+            val reference = assist.overlay.opacity?.takeIf { !controller.overlayHidden }?.let { opacity -> controller.reference?.let { it to opacity } }
             // отметка касания сжимается и гаснет за секунду
             val mark = controller.touchMark
             val markProgress = remember { Animatable(1f) }
@@ -1097,6 +1102,19 @@ private fun FloatingHistogram(controller: CameraController, screen: ScreenState,
         onRect = { screen.histogramRect = it },
     ) {
         HistogramView(bins, controller.histogramStats)
+    }
+}
+
+/** Панель наложения; по умолчанию — справа вверху, под строкой состояния, левее кнопок справа. */
+@Composable
+private fun FloatingOverlay(controller: CameraController, screen: ScreenState, feedback: FeedbackState) {
+    val reference = controller.reference ?: return
+    val density = LocalDensity.current
+    FloatingPanel(screen, feedback, controller.overlayPlacement, controller::placeOverlay,
+        defaultOrigin = { size, view -> with(density) { Offset(view.width - 18.dp.toPx() - size.width, 84.dp.toPx()) } },
+        onRect = { screen.overlayRect = it },
+    ) {
+        OverlayPanel(controller, reference)
     }
 }
 

@@ -1,6 +1,7 @@
 package local.zve10viewer.monitor
 
 import org.json.JSONObject
+import kotlin.math.roundToInt
 
 /**
  * Помощь в кадре, как у мониторов: зебра, false color, пикинг и маркеры. Всё считается и рисуется по картинке превью
@@ -38,8 +39,24 @@ data class MonitorAssist(
     /** Безопасная зона: доля кадра (или рамки), куда помещают надписи и главное. */
     enum class SafeZone(val value: String, val fraction: Double?) { off("off", null), p90("90", 0.9), p80("80", 0.8) }
 
-    /** Наложение кадра: эталонный кадр поверх живого с этой непрозрачностью — повторить композицию. */
-    enum class Overlay(val value: String, val opacity: Float?) { off("off", null), p25("25", 0.25f), p50("50", 0.5f), p75("75", 0.75f) }
+    /**
+     * Наложение кадра: эталонный кадр поверх живого с этой непрозрачностью (5–100 %) — повторить сцену. В настройках —
+     * строкой: «off» или проценты, «40»; прежние «25», «50», «75» читаются как раньше.
+     */
+    data class Overlay(val percent: Int?) {
+        val value: String get() = percent?.toString() ?: "off"
+        val opacity: Float? get() = percent?.let { it / 100f }
+
+        companion object {
+            val off = Overlay(null)
+            val range = 5..100
+
+            fun of(value: String): Overlay? = if (value == "off") off else value.toIntOrNull()?.takeIf { it in range }?.let { Overlay(it) }
+
+            /** С ползунка (0…1) — с шагом 5 %, не меньше 5. */
+            fun steps(opacity: Float): Overlay = Overlay(((opacity * 20).roundToInt() * 5).coerceIn(range))
+        }
+    }
 
     /** Что считается по точкам кадра: зебра, false color, пикинг. */
     val needsRaster: Boolean get() = zebra != Zebra.off || falseColor || peaking != Peaking.off
@@ -74,7 +91,7 @@ data class MonitorAssist(
             MonitorTool.center -> flag(value)?.let { copy(center = it) }
             MonitorTool.frameMarker -> FrameMarker.entries.firstOrNull { it.value == value }?.let { copy(frameMarker = it) }
             MonitorTool.safeZone -> SafeZone.entries.firstOrNull { it.value == value }?.let { copy(safeZone = it) }
-            MonitorTool.overlay -> Overlay.entries.firstOrNull { it.value == value }?.let { copy(overlay = it) }
+            MonitorTool.overlay -> Overlay.of(value)?.let { copy(overlay = it) }
         } ?: return null
         return if (value != "off") next.copy(lastOn = lastOn + (tool.name to value)) else next
     }
@@ -90,8 +107,21 @@ data class MonitorAssist(
             return with(tool, options[(i + 1) % options.size]) ?: this
         }
         if (value(tool) != "off") return with(tool, "off") ?: this
-        val remembered = lastOn[tool.name]?.takeIf { it in options }
+        val remembered = lastOn[tool.name]?.takeIf { accepts(tool, it) && it != "off" }
         return with(tool, remembered ?: options[1]) ?: this
+    }
+
+    /**
+     * Соседнее значение — стрелки в меню «Монитор»; null — дальше некуда. У наложения между ступенями (40 % с ползунка) —
+     * ближайшая ступень в эту сторону.
+     */
+    fun stepped(tool: MonitorTool, offset: Int): String? {
+        val options = tool.options.map { it.first }
+        val i = options.indexOf(value(tool))
+        if (i >= 0) return options[(i + offset).coerceIn(0, options.size - 1)]
+        val percent = overlay.percent?.takeIf { tool == MonitorTool.overlay } ?: return null
+        val steps = options.mapNotNull { Overlay.of(it)?.percent }
+        return if (offset > 0) steps.firstOrNull { it > percent }?.toString() else steps.lastOrNull { it < percent }?.toString() ?: "off"
     }
 
     /** Всё выключено; запомненные значения остаются. */
@@ -102,10 +132,10 @@ data class MonitorAssist(
     /** Горит ли плитка инструмента: включён. Цвет пикинга «выкл» не бывает — он горит вместе с пикингом. */
     fun isOn(tool: MonitorTool): Boolean = if (tool == MonitorTool.peakingColor) peaking != Peaking.off else value(tool) != "off"
 
-    /** Подпись значения на плитке: «95 %», «Выкл», «Красный». */
+    /** Подпись значения на плитке: «95 %», «Выкл», «Красный»; у наложения с ползунка — «40 %». */
     fun label(tool: MonitorTool): String {
         val v = value(tool)
-        return tool.options.firstOrNull { it.first == v }?.second ?: v
+        return tool.options.firstOrNull { it.first == v }?.second ?: if (tool == MonitorTool.overlay) "$v %" else v
     }
 
     /** Как хранится в настройках — тот же JSON, что у программы для Mac. */
@@ -124,6 +154,10 @@ data class MonitorAssist(
 
     companion object {
         val none = MonitorAssist()
+
+        /** Такое значение у инструмента бывает: из списка, а у наложения — любые проценты 5–100. */
+        fun accepts(tool: MonitorTool, value: String): Boolean =
+            if (tool == MonitorTool.overlay) Overlay.of(value) != null else tool.options.any { it.first == value }
 
         private fun flag(value: String): Boolean? = when (value) {
             "on", "true", "1" -> true
@@ -166,7 +200,7 @@ enum class MonitorTool(val title: String, val options: List<Pair<String, String>
         "Рамка другого формата: что войдёт в вертикальное видео (9:16), пост (4:5, 1:1) или кино (2.39:1)."),
     safeZone("Безоп. зона", listOf("off" to "Выкл", "90" to "90 %", "80" to "80 %"),
         "Безопасная зона: 90 % или 80 % кадра (или рамки) — внутри неё надписи не обрежутся."),
-    overlay("Наложение", listOf("off" to "Выкл", "25" to "25 %", "50" to "50 %", "75" to "75 %"),
-        "Эталонный кадр полупрозрачно поверх живого — повторить композицию. Эталон — текущий кадр («Новый кадр») " +
-            "или снимок из галереи («Наложить на кадр»)."),
+    overlay("Наложение", listOf("off" to "Выкл", "25" to "25 %", "50" to "50 %", "75" to "75 %", "100" to "100 %"),
+        "Эталонный кадр поверх живого — повторить сцену. Эталон — текущий кадр, картинка из файла или снимок " +
+            "из галереи; прозрачность и «спрятать» — на панели наложения."),
 }

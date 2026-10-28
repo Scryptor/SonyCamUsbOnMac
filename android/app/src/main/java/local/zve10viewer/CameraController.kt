@@ -17,12 +17,14 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.net.Uri
 import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.provider.OpenableColumns
 import android.util.Log
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -283,6 +285,16 @@ class CameraController(private val context: Context, private val scope: Coroutin
 
     class Reference(val image: ImageBitmap, val source: String)
 
+    /**
+     * Наложение спрятано касанием миниатюры на панели наложения: эталон не рисуется, а наложение остаётся включённым. Не
+     * настройка — после включения наложения и нового эталона эталон снова виден.
+     */
+    var overlayHidden by mutableStateOf(false)
+        private set
+    /** Где панель наложения: доли свободного места; null — на месте по умолчанию, справа вверху. */
+    var overlayPlacement by mutableStateOf(prefs.overlayPlacement)
+        private set
+
     /** Команды 0x9207, которые знает камера на связи: по ним видно, есть ли фокус касанием, зум, Near/Far. */
     var controlCodes by mutableStateOf<Set<Int>>(emptySet())
         private set
@@ -453,7 +465,9 @@ class CameraController(private val context: Context, private val scope: Coroutin
                           /** Эталон для наложения — текущий кадр. */
                           val reference: Boolean = false,
                           /** Эталон — снимок с этим местом в ленте. */
-                          val shot: Int? = null) : DebugCommand()
+                          val shot: Int? = null,
+                          /** Как касание миниатюры эталона: включить наложение, спрятать или показать эталон. */
+                          val overlayToggle: Boolean = false) : DebugCommand()
     }
 
     private val debugCommandFlow = MutableSharedFlow<DebugCommand>(extraBufferCapacity = 8)
@@ -915,6 +929,8 @@ class CameraController(private val context: Context, private val scope: Coroutin
     fun assistOff() = saveAssist(assist.allOff())
 
     private fun saveAssist(next: MonitorAssist) {
+        // включили или выключили наложение — «спрятано» больше не действует
+        if ((next.overlay == MonitorAssist.Overlay.off) != (assist.overlay == MonitorAssist.Overlay.off)) overlayHidden = false
         assist = next
         assistForFrames = next
         prefs.monitorAssist = next.toJson()
@@ -1110,6 +1126,51 @@ class CameraController(private val context: Context, private val scope: Coroutin
             }
             showStatus("Эталон для наложения — ${file.name}")
         }
+    }
+
+    /** Эталон — картинка из файла (системный выбор файла): уменьшенная до 2048 точек с учётом поворота из EXIF. */
+    fun takeReference(uri: Uri) {
+        scope.launch {
+            val image = withContext(Dispatchers.IO) { saver.decode(uri, REFERENCE_SIDE, hardware = false) }
+            if (image == null) {
+                showStatus("Эта картинка не открылась как эталон")
+                return@launch
+            }
+            val name = withContext(Dispatchers.IO) {
+                runCatching {
+                    context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                        if (cursor.moveToFirst()) cursor.getString(0) else null
+                    }
+                }.getOrNull()
+            } ?: "картинка"
+            reference = Reference(image.asImageBitmap(), name)
+            prefs.referenceSource = name
+            withContext(Dispatchers.IO) {
+                runCatching { referenceFile.outputStream().use { image.compress(Bitmap.CompressFormat.JPEG, 90, it) } }
+            }
+            showStatus("Эталон для наложения — $name")
+        }
+    }
+
+    /** Касание миниатюры эталона: наложение выключено — включить, иначе спрятать или показать эталон. */
+    fun toggleOverlayVisible() {
+        if (assist.overlay == MonitorAssist.Overlay.off) toggleAssist(MonitorTool.overlay) else overlayHidden = !overlayHidden
+    }
+
+    /** Взяли новый эталон (кадр, файл, снимок из галереи) — его и показать: наложение включается, спрятанное — видно. */
+    fun showOverlay() {
+        if (assist.overlay == MonitorAssist.Overlay.off) toggleAssist(MonitorTool.overlay)
+        overlayHidden = false
+    }
+
+    /** Ползунок на панели наложения: непрозрачность 0…1, с шагом 5 %. */
+    fun setOverlayOpacity(opacity: Float) {
+        setAssist(MonitorTool.overlay, MonitorAssist.Overlay.steps(opacity).value)
+    }
+
+    fun placeOverlay(placement: FloatingPlacement) {
+        overlayPlacement = placement
+        prefs.overlayPlacement = placement
     }
 
     fun toggleHistogram() {

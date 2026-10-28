@@ -362,6 +362,14 @@ final class AutomationServer {
         case let .referenceFromShot(index):
             guard controller.shots.indices.contains(index) else { return "no shot \(index)" }
             controller.takeReference(from: controller.shots[index])
+        case let .referenceFromFile(path):
+            let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+            guard FileManager.default.fileExists(atPath: url.path) else { return "no file \(url.path)" }
+            controller.takeReference(fromFile: url)
+        case .toggleOverlay:
+            screen.toggleOverlayVisible()
+        case let .moveOverlayPanel(x, y):
+            screen.placeOverlay(FloatingPlacement(x: min(max(x, 0), 1), y: min(max(y, 0), 1)))
         case .toggleTouchFocus:
             screen.toggleTouchFocus()
         case let .touchFocus(x, y):
@@ -514,6 +522,10 @@ final class AutomationServer {
             "on": screen.waveformOn,
             "mode": screen.waveformMode.rawValue,
             "position": screen.waveformPlacement.map { ["x": $0.x, "y": $0.y] } ?? NSNull(),
+        ] as [String: Any]
+        ui["overlay"] = [
+            "hidden": screen.overlayHidden,
+            "position": screen.overlayPlacement.map { ["x": $0.x, "y": $0.y] } ?? NSNull(),
         ] as [String: Any]
         ui["presetsWindow"] = screen.presetsWindowOpen ? ["selected": screen.presetsSelected ?? NSNull()] as [String: Any] : NSNull()
         var result: [String: Any] = [

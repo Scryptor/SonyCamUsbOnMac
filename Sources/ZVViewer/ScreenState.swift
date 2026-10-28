@@ -65,6 +65,12 @@ final class ScreenState {
     private(set) var waveformMode: Waveform.Mode
     private(set) var waveformPlacement: FloatingPlacement?
 
+    /// Наложение спрятано щелчком по миниатюре на панели наложения (или клавишей O): эталон не рисуется, а наложение
+    /// остаётся включённым. Не настройка — после включения наложения и нового эталона эталон снова виден.
+    private(set) var overlayHidden = false
+    /// Где панель наложения: доли свободного места; nil — на месте по умолчанию, справа вверху.
+    private(set) var overlayPlacement: FloatingPlacement?
+
     /// Где правая колонка кнопок (зум, режим, запись): гистограмма и волновая форма на неё не ложатся — встают левее.
     /// Колонку спрятали вместе с элементами — место остаётся прежним: панели не прыгают туда и обратно.
     var rightColumnRect: CGRect?
@@ -184,9 +190,28 @@ final class ScreenState {
 
     /// Соседнее значение выбранного инструмента — стрелки и колесо в меню «Монитор».
     func stepAssist(_ offset: Int) {
-        let options = assistSelected.options.map(\.value)
-        guard let i = options.firstIndex(of: assist.value(assistSelected)) else { return }
-        setAssist(assistSelected, options[min(max(i + offset, 0), options.count - 1)])
+        if let value = assist.stepped(assistSelected, by: offset) { setAssist(assistSelected, value) }
+    }
+
+    /// Клавиша O и щелчок по миниатюре эталона: наложение выключено — включить, иначе спрятать или показать эталон.
+    func toggleOverlayVisible() {
+        if assist.overlay == .off { toggleAssist(.overlay) } else { overlayHidden.toggle() }
+    }
+
+    /// Взяли новый эталон (кадр, файл, снимок из галереи) — его и показать: наложение включается, спрятанное — видно.
+    func showOverlay() {
+        if assist.overlay == .off { toggleAssist(.overlay) }
+        overlayHidden = false
+    }
+
+    /// Ползунок на панели наложения: непрозрачность 0…1, с шагом 5 %.
+    func setOverlayOpacity(_ opacity: Double) {
+        setAssist(.overlay, MonitorAssist.Overlay.steps(opacity).rawValue)
+    }
+
+    func placeOverlay(_ placement: FloatingPlacement) {
+        overlayPlacement = placement
+        if let data = try? JSONEncoder().encode(placement) { defaults.set(data, forKey: "overlayPlacement") }
     }
 
     func turnOffAssist() {
@@ -196,6 +221,8 @@ final class ScreenState {
     }
 
     private func saveAssist(_ next: MonitorAssist) {
+        // включили или выключили наложение — «спрятано» больше не действует
+        if (next.overlay == .off) != (assist.overlay == .off) { overlayHidden = false }
         assist = next
         if let data = try? JSONEncoder().encode(next) { defaults.set(data, forKey: "monitorAssist") }
         pushToFrames()
@@ -306,6 +333,7 @@ final class ScreenState {
         touchFocusOn = defaults.bool(forKey: "touchFocusOn")
         waveformMode = defaults.string(forKey: "waveformMode").flatMap(Waveform.Mode.init(rawValue:)) ?? .luma
         waveformPlacement = defaults.data(forKey: "waveformPlacement").flatMap { try? JSONDecoder().decode(FloatingPlacement.self, from: $0) }
+        overlayPlacement = defaults.data(forKey: "overlayPlacement").flatMap { try? JSONDecoder().decode(FloatingPlacement.self, from: $0) }
     }
 
     func toggleFn() {

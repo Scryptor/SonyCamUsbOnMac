@@ -153,10 +153,10 @@ struct GalleryOverlay: View {
                     // эталон для наложения на живой кадр — повторить композицию
                     Button("Наложить на кадр") {
                         controller.takeReference(from: shots[index])
-                        if screen.assist.overlay == .off { screen.toggleAssist(.overlay) }
+                        screen.showOverlay()
                         screen.galleryShot = nil
                     }
-                    .help("Снимок полупрозрачно поверх живого кадра: повторить композицию. Прозрачность — в меню «Монитор»")
+                    .help("Снимок полупрозрачно поверх живого кадра: повторить сцену. Прозрачность и «спрятать» — на панели наложения")
                     Button("Показать в Finder") { NSWorkspace.shared.activateFileViewerSelecting(urls) }
                     Button("Открыть") { if let first = urls.first { NSWorkspace.shared.open(first) } }
                 }

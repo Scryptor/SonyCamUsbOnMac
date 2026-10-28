@@ -89,8 +89,12 @@ fun AssistMenu(controller: CameraController, screen: ScreenState) {
                         modifier = Modifier.background(PanelLight, RoundedCornerShape(9.dp))
                             .clickable(enabled = controller.frame != null) {
                                 controller.takeReferenceFromFrame()
-                                if (controller.assist.overlay == MonitorAssist.Overlay.off) controller.toggleAssist(MonitorTool.overlay)
+                                controller.showOverlay()
                             }
+                            .padding(horizontal = 14.dp, vertical = 8.dp))
+                    val pick = rememberReferencePicker(controller)
+                    Text("Из файла…", color = Color.White, fontSize = 16.sp,
+                        modifier = Modifier.background(PanelLight, RoundedCornerShape(9.dp)).clickable { pick() }
                             .padding(horizontal = 14.dp, vertical = 8.dp))
                 }
             }

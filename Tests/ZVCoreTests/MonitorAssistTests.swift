@@ -67,7 +67,41 @@ import Testing
     assist.toggle(.overlay)
     #expect(assist.overlay == .off)
     assist.toggle(.overlay)
-    #expect(assist.overlay == .p50)
+    #expect(assist.overlay.percent == 50)
+}
+
+@Test func overlayOpacityIsAnyPercentFrom5To100() throws {
+    var assist = MonitorAssist()
+    let took = assist.set(.overlay, "40")
+    #expect(took)
+    #expect(assist.overlay.opacity == 0.4)
+    #expect(assist.label(.overlay) == "40 %")
+    let zero = assist.set(.overlay, "0"), over = assist.set(.overlay, "105"), word = assist.set(.overlay, "half")
+    #expect(!zero && !over && !word)
+    #expect(assist.overlay.percent == 40)
+    // ползунок — шагом 5 %, не меньше 5
+    #expect(MonitorAssist.Overlay.steps(0.43).percent == 45)
+    #expect(MonitorAssist.Overlay.steps(0).percent == 5)
+    #expect(MonitorAssist.Overlay.steps(1).percent == 100)
+    // повторное касание плитки возвращает 40 %, а не первую ступень
+    assist.toggle(.overlay)
+    #expect(assist.overlay == .off)
+    assist.toggle(.overlay)
+    #expect(assist.overlay.percent == 40)
+    // стрелки в меню — к соседней ступени
+    #expect(assist.stepped(.overlay, by: 1) == "50")
+    #expect(assist.stepped(.overlay, by: -1) == "25")
+    assist.set(.overlay, "10")
+    #expect(assist.stepped(.overlay, by: -1) == "off")
+    assist.set(.overlay, "100")
+    #expect(assist.stepped(.overlay, by: 1) == "100")
+    // старые настройки читаются как раньше, битые — выключено
+    let old = try JSONDecoder().decode(MonitorAssist.self, from: Data(#"{"overlay":"25","zebra":"95"}"#.utf8))
+    #expect(old.overlay.percent == 25 && old.zebra == .above95)
+    let broken = try JSONDecoder().decode(MonitorAssist.self, from: Data(#"{"overlay":"7%"}"#.utf8))
+    #expect(broken.overlay == .off)
+    let saved = try JSONDecoder().decode(MonitorAssist.self, from: JSONEncoder().encode(assist))
+    #expect(saved.overlay.percent == 100)
 }
 
 @Test func monitorAssistTurnsEverythingOffButKeepsMemory() {

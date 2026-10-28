@@ -50,7 +50,8 @@ class MainActivity : ComponentActivity() {
      * [--ez bicubic false]`; `… -a local.zve10viewer.DEBUG_GALLERY --ei index 2` (−1 — закрыть); монитор —
      * `… -a local.zve10viewer.DEBUG_ASSIST --es tool zebra --es value 95` (без value — вкл/выкл), `--ez off true` — всё
      * выключить, `--ez menu true|false [--es tool peaking]` — меню, `--es waveform luma|parade|off` — волновая форма,
-     * `--ez reference true` — эталон из текущего кадра, `--ei shot 0` — из снимка ленты. Растр — в logcat с тегом ZVAssist.
+     * `--ez reference true` — эталон из текущего кадра, `--ei shot 0` — из снимка ленты, `--ez overlayToggle true` — как
+     * касание миниатюры эталона (включить наложение, спрятать или показать эталон). Растр — в logcat с тегом ZVAssist.
      */
     private val debugReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -65,7 +66,8 @@ class MainActivity : ComponentActivity() {
                     intent.getStringExtra("tool"), intent.getStringExtra("value"), intent.getBooleanExtra("off", false),
                     if (intent.hasExtra("menu")) intent.getBooleanExtra("menu", false) else null,
                     intent.getStringExtra("waveform"), intent.getBooleanExtra("reference", false),
-                    if (intent.hasExtra("shot")) intent.getIntExtra("shot", 0) else null))
+                    if (intent.hasExtra("shot")) intent.getIntExtra("shot", 0) else null,
+                    intent.getBooleanExtra("overlayToggle", false)))
             }
         }
     }

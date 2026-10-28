@@ -31,6 +31,13 @@ struct LiveScreen: View {
             if !menus, screen.touchFocusOn, let point = framePoint(location) { controller.touchFocus(at: point) }
         }
         .onContinuousHover { _ in screen.noteActivity() }
+        // картинку перетащили на окно — она эталон наложения
+        .dropDestination(for: URL.self) { urls, _ in
+            guard let url = urls.first(where: isImageFile) else { return false }
+            controller.takeReference(fromFile: url)
+            screen.showOverlay()
+            return true
+        }
         // подсказка о S&Q пропадает вместе с режимом (например, MODE на камере) — закрываем и её флаг
         .onChange(of: controller.shootingMode) { _, mode in
             if mode != .slowQuick, screen.pillInfo == .slowMotion { screen.pillInfo = nil }
@@ -86,6 +93,12 @@ struct LiveScreen: View {
             guard screen.galleryShot == nil else { return .ignored }
             screen.toggleAssistMenu()
             screen.noteActivity()
+            return .handled
+        }
+        // O — наложение: выключено — включить, иначе спрятать или показать эталон
+        .onKeyPress(characters: CharacterSet(charactersIn: "oOщЩ")) { _ in
+            guard screen.galleryShot == nil else { return .ignored }
+            screen.toggleOverlayVisible()
             return .handled
         }
         .onKeyPress(characters: CharacterSet(charactersIn: "zZяЯpPзЗcCсС")) { press in
@@ -166,6 +179,11 @@ struct LiveScreen: View {
             }
             if screen.waveformOn, let trace = controller.waveform, controller.review == nil, screen.galleryShot == nil {
                 FloatingWaveform(controller: controller, screen: screen, trace: trace, view: size)
+            }
+            // панель наложения — тоже не среди элементов: щелчок по миниатюре нужен и когда они спрятаны
+            if screen.assist.overlay != .off, let reference = controller.reference, controller.review == nil,
+               screen.galleryShot == nil {
+                FloatingOverlayPanel(controller: controller, screen: screen, reference: reference, view: size)
             }
             if showControls {
                 controls.transition(.opacity)
@@ -252,8 +270,8 @@ struct LiveScreen: View {
             let frameSize = CGSize(width: frame.width, height: frame.height)
             ZoomableVideo(screen: screen, frame: frame, size: size, dimmed: controller.linkIndicator.dimsPicture,
                           overlay: screen.assist.needsRaster ? controller.assistOverlay : nil, assistInput: controller.assistInput,
-                          reference: screen.assist.overlay.opacity.flatMap { _ in controller.reference?.image },
-                          referenceOpacity: screen.assist.overlay.opacity ?? 0)
+                          reference: screen.overlayHidden ? nil : screen.assist.overlay.opacity.flatMap { _ in controller.reference?.image },
+                          referenceOpacity: screen.overlayHidden ? 0 : screen.assist.overlay.opacity ?? 0)
                 .onAppear { zoomScroll.viewSize = size }
                 .onChange(of: size) { _, size in zoomScroll.viewSize = size }
             if screen.assist.hasMarkers {

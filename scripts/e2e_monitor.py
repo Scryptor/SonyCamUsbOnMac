@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """e2e_monitor.py — инструменты монитора в программе для Mac против поддельной камеры: зебра, false color, пикинг,
 маркеры, меню «Монитор», растр при цифровом увеличении, частота кадров со всем включённым, волновая форма (яркость и
-RGB-парад) и наложение эталонного кадра.
+RGB-парад) и наложение эталонного кадра: непрозрачность, «спрятать», эталон из файла, панель наложения.
 
 Запускает scripts/fake_camera.py на 127.0.0.1:15741 и программу с API автоматизации (адрес камеры подменён), проверяет
 /state и снимает скриншоты в --out. Эталоном для наложения подкладывает другой план той же сцены
@@ -288,6 +288,36 @@ def run(out):
     act("openAssist", name="overlay")
     shot(out, "14-overlay-menu")
     act("closeAssist")
+
+    # панель наложения: любая непрозрачность, «спрятать» (клавиша O, миниатюра), эталон из файла, место панели
+    act("setAssist", name="overlay", value="40")
+    s = wait(lambda s: values(s)["overlay"] == "40")
+    check("непрозрачность с ползунка — 40 %", values(s)["overlay"] == "40", values(s))
+    act("toggleOverlay")
+    s = wait(lambda s: s["ui"]["overlay"]["hidden"])
+    check("O — эталон спрятан, наложение включено", s["ui"]["overlay"]["hidden"] and values(s)["overlay"] == "40", s["ui"]["overlay"])
+    shot(out, "15-overlay-hidden")
+    act("toggleOverlay")
+    s = wait(lambda s: not s["ui"]["overlay"]["hidden"])
+    check("O ещё раз — эталон снова виден", not s["ui"]["overlay"]["hidden"], s["ui"]["overlay"])
+    picture = os.path.join(ROOT, "scripts/assets/viewfinder-pan.jpg")
+    act("referenceFromFile", path=picture)
+    s = wait(lambda s: (s.get("reference") or {}).get("source") == "viewfinder-pan.jpg")
+    check("эталон из файла — подпись по имени файла", (s.get("reference") or {}).get("source") == "viewfinder-pan.jpg",
+          s.get("reference"))
+    r = act("referenceFromFile", path="/nonexistent/picture.png")
+    check("файла нет — 409", r.get("status") == 409, r)
+    act("moveOverlayPanel", x=0, y=0.5)
+    s = wait(lambda s: s["ui"]["overlay"]["position"] == {"x": 0, "y": 0.5})
+    check("панель наложения переставили", s["ui"]["overlay"]["position"] == {"x": 0, "y": 0.5}, s["ui"]["overlay"])
+    shot(out, "16-overlay-file-panel")
+    act("toggleOverlay")
+    act("setAssist", name="overlay", value="off")
+    s = wait(lambda s: values(s)["overlay"] == "off")
+    check("наложение выключено — «спрятано» сброшено", values(s)["overlay"] == "off" and not s["ui"]["overlay"]["hidden"], values(s))
+    act("toggleOverlay")
+    s = wait(lambda s: values(s)["overlay"] == "40")
+    check("O при выключенном — включает с прошлыми 40 %", values(s)["overlay"] == "40" and not s["ui"]["overlay"]["hidden"], values(s))
     act("setAssist", name="overlay", value="off")
     s = wait(lambda s: values(s)["overlay"] == "off")
     check("наложение выключено", values(s)["overlay"] == "off", values(s))

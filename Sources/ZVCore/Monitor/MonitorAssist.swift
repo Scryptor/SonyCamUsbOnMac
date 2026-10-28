@@ -51,18 +51,35 @@ public struct MonitorAssist: Codable, Equatable, Sendable {
         }
     }
 
-    /// Наложение кадра: эталонный кадр поверх живого с этой непрозрачностью — повторить композицию.
-    public enum Overlay: String, Codable, CaseIterable, Sendable {
-        case off, p25 = "25", p50 = "50", p75 = "75"
+    /// Наложение кадра: эталонный кадр поверх живого с этой непрозрачностью (5–100 %) — повторить сцену. В настройках и
+    /// API — строкой: «off» или проценты, «40»; прежние «25», «50», «75» читаются как раньше.
+    public struct Overlay: RawRepresentable, Codable, Equatable, Sendable {
+        /// Непрозрачность в процентах; nil — выключено.
+        public let percent: Int?
 
-        public var opacity: Double? {
-            switch self {
-            case .off: return nil
-            case .p25: return 0.25
-            case .p50: return 0.5
-            case .p75: return 0.75
+        public static let off = Overlay(percent: nil)
+        public static let range = 5...100
+
+        public init(percent: Int?) {
+            self.percent = percent.map { min(max($0, Self.range.lowerBound), Self.range.upperBound) }
+        }
+
+        public init?(rawValue: String) {
+            if rawValue == "off" {
+                percent = nil
+            } else if let n = Int(rawValue), Self.range.contains(n) {
+                percent = n
+            } else {
+                return nil
             }
         }
+
+        public var rawValue: String { percent.map(String.init) ?? "off" }
+
+        public var opacity: Double? { percent.map { Double($0) / 100 } }
+
+        /// С ползунка (0…1) — с шагом 5 %, не меньше 5.
+        public static func steps(_ opacity: Double) -> Overlay { Overlay(percent: Int((opacity * 20).rounded()) * 5) }
     }
 
     public var zebra = Zebra.off
@@ -150,8 +167,24 @@ public struct MonitorAssist: Codable, Equatable, Sendable {
         if value(tool) != "off" {
             set(tool, "off")
         } else {
-            set(tool, lastOn[tool.rawValue].flatMap { options.contains($0) ? $0 : nil } ?? options[1])
+            set(tool, lastOn[tool.rawValue].flatMap { Self.accepts(tool, $0) && $0 != "off" ? $0 : nil } ?? options[1])
         }
+    }
+
+    /// Такое значение у инструмента бывает: из списка, а у наложения — любые проценты 5–100.
+    public static func accepts(_ tool: MonitorTool, _ value: String) -> Bool {
+        tool == .overlay ? Overlay(rawValue: value) != nil : tool.options.contains { $0.value == value }
+    }
+
+    /// Соседнее значение — стрелки и колесо в меню «Монитор»; nil — дальше некуда. У наложения между ступенями (40 % с
+    /// ползунка) — ближайшая ступень в эту сторону.
+    public func stepped(_ tool: MonitorTool, by offset: Int) -> String? {
+        let options = tool.options.map(\.value)
+        if let i = options.firstIndex(of: value(tool)) { return options[min(max(i + offset, 0), options.count - 1)] }
+        guard tool == .overlay, let percent = overlay.percent else { return nil }
+        let steps = options.compactMap { Overlay(rawValue: $0)?.percent }
+        if offset > 0 { return steps.first { $0 > percent }.map(String.init) }
+        return steps.last { $0 < percent }.map(String.init) ?? "off"
     }
 
     /// Всё выключить; запомненные значения остаются.
@@ -166,10 +199,10 @@ public struct MonitorAssist: Codable, Equatable, Sendable {
         tool == .peakingColor ? peaking != .off : value(tool) != "off"
     }
 
-    /// Подпись значения на плитке: «95 %», «Выкл», «Красный».
+    /// Подпись значения на плитке: «95 %», «Выкл», «Красный»; у наложения с ползунка — «40 %».
     public func label(_ tool: MonitorTool) -> String {
         let v = value(tool)
-        return tool.options.first { $0.value == v }?.label ?? v
+        return tool.options.first { $0.value == v }?.label ?? (tool == .overlay ? "\(v) %" : v)
     }
 
     private static func flag(_ value: String) -> Bool? {
@@ -215,7 +248,7 @@ public enum MonitorTool: String, CaseIterable, Sendable {
         case .frameMarker:
             return [o("off", "Выкл"), o("9:16", "9:16"), o("4:5", "4:5"), o("1:1", "1:1"), o("4:3", "4:3"), o("2.39:1", "2.39:1")]
         case .safeZone: return [o("off", "Выкл"), o("90", "90 %"), o("80", "80 %")]
-        case .overlay: return [o("off", "Выкл"), o("25", "25 %"), o("50", "50 %"), o("75", "75 %")]
+        case .overlay: return [o("off", "Выкл"), o("25", "25 %"), o("50", "50 %"), o("75", "75 %"), o("100", "100 %")]
         }
     }
 
@@ -234,8 +267,8 @@ public enum MonitorTool: String, CaseIterable, Sendable {
         case .frameMarker: return "Рамка другого формата: что войдёт в вертикальное видео (9:16), пост (4:5, 1:1) или кино (2.39:1)."
         case .safeZone: return "Безопасная зона: 90 % или 80 % кадра (или рамки) — внутри неё надписи не обрежутся."
         case .overlay:
-            return "Эталонный кадр полупрозрачно поверх живого — повторить композицию. Эталон — текущий кадр («Новый кадр») "
-                + "или снимок из галереи («Наложить на кадр»)."
+            return "Эталонный кадр поверх живого — повторить сцену. Эталон — текущий кадр, картинка из файла или снимок "
+                + "из галереи; прозрачность и «спрятать» — на панели наложения."
         }
     }
 }

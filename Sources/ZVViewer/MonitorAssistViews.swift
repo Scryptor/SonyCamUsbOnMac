@@ -232,10 +232,12 @@ struct AssistMenu: View {
                             .foregroundStyle(.secondary)
                         Button("Новый кадр") {
                             controller.takeReferenceFromFrame()
-                            if screen.assist.overlay == .off { screen.toggleAssist(.overlay) }
+                            screen.showOverlay()
                         }
                         .disabled(controller.frame == nil)
                         .help("Эталон — текущий кадр. Снимок из галереи — кнопкой «Наложить на кадр» в галерее")
+                        Button("Из файла…") { chooseReferenceFile(controller: controller, screen: screen) }
+                            .help("Эталон — картинка из файла: JPEG, PNG, HEIC… Её можно и просто перетащить на окно")
                     }
                 }
                 Text(tool.help)

@@ -80,6 +80,20 @@ class Prefs(context: Context) {
         get() = runCatching { Waveform.Mode.valueOf(prefs.getString("waveformMode", "")!!) }.getOrDefault(Waveform.Mode.luma)
         set(value) = prefs.edit().putString("waveformMode", value.name).apply()
 
+    /** Где панель наложения — как у гистограммы; null — на месте по умолчанию, справа вверху. */
+    var overlayPlacement: FloatingPlacement?
+        get() = if (prefs.contains("overlayX") && prefs.contains("overlayY")) {
+            FloatingPlacement.restored(prefs.getFloat("overlayX", 0f), prefs.getFloat("overlayY", 0f))
+        } else {
+            null
+        }
+        set(value) {
+            val edit = prefs.edit()
+            if (value == null) edit.remove("overlayX").remove("overlayY")
+            else edit.putFloat("overlayX", value.x.toFloat()).putFloat("overlayY", value.y.toFloat())
+            edit.apply()
+        }
+
     /** Где волновая форма — как у гистограммы; null — на месте по умолчанию, справа внизу. */
     var waveformPlacement: FloatingPlacement?
         get() = if (prefs.contains("waveformX") && prefs.contains("waveformY")) {

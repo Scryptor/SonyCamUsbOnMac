@@ -1,7 +1,5 @@
 package local.zve10viewer.ui
 
-import local.zve10viewer.monitor.MonitorAssist
-import local.zve10viewer.monitor.MonitorTool
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.BitmapRegionDecoder
@@ -331,10 +329,10 @@ private fun GalleryTopBar(controller: CameraController, shot: Shot, index: Int, 
         Text("${index + 1} из $count", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold,
             style = TextStyle(fontFeatureSettings = "tnum"), modifier = Modifier.align(Alignment.Center))
         Row(Modifier.align(Alignment.CenterEnd), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            // эталон для наложения на живой кадр — повторить композицию; прозрачность — в меню «Монитор»
+            // эталон для наложения на живой кадр — повторить сцену; прозрачность и «спрятать» — на панели наложения
             if (shot.jpeg != null) GalleryButton("Наложить на кадр") {
                 controller.takeReference(shot)
-                if (controller.assist.overlay == MonitorAssist.Overlay.off) controller.toggleAssist(MonitorTool.overlay)
+                controller.showOverlay()
                 onClose()
             }
             GalleryButton("Открыть") { controller.openExternally(shot.jpeg ?: shot.files.first()) }

@@ -2477,6 +2477,19 @@ final class CameraController {
         }
     }
 
+    /// Эталон — картинка из файла (окно выбора или перетащили на окно): любой формат, что понимает macOS, уменьшенная до
+    /// 2048 точек с учётом поворота из EXIF и сохранённая как эталон — исходный файл потом не нужен.
+    func takeReference(fromFile url: URL) {
+        Task { [weak self] in
+            guard let made = await ReferenceFrame.make(from: [url]) else {
+                self?.showStatus("«\(url.lastPathComponent)» не открылся как картинка")
+                return
+            }
+            self?.reference = made
+            self?.showStatus("Эталон для наложения — \(made.source)")
+        }
+    }
+
     private static let clock: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "HH:mm:ss"

@@ -66,7 +66,31 @@ class MonitorAssistTest {
         assertEquals(0.5f, assist.overlay.opacity)
         assertEquals("50 %", assist.label(MonitorTool.overlay))
         assertEquals(MonitorAssist.Overlay.off, assist.toggled(MonitorTool.overlay).overlay)
-        assertEquals(MonitorAssist.Overlay.p50, assist.toggled(MonitorTool.overlay).toggled(MonitorTool.overlay).overlay)
+        assertEquals(50, assist.toggled(MonitorTool.overlay).toggled(MonitorTool.overlay).overlay.percent)
+        assertEquals(assist, MonitorAssist.fromJson(assist.toJson()))
+    }
+
+    @Test fun overlayOpacityIsAnyPercentFrom5To100() {
+        val assist = MonitorAssist().with(MonitorTool.overlay, "40")!!
+        assertEquals(0.4f, assist.overlay.opacity!!, 1e-6f)
+        assertEquals("40 %", assist.label(MonitorTool.overlay))
+        assertNull(assist.with(MonitorTool.overlay, "0"))
+        assertNull(assist.with(MonitorTool.overlay, "105"))
+        assertNull(assist.with(MonitorTool.overlay, "half"))
+        // ползунок — шагом 5 %, не меньше 5
+        assertEquals(45, MonitorAssist.Overlay.steps(0.43f).percent)
+        assertEquals(5, MonitorAssist.Overlay.steps(0f).percent)
+        assertEquals(100, MonitorAssist.Overlay.steps(1f).percent)
+        // повторное касание плитки возвращает 40 %, а не первую ступень
+        assertEquals(40, assist.toggled(MonitorTool.overlay).toggled(MonitorTool.overlay).overlay.percent)
+        // стрелки — к соседней ступени
+        assertEquals("50", assist.stepped(MonitorTool.overlay, 1))
+        assertEquals("25", assist.stepped(MonitorTool.overlay, -1))
+        assertEquals("off", assist.with(MonitorTool.overlay, "10")!!.stepped(MonitorTool.overlay, -1))
+        assertEquals("100", assist.with(MonitorTool.overlay, "100")!!.stepped(MonitorTool.overlay, 1))
+        // старые настройки читаются как раньше, битые — выключено; как у программы для Mac
+        assertEquals(25, MonitorAssist.fromJson("""{"overlay":"25","zebra":"95"}""").overlay.percent)
+        assertEquals(MonitorAssist.Overlay.off, MonitorAssist.fromJson("""{"overlay":"7%"}""").overlay)
         assertEquals(assist, MonitorAssist.fromJson(assist.toJson()))
     }
 

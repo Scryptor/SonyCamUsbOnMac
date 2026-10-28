@@ -90,9 +90,14 @@ public enum AutomationAction: Equatable, Sendable, Decodable {
     case toggleWaveform
     case waveformMode(String)
     case moveWaveform(x: Double, y: Double)
-    /// Эталон для наложения: текущий кадр или снимок сеанса (номер в `shots`).
+    /// Эталон для наложения: текущий кадр, снимок сеанса (номер в `shots`) или картинка из файла (путь).
     case referenceFromFrame
     case referenceFromShot(Int)
+    case referenceFromFile(String)
+    /// Наложение: как клавиша O или щелчок по миниатюре — выключено — включить, иначе спрятать или показать; панель
+    /// наложения — куда поставить (доли свободного места).
+    case toggleOverlay
+    case moveOverlayPanel(x: Double, y: Double)
     /// Фокус касанием: включить или выключить режим; фокус в точку кадра (доли) — как щелчок по кадру; снять слежение.
     case toggleTouchFocus
     case touchFocus(x: Double, y: Double)
@@ -105,6 +110,7 @@ public enum AutomationAction: Equatable, Sendable, Decodable {
 
     private enum Keys: String, CodingKey {
         case action, key, setting, offset, value, group, name, index, confirm, mode, x, y, factor, included, from, to, id, linked, onto
+        case path
     }
 
     public init(from decoder: Decoder) throws {
@@ -189,6 +195,9 @@ public enum AutomationAction: Equatable, Sendable, Decodable {
         case "moveWaveform": self = .moveWaveform(x: try c.decode(Double.self, forKey: .x), y: try c.decode(Double.self, forKey: .y))
         case "referenceFromFrame": self = .referenceFromFrame
         case "referenceFromShot": self = .referenceFromShot(try c.decodeIfPresent(Int.self, forKey: .index) ?? 0)
+        case "referenceFromFile": self = .referenceFromFile(try c.decode(String.self, forKey: .path))
+        case "toggleOverlay": self = .toggleOverlay
+        case "moveOverlayPanel": self = .moveOverlayPanel(x: try c.decode(Double.self, forKey: .x), y: try c.decode(Double.self, forKey: .y))
         case "toggleTouchFocus": self = .toggleTouchFocus
         case "touchFocus": self = .touchFocus(x: try c.decode(Double.self, forKey: .x), y: try c.decode(Double.self, forKey: .y))
         case "cancelTouch": self = .cancelTouch
