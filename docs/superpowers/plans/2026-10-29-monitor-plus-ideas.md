@@ -67,7 +67,8 @@ Compose, JUnit 4; Python 3 (стенд, numpy + Pillow для генератор
   - время 0/1/2/4/8 с (по умолчанию 2), тик 100 мс, кривая `3t² − 2t³`;
   - абсолютный — готово при ±0,5 % или тайм-аут через 2 с после конца;
   - шаги — `k₀ = 3,5`, `k ← 0,7k + 0,3·Δположения/Δшагов` при |шаг| ≥ 3 и ненулевом сдвиге;
-  - допуск 1, |команда| ≤ 7, но ≥ 1 при |e| > 1;
+  - допуск `max(1, k/2)`, |команда| ≤ 7, но ≥ 1 при |e| > `max(1, k/2)`; два шага ±1 подряд с разными знаками,
+    перескочившие цель, — тоже «у метки»;
   - «не двигает» — 3 команды подряд в одну сторону без сдвига;
   - тайм-аут через 3 с после конца;
   - свежее положение ждать ≤ 300 мс.
@@ -118,7 +119,8 @@ Create `scripts/assets/viewfinder-slog3.jpg`, `viewfinder-slog2.jpg`, `viewfinde
   иначе — прежний. У каждого набора — своё низкое качество и уровни зума. Наборы строятся лениво при первом
   выборе, как уровни зума сейчас.
 - [ ] **Физика фокуса** — флаги `--focus-gain G` (1,0), `--focus-step-ms T` (0), `--focus-deadband D` (0):
-  - команда Near/Far сдвигает `0xD24C` на `round(value·G)` в пределах 0…100;
+  - команда Near/Far сдвигает `0xD24C` на `value·G`, округлённое от нуля (1·3,5 → 4, −1·3,5 → −4), в пределах
+    0…100;
   - ответ приходит через T мс;
   - при |value| ≤ 3 и положении ближе D к краю, куда идёт шаг, положение не меняется.
 - [ ] **Неизвестные операции.** Операция, которой нет в списке операций отдаваемого DeviceInfo, получает ответ
@@ -189,19 +191,24 @@ object SonyReferenceTables {
   - значения — пары `0x.. Описание` после «Value Description» до следующего «Summary».
 
   Пишет оба файла (отсортировано, с шапкой «Создано scripts/sony_reference.py из Camera Control PTP 3 Reference, не
-  править руками»). В `values` — коды:
+  править руками»). Справочник не для распространения, поэтому в файлы идут только используемые факты:
+  - `propertyNames` — коды из `Tests/ZVCoreTests/Fixtures/sony_extdeviceinfo.bin` (93 свойства ZV-E10), у которых
+    есть раздел в справочнике, плюс `0xD0FA, 0xD0E1, 0xD0E9, 0xE042, 0xE043, 0xE086`;
+  - в `values` — коды:
   - `0x500E, 0x500B, 0xD201, 0x500A, 0xD22C, 0x5005`;
   - `0xD240, 0xD0FA, 0xD23F, 0xD241, 0xD242, 0xD203, 0xD211, 0xD253, 0xD252`;
   - `0xD0E1, 0xD0E9, 0xE086`.
 
-  Текст справочника лежит вне репозитория; путь передаётся аргументом.
+  Текст справочника лежит в `/Users/scrypto/dev/sonyZvE10Viewr/research/sony-reference/ptp3.txt` (не в git); путь
+  передаётся аргументом.
 - [ ] **Тесты (оба):**
   - `propertyNames[0xD0FA] == "Creative Look"`;
   - `valueName(0xD241, 0x0B) == "XAVC HS 4K"`;
   - `valueName(0xD0E1, 0x0303) == "S-Log3"`;
   - `valueName(0xD0E9, 0x0008) == "S-Gamut3.Cine"`;
   - `valueName(0xD253, 0x05) == "HEIF"`;
-  - `propertyNames.count >= 700`.
+  - в `propertyNames` нет кода, которого нет в списке выше (например, `0xD008` Focus Speed Range);
+  - `propertyNames.count` от 60 до 99.
 - [ ] **Прогон.** Запустить генератор, затем `swift test --filter SonyReferenceTables` и `./gradlew
   :app:testDebugUnitTest --tests '*SonyReferenceTablesTest'` — зелёные.
 - [ ] Commit `feat(core): Sony reference tables for property names and values`.
@@ -437,9 +444,13 @@ public struct FocusMarks: Equatable, Sendable {
     - `absoluteReachedWithinHalfPercent`: положение 65200 при цели 65535 после конца → `.finish(.reached)`;
     - `absoluteTimesOut`: при 4,1 с без достижения → `.finish(.timedOut)`.
   - **Шаги:**
-    - `stepsConverge` для g = 2; 3,5; 5: 10 → 90 за 2 с, тики 0,1 с → `.reached` до 5 с, |итог − 90| ≤ 1;
+    - `stepsConverge` для g = 2; 3,5; 5 (модель округляет `n·g` от нуля, как поддельная камера): 10 → 90 за 2 с,
+      тики 0,1 с → `.reached` до 5 с, |итог − 90| ≤ `max(1, g/2)` + 0,5;
+    - `stepsNoDither`: g = 4, цель между доступными положениями (старт 10, цель 52) → `.reached` не позже двух
+      команд ±1 после того, как цель перескочена, а не `.timedOut`;
+    - `stepsMarksSweep`: g = 3,5, все пары меток 5…95 шагом 10, время 2 с → ни одного `.timedOut`;
     - `stepsSignCloser`: 90 → 10 — все команды отрицательные;
-    - `stepsBounds`: |n| ≤ 7, при ошибке 1,5 — |n| ≥ 1;
+    - `stepsBounds`: |n| ≤ 7; при k = 3,5 и ошибке 1,5 команды нет (`wait`), при ошибке 2,5 — |n| ≥ 1;
     - `stepsGainAdapts`: g = 5, после пяти команд |n| ≥ 3 `gain` в 4,5…5,5;
     - `stepsStuck`: d = 5, цель 100 из 80 → `.stuck`;
     - `stepsTimeout`: g = 0,2, 0 → 100 за 1 с → `.timedOut` к 4,1 с.
@@ -475,8 +486,9 @@ public struct DisplayStrings: Equatable, Sendable {
 public struct LensInformation: Equatable, Sendable {
     public let pairs: [(position: Double, meters: Double)]               // по возрастанию положения
     public let absoluteScale: Bool                                       // max положения > 100
+    public let tableCount: Int                                           // больше 1 — расстояний не показываем
     public static func parse(_ data: Data) throws -> LensInformation
-    public func meters(atPosition p: Double) -> Double?                  // интерполяция; nil — пусто
+    public func meters(atPosition p: Double) -> Double?                  // интерполяция; nil — пусто или таблиц > 1
     public static func label(_ meters: Double) -> String                 // «0,35 м», «1,2 м», «12 м», «∞» (≥ 100)
 }
 // DeviceInfo: public let operations: Set<UInt16>; func supports(_ op: UInt16) -> Bool
@@ -500,6 +512,7 @@ public struct LensInformation: Equatable, Sendable {
   - **Объектив:**
     - `LensInformation.parse(lens_information.bin)` — 12 пар, `absoluteScale == true`;
     - `meters(atPosition: 5958) == 0,30`;
+    - набор с двумя таблицами: `tableCount == 2`, `meters(atPosition:)` → nil (расстояний нет);
     - между 0 и 5958 — интерполяция;
     - `label`: 0,35 → «0,35 м», 1,2 → «1,2 м», 12 → «12 м», 1 000 000 → «∞».
   - **Настройки:**
@@ -953,9 +966,12 @@ LUT тот же, что на Mac: кэш по ключу, свои файлы �
 
 - [ ] **Скрипт.**
   - Читает `automation.json`, `GET /state` (профиль `0xD23F` и режим) и запоминает их.
-  - Ставит PP8, PP7, PP10 действием записи настройки из `docs/automation-api.md`. Для каждого ждёт 2 с, берёт 20 раз
-    `GET /frame` и считает яркость (Pillow + numpy, веса Rec.709): доли 0,1 %, 50 %, 99,9 %.
-  - Возвращает исходный профиль и проверяет, что он вернулся.
+  - В видеорежиме, потом в фоторежиме ставит PP8, PP7, PP10 действием `request {setting: "pictureProfile"}`. Для
+    каждого ждёт 2 с, берёт 20 раз `GET /frame` и считает яркость (Pillow + numpy, веса Rec.709): доли 0,1 %, 50 %,
+    99,9 %.
+  - Гамма-помощь камеры по PTP не видна: в вывод скрипта и в `docs/protocol.md` пишется «гамма-помощь — в том
+    состоянии, в каком меню камеры (по PTP не видно)».
+  - Возвращает исходные профиль и режим и проверяет, что они вернулись.
   - Печатает таблицу.
 - [ ] **Запуск.** Если камера подключена к Mac (`/state` → `phase == "ready"` и модель камеры не поддельная), запустить
   `python3 scripts/check_log_preview.py`. Если камеры нет — шаг откладывается до R1, а LUT пока строится по
