@@ -165,52 +165,61 @@ Create `scripts/assets/viewfinder-slog3.jpg`, `viewfinder-slog2.jpg`, `viewfinde
 
 ## Task 3: F3. Таблицы из справочника Sony
 
-**Files:** Create `scripts/sony_reference.py`, `Sources/ZVCore/Sony/SonyReferenceTables.swift`,
-`android/app/src/main/java/local/zve10viewer/sony/SonyReferenceTables.kt`;
-Test `Tests/ZVCoreTests/SonyReferenceTablesTests.swift`, `android/app/src/test/java/local/zve10viewer/SonyReferenceTablesTest.kt`
+Таблицы — целиком (проект открытый, подписи дорабатывает сообщество): имена всех свойств справочника и все списки
+значений. Сам PDF Sony в репозиторий не кладём — в `docs/protocol.md` ссылка, откуда он скачивается, и команда сборки
+таблиц.
+
+**Files:** Create `scripts/sony_reference.py`; generated `sony_reference.json` в двух местах —
+`Sources/ZVCore/Sony/SonyReferenceData.swift` (JSON целиком в сырой многострочной строке `#"""…"""#`) и
+`android/app/src/main/resources/sony_reference.json` (Java-ресурс: попадает в APK и читается в JVM-тестах);
+hand-written загрузчики `Sources/ZVCore/Sony/SonyReferenceTables.swift`,
+`android/app/src/main/java/local/zve10viewer/sony/SonyReferenceTables.kt`; Modify `docs/protocol.md` (раздел «Другие
+камеры Sony»: откуда PDF — https://github.com/jakkuh/sony-alpha-python/blob/main/docs/Camera%20Control%20PTP%203%20Reference.pdf,
+`pdftotext -layout`, запуск генератора); Test `Tests/ZVCoreTests/SonyReferenceTablesTests.swift`,
+`android/app/src/test/java/local/zve10viewer/SonyReferenceTablesTest.kt`
 
 **Interfaces (Produces):**
 ```swift
-public enum SonyReferenceTables {
-    public static let propertyNames: [UInt16: String]               // все свойства справочника
-    public static let values: [UInt16: [Int64: String]]             // только перечисленные коды
+public enum SonyReferenceTables {                                     // JSON разбирается один раз, лениво
+    public static var propertyNames: [UInt16: String] { get }       // все свойства справочника
+    public static var values: [UInt16: [Int64: String]] { get }     // все списки значений
     public static func valueName(_ code: UInt16, _ value: Int64) -> String?
 }
 ```
 ```kotlin
-object SonyReferenceTables {
+object SonyReferenceTables {                                          // ресурс /sony_reference.json, лениво
     val propertyNames: Map<Int, String>
     val values: Map<Int, Map<Long, String>>
     fun valueName(code: Int, value: Long): String?
 }
 ```
 
+Формат JSON (ключи отсортированы, отступ 1 пробел, чтобы правки были видны в diff):
+`{"source": "Camera Control PTP 3 Reference", "properties": {"0xD0FA": {"name": "Creative Look", "values": {"0x0001":
+"ST(Standard)", …}}, …}}`.
+
 - [ ] **Скрипт.** `scripts/sony_reference.py <ptp3.txt>` разбирает разделы свойств текста `pdftotext -layout`:
   - строка `PropertyCode 1 2 UINT16 0x....`;
   - название — строка перед ближайшим выше «Summary»;
-  - значения — пары `0x.. Описание` после «Value Description» до следующего «Summary».
+  - значения — пары `0x.. Описание` после «Value Description» до следующего «Summary», двойные пробелы в описании
+    схлопываются.
 
-  Пишет оба файла (отсортировано, с шапкой «Создано scripts/sony_reference.py из Camera Control PTP 3 Reference, не
-  править руками»). Справочник не для распространения, поэтому в файлы идут только используемые факты:
-  - `propertyNames` — коды из `Tests/ZVCoreTests/Fixtures/sony_extdeviceinfo.bin` (93 свойства ZV-E10), у которых
-    есть раздел в справочнике, плюс `0xD0FA, 0xD0E1, 0xD0E9, 0xE042, 0xE043, 0xE086`;
-  - в `values` — коды:
-  - `0x500E, 0x500B, 0xD201, 0x500A, 0xD22C, 0x5005`;
-  - `0xD240, 0xD0FA, 0xD23F, 0xD241, 0xD242, 0xD203, 0xD211, 0xD253, 0xD252`;
-  - `0xD0E1, 0xD0E9, 0xE086`.
-
-  Текст справочника лежит в `/Users/scrypto/dev/sonyZvE10Viewr/research/sony-reference/ptp3.txt` (не в git); путь
-  передаётся аргументом.
+  Пишет JSON в оба места, Swift-файл с шапкой «Создано scripts/sony_reference.py из Camera Control PTP 3 Reference —
+  правьте через скрипт или JSON в обоих местах». Локальная копия текста — в
+  `/Users/scrypto/dev/sonyZvE10Viewr/research/sony-reference/ptp3.txt` (папка не в git); путь передаётся аргументом.
 - [ ] **Тесты (оба):**
   - `propertyNames[0xD0FA] == "Creative Look"`;
   - `valueName(0xD241, 0x0B) == "XAVC HS 4K"`;
   - `valueName(0xD0E1, 0x0303) == "S-Log3"`;
   - `valueName(0xD0E9, 0x0008) == "S-Gamut3.Cine"`;
   - `valueName(0xD253, 0x05) == "HEIF"`;
-  - в `propertyNames` нет кода, которого нет в списке выше (например, `0xD008` Focus Speed Range);
-  - `propertyNames.count` от 60 до 99.
+  - `propertyNames.count >= 700`, `values.count >= 500`.
+
+  Только Swift: `androidCopyMatches` — JSON из `SonyReferenceData` побайтно совпадает с
+  `android/app/src/main/resources/sony_reference.json` (путь от `#filePath`).
 - [ ] **Прогон.** Запустить генератор, затем `swift test --filter SonyReferenceTables` и `./gradlew
-  :app:testDebugUnitTest --tests '*SonyReferenceTablesTest'` — зелёные.
+  :app:testDebugUnitTest --tests '*SonyReferenceTablesTest'` — зелёные. `swift build` — время сборки ZVCore не выросло
+  больше чем на 10 с (замерить до и после).
 - [ ] Commit `feat(core): Sony reference tables for property names and values`.
 
 ## Task 4: C1. ZVCore: FrameOrientation и новые инструменты «Монитора»
