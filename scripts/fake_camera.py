@@ -28,6 +28,13 @@ make-viewfinder-picture.py --log), остальные профили и «вык
 сразу, без мёртвой зоны): шаг сдвигает фокус на round(команда × G), на половинке — от нуля (3,5 → 4, −3,5 → −4); ответ
 приходит через T мс; шаг не больше ±3, когда до края шкалы, куда он идёт, ближе D, фокус не двигает — у ZV-E10 так у края.
 
+Новая камера Sony — --model newer (сборка в scripts/fake_newer.py; без --model камера прежняя, ZV-E10): в GetDeviceInfo модель
+ILCE-7M4 и операции 0x9215 (подписи списков от камеры: Creative Look 0x13 и «Человек/Животное» 0x15), 0x9216 (версия кода
+производителя 3.10) и 0x9223 (данные объектива: 12 точек шкалы 0…65535, от 0,25 м до «∞»); вместо Creative Style 0xD240 —
+Creative Look 0xD0FA, гамма и цвет профиля 0xD0E1 и 0xD0E9 (S-Log3, S-Gamut3.Cine), признак данных объектива 0xE086 = 1 и
+абсолютный фокус: запись 0xE042 двигает 0xE043 к цели со скоростью 40 000 единиц/с (раз в 50 мс, каждый раз с событием 0xC203),
+в конце — событие 0xC218 с параметром 1; шаг Near/Far сдвигает 0xE043 на 655 (1 % шкалы), 0xD24C идёт следом.
+
 Несколько камер сразу (scripts/fake_cameras.py) различаются: --name, --serial (по нему программа отличает камеры),
 --mark (другой план сцены — zoom, pan — или кадр отражён и повёрнут), --battery, --mode, --format. --ssdp — отвечает на поиск в сети, как камера Sony, с портом
 в X-PTPIP-Port; --busy — не отвечает на приветствие; --pairing — незнакомому GUID отвечает через 3 с, как будто на
@@ -37,13 +44,15 @@ make-viewfinder-picture.py --log), остальные профили и «вык
                          [--name ZV-E10] [--serial …] [--mark zoom|pan|flip|flop|rotate] [--picture кадр.jpg]
                          [--battery 0–100] [--mode photo|video] [--format jpeg|raw+jpeg] [--ssdp] [--busy] [--pairing]
                          [--reject iso,…] [--record-delay с] [--record сценарий]
-                         [--focus-gain G] [--focus-step-ms T] [--focus-deadband D]
+                         [--focus-gain G] [--focus-step-ms T] [--focus-deadband D] [--model zv-e10|newer]
   ZV_PTPIP_HOST=127.0.0.1 …/ZVViewer --automation        # Mac
   am start … --es ptpipHost <IP Mac>                       # планшет: --listen <IP Mac>:15740
   scripts/badnet.py --camera 127.0.0.1:25740 …             # или через прокси: --listen 127.0.0.1:25740
 """
 import argparse, asyncio, os, socket, struct, subprocess, sys, tempfile, threading, time, uuid
 from decimal import Decimal, ROUND_HALF_UP
+
+import fake_newer                                          # профиль новой камеры (--model newer), лежит рядом
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIX = os.path.join(ROOT, "Tests/ZVCoreTests/Fixtures")
@@ -53,11 +62,17 @@ VIEWS = {"zoom": "viewfinder-zoom.jpg", "pan": "viewfinder-pan.jpg"}      # др
 NAME = "ZV-E10"
 FRAME_PERIOD = 0.040
 OK, OPERATION_NOT_SUPPORTED, ACCESS_DENIED, INVALID_HANDLE, DEVICE_BUSY = 0x2001, 0x2005, 0x200F, 0x2009, 0x2019
+PARAMETER_NOT_SUPPORTED = 0x2006
 LIVE_VIEW, CAPTURED = 0xFFFFC002, 0xFFFFC001
 PROPERTY_CHANGED = 0xC203
 S1, S2, MOVIE_REC = 0xD2C1, 0xD2C2, 0xD2C8
 NEAR_FAR, AF_POSITION, ZOOM, TOUCH, TOUCH_CANCEL = 0xD2D1, 0xD2DC, 0xD2DD, 0xD2E4, 0xD2E5
 FOCUS_MODE, FOCUS_AREA, NEAR_FAR_ENABLED, FOCAL_POSITION = 0x500A, 0xD22C, 0xD235, 0xD24C
+# новая камера: абсолютный фокус — цель пишется в 0xE042, положение 0…65535 читается из 0xE043
+FOCUS_SETTING, FOCUS_CURRENT = fake_newer.FOCUS_SETTING, fake_newer.FOCUS_CURRENT
+FOCUS_SPEED, FOCUS_TICK = 40000, 0.05                      # единиц шкалы в секунду; период обновления 0xE043
+FOCUS_PER_STEP = 655                                       # шаг Near/Far сдвигает 0xE043 на столько (≈ 1 % шкалы)
+FOCUS_RESULT = 0xC218                                      # событие «фокус дошёл до цели», параметр 1
 ZOOM_ENABLED, ZOOM_BAR, TOUCH_ENABLED, TOUCH_CANCEL_ENABLED = 0xD25B, 0xD25D, 0xD284, 0xD285
 FOCAL_INFO_AT, FOCAL_INFO_MAX = 1012, 512                  # где в заголовке кадра рамки фокуса (у ZV-E10) и сколько места
 ZOOM_LEVELS, ZOOM_MAX = 11, 3.0                            # картинка наезжает до 3× за 11 ступеней
@@ -323,6 +338,7 @@ class Camera:
         self.record_delay = args.record_delay
         self.record_scenario = args.record
         self.reply_delay = 0.0                              # ответ на текущую операцию — через столько секунд
+        self.reply_params = []                              # её параметры в ответе (0x9215 — версия списка, 0x9216 — кода)
         self.starting = False                               # «нажать» пришло, запись ещё не пошла
         self.release_after_start = False                    # release-race: «отпустить» выполнить, как запись пойдёт
         # ноль часов журнала; FAKE_CAMERA_CLOCK — time.monotonic() того, кто запустил, чтобы сверять по одним часам
@@ -335,14 +351,20 @@ class Camera:
         self.quality = 2
         self.last_frame = 0.0
         self.conn = 0
+        self.newer = args.model == "newer"                  # новая камера Sony: fake_newer.py
         self.device_info = fixture("deviceinfo.bin")
+        if self.newer:
+            self.device_info = fake_newer.device_info(self.device_info)
         if args.serial:
             self.device_info = with_serial(self.device_info, args.serial)
         # свой постоянный uuid (в поиске) и GUID (в приветствии) — от серийного номера
         self.uuid = uuid.uuid5(uuid.NAMESPACE_OID, "fake-zv-e10:" + (args.serial or "")).hex
         self.guid = uuid.UUID(self.uuid).bytes
         self.ext_info = fixture("sony_extdeviceinfo.bin")
-        self.props = Properties(fixture("props_settled.bin"))
+        props = fixture("props_settled.bin")
+        if self.newer:
+            self.ext_info, props = fake_newer.ext_info(self.ext_info), fake_newer.properties(props)
+        self.props = Properties(props)
         self.props.set(OBJECT_IN_MEMORY, 0x8000)
         self.props.set(RECORDING, 0)
         if args.battery is not None:
@@ -359,6 +381,9 @@ class Camera:
         self.zoom_dir = 0                                   # −1, 0, 1
         self.zoom_pos = 0.0                                 # 0…100 на шкале
         self.zoom_task = None
+        self.focus_goal = None                              # новая камера: куда едет фокус после записи 0xE042
+        self.focus_timer = None                             # и таймер его следующего шага (None — стоит)
+        self.focus_due = 0.0                                # когда он сработает по часам цикла событий
         self.props.set(ZOOM_BAR, 1 << 24)
         self.sync_near_far()
         self.events = []                                    # писатели соединений событий
@@ -371,15 +396,20 @@ class Camera:
         каждый раз, поэтому другой DeviceInfo (другой профиль камеры) сам меняет и список."""
         return device_operations(self.device_info)
 
+    def send_event(self, code, *params):
+        """Событие камеры по каналу событий: код, номер транзакции 0xFFFFFFFF (событие ничьё), параметры."""
+        data = struct.pack("<HI", code, 0xFFFFFFFF) + b"".join(struct.pack("<I", p) for p in params)
+        for w in list(self.events):
+            try:
+                w.write(pkt(8, data))
+            except Exception:
+                self.events.remove(w)
+
     def changed(self, code, value=None):
         """Свойство поменялось: записать и сообщить программе событием, как камера."""
         if value is not None:
             self.props.set(code, value)
-        for w in list(self.events):
-            try:
-                w.write(pkt(8, struct.pack("<HII", PROPERTY_CHANGED, 0xFFFFFFFF, code)))
-            except Exception:
-                self.events.remove(w)
+        self.send_event(PROPERTY_CHANGED, code)
 
     def later(self, seconds, fn):
         asyncio.get_running_loop().call_later(seconds, fn)
@@ -393,6 +423,44 @@ class Camera:
         manual = self.props.get(FOCUS_MODE) == 1
         self.props.enable(NEAR_FAR_ENABLED, manual)
         self.props.set(NEAR_FAR_ENABLED, 1 if manual else 0)
+
+    def move_focus(self, goal):
+        """Запись 0xE042 у новой камеры: фокус едет к цели со скоростью FOCUS_SPEED. 0xE043 и событие 0xC203 — каждые
+        FOCUS_TICK секунд, в конце — событие 0xC218 с параметром 1. Запись по дороге меняет цель, не начиная путь заново."""
+        self.focus_goal = goal
+        if self.focus_timer is None:
+            loop = asyncio.get_running_loop()
+            self.focus_due = loop.time() + FOCUS_TICK
+            self.focus_timer = loop.call_at(self.focus_due, self.advance_focus)
+
+    def advance_focus(self):
+        """Один шаг пути: не дальше FOCUS_SPEED × FOCUS_TICK единиц к цели. Шаги идут по сетке времени от записи, а не «через
+        50 мс после прошлого», — скорость не плывёт от задержек цикла."""
+        here = self.props.get(FOCUS_CURRENT)
+        reach = round(FOCUS_SPEED * FOCUS_TICK)
+        there = here + max(-reach, min(reach, self.focus_goal - here))
+        if there != here:
+            self.set_focus(there)
+        if there != self.focus_goal:
+            self.focus_due += FOCUS_TICK
+            self.focus_timer = asyncio.get_running_loop().call_at(self.focus_due, self.advance_focus)
+            return
+        self.focus_timer = self.focus_goal = None
+        self.send_event(FOCUS_RESULT, 1)
+        self.log(f"фокус у цели: 0xE043 = {there}")
+
+    def set_focus(self, position):
+        """Положение новой камеры 0xE043 (0…65535) с событием 0xC203; 0xD24C — то же в процентах, как у ZV-E10, без события:
+        программа перечитывает все свойства по любому 0xC203."""
+        self.props.set(FOCAL_POSITION, round(position * 100 / fake_newer.FOCUS_MAX))
+        self.changed(FOCUS_CURRENT, position)
+
+    def stop_focus(self):
+        """Ручной шаг Near/Far снимает цель 0xE042, до которой фокус ещё ехал: событие 0xC218 не приходит."""
+        if self.focus_timer is not None:
+            self.focus_timer.cancel()
+            self.focus_timer = self.focus_goal = None
+            self.log("ручной шаг — цель 0xE042 снята")
 
     def moves_point(self):
         area = self.props.get(FOCUS_AREA)
@@ -548,8 +616,14 @@ class Camera:
             moved = scaled_step(value, self.focus_gain)
             pos = max(0, min(100, before + moved))
             self.changed(FOCAL_POSITION, pos)
+            absolute = ""
+            if self.newer:                                  # новая камера: тот же шаг и в 0xE043, а цель 0xE042 снимается
+                self.stop_focus()
+                self.changed(FOCUS_CURRENT, max(0, min(fake_newer.FOCUS_MAX,
+                                                       self.props.get(FOCUS_CURRENT) + moved * FOCUS_PER_STEP)))
+                absolute = f", 0xE043 = {self.props.get(FOCUS_CURRENT)}"
             gain = f" (×{self.focus_gain:g} = {moved:+d})" if self.focus_gain != 1 else ""
-            self.log(f"фокус {'ближе' if value < 0 else 'дальше'} на {abs(value)}{gain} → {pos}")
+            self.log(f"фокус {'ближе' if value < 0 else 'дальше'} на {abs(value)}{gain} → {pos}{absolute}")
             return OK
         if code == ZOOM:
             if self.props.get(ZOOM_ENABLED) != 1:
@@ -711,6 +785,7 @@ async def serve(cam, r, w):
                         if p2 == 12:
                             break
                 reply, rc = respond(cam, code, params, out)
+                answer, cam.reply_params = cam.reply_params, []   # берём сразу, до await: пока ждём, ответит другое соединение
                 if cam.reply_delay:                          # камера занята: ответ — позже, канал команд ждёт
                     delay, cam.reply_delay = cam.reply_delay, 0.0
                     await asyncio.sleep(delay)
@@ -719,7 +794,7 @@ async def serve(cam, r, w):
                     if code == 0x1009 and params[:1] == [CAPTURED]:
                         cam.objects.pop(0)
                         cam.changed(OBJECT_IN_MEMORY, 0x8000 + len(cam.objects))
-                w.write(pkt(7, struct.pack("<HI", rc, tid)))
+                w.write(pkt(7, struct.pack("<HI", rc, tid) + b"".join(struct.pack("<I", p) for p in answer)))
             await w.drain()
     except (asyncio.IncompleteReadError, ConnectionError, OSError):
         pass
@@ -749,6 +824,23 @@ def respond(cam, code, params, out):
         return cam.ext_info, OK
     if code == 0x9209:
         return bytes(cam.props.blob), OK
+    # три операции новой камеры (--model newer): у ZV-E10 их нет в DeviceInfo, и до этого места дело не доходит
+    if code == 0x9215:                                          # подписи списков от камеры; параметр — тип списка, 0 — все
+        list_type = params[0] if params else 0
+        data = fake_newer.display_strings(list_type)
+        cam.reply_params = [fake_newer.DISPLAY_LIST_VERSION]
+        cam.log(f"подписи списков (0x9215): тип 0x{list_type:X}, {len(data)} байт")
+        return data, OK
+    if code == 0x9216:                                          # версия кода производителя: в параметре ответа, данных нет
+        cam.reply_params = [fake_newer.VENDOR_CODE_VERSION]
+        cam.log(f"версия кода производителя (0x9216): 0x{fake_newer.VENDOR_CODE_VERSION:04X}")
+        return None, OK
+    if code == 0x9223:                                          # данные объектива; параметр 2 — расстояния в метрах
+        if params[:1] != [fake_newer.LENS_METERS]:
+            cam.log(f"данные объектива (0x9223): параметр {params[:1]} не поддерживается, нужен {fake_newer.LENS_METERS}")
+            return None, PARAMETER_NOT_SUPPORTED
+        cam.log(f"данные объектива (0x9223): метры, {len(fake_newer.LENS_PAIRS)} пар")
+        return fake_newer.LENS_INFORMATION, OK
     if code == 0x9205 and params and out:
         if params[0] == 0xD26A:
             cam.quality = 1 if out[0] == 1 else 2
@@ -770,6 +862,8 @@ def respond(cam, code, params, out):
                 cam.changed(NEAR_FAR_ENABLED)
             if params[0] == PICTURE_PROFILE:
                 cam.use_profile()
+            if params[0] == FOCUS_SETTING:                      # есть только у новой камеры
+                cam.move_focus(value)
     if code == 0x9207 and params and out:
         # значение — своего типа: зум INT8, Near/Far INT16, точка AF и касание UINT32, кнопки UINT16
         fmt = {ZOOM: "<b", NEAR_FAR: "<h", AF_POSITION: "<I", TOUCH: "<I"}.get(params[0], "<H")
@@ -816,6 +910,10 @@ async def main():
     ap.add_argument("--focus-deadband", type=non_negative, default=0.0, metavar="D",
                     help="объектив: шаг Near/Far не больше ±3, когда до края шкалы, куда он идёт, ближе D, фокус не двигает; "
                          "по умолчанию 0 — мёртвой зоны нет")
+    ap.add_argument("--model", choices=["zv-e10", "newer"], default="zv-e10",
+                    help="камера: zv-e10 — как в дампах; newer — новая Sony (fake_newer.py): модель " + fake_newer.MODEL
+                         + ", подписи списков 0x9215, версия кода 0x9216, данные объектива 0x9223, Creative Look 0xD0FA, "
+                         "абсолютный фокус 0xE042 и 0xE043")
     a = ap.parse_args()
     cam = Camera(a)
     host, port = a.listen.rsplit(":", 1)
@@ -828,7 +926,8 @@ async def main():
               f"не меняет {a.reject}" if a.reject else "", f"запись: {a.record}" if a.record != "normal" else "",
               f"усиление фокуса ×{a.focus_gain:g}" if a.focus_gain != 1 else "",
               f"шаг фокуса {a.focus_step_ms:g} мс" if a.focus_step_ms else "",
-              f"мёртвая зона фокуса {a.focus_deadband:g}" if a.focus_deadband else ""]
+              f"мёртвая зона фокуса {a.focus_deadband:g}" if a.focus_deadband else "",
+              f"новая камера: в DeviceInfo {fake_newer.MODEL}" if cam.newer else ""]
     plain = cam.sets[None].frames
     print(f"поддельная {cam.name}: {a.listen}, кадр {len(plain[2]) // 1024} / {len(plain[1]) // 1024} КБ, "
           f"снимок {len(cam.photo) // 1024} КБ" + "".join(f", {e}" for e in extras if e), flush=True)
