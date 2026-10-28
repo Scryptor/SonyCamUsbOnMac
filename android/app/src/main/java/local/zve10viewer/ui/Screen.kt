@@ -635,8 +635,9 @@ private fun Video(controller: CameraController, screen: ScreenState, feedback: F
                         filterQuality = FilterQuality.Low)
                 }
                 if (assist.hasMarkers) drawAssistMarkers(assist, frameSize, rect)
-                // рамки фокуса камеры и отметка касания — пока фокус касанием включён
-                if (controller.touchFocusOn) drawFocusFrames(controller.focusFrames, rect, mark?.first, markProgress.value)
+                // рамки фокуса камеры — всегда, как на её экране: выключили кнопку «Фокус» — слежение продолжается, рамка
+                // видна; отметка касания — после касания в режиме фокуса касанием
+                drawFocusFrames(controller.focusFrames, rect, mark?.first, markProgress.value)
             }
             // растр помощи считается по видимой части кадра
             SideEffect {
@@ -738,8 +739,9 @@ private fun Controls(controller: CameraController, screen: ScreenState, feedback
                 Box(Modifier.onGloballyPositioned { screen.fnMenuRect = it.boundsInRoot() }) { AssistMenu(controller, screen) }
             } else if (!screen.allSettingsOpen) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    // слежение от касания — снять; ручной фокус — шкала фокуса над строкой значений
-                    if (controller.touchCancelAvailable && controller.touchFocusOn) CancelTouchChip(controller)
+                    // слежение от касания — снять, и когда кнопка «Фокус» уже выключена: камера следит дальше; ручной фокус —
+                    // шкала фокуса над строкой значений
+                    if (controller.touchCancelAvailable) CancelTouchChip(controller)
                     if (controller.focusDriveAvailable) FocusScale(controller)
                     InfoLine(controller) { screen.openFn(it) }
                 }

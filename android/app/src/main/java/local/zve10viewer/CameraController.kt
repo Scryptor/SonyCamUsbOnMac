@@ -308,7 +308,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
     /** Зум едет: 1 — к теле, −1 — к широкому; 0 — стоит. */
     var zoomDirection by mutableStateOf(0)
         private set
-    /** Фокус касанием: горит — касание кадра ставит туда фокус, а на кадре видны рамки фокуса камеры. */
+    /** Фокус касанием: горит — касание кадра ставит туда фокус. Рамки фокуса камеры видны и без него. */
     var touchFocusOn by mutableStateOf(prefs.touchFocusOn)
         private set
     /** Единиц Near/Far, которые ещё надо отправить: шкалу тянут быстрее, чем камера отвечает. */

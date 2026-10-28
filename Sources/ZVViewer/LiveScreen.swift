@@ -286,10 +286,9 @@ struct LiveScreen: View {
             if screen.assist.hasMarkers {
                 AssistMarkers(assist: screen.assist, frame: frameSize, rect: screen.zoom.imageRect(view: size, frame: frameSize))
             }
-            // рамки фокуса камеры и отметка касания — пока фокус касанием включён
-            if screen.touchFocusOn {
-                FocusFramesLayer(controller: controller, rect: screen.zoom.imageRect(view: size, frame: frameSize))
-            }
+            // рамки фокуса камеры — всегда, как на её экране: выключили кнопку «Фокус» — слежение продолжается, рамка видна;
+            // отметка касания — после щелчка в режиме фокуса касанием
+            FocusFramesLayer(controller: controller, rect: screen.zoom.imageRect(view: size, frame: frameSize))
             // рамка записи — по краю видимой картинки, при увеличении — по краю экрана
             TallyBorder(recording: controller.isRecording,
                         rect: screen.zoom.imageRect(view: size, frame: frameSize)
@@ -350,8 +349,9 @@ struct LiveScreen: View {
                         AssistMenu(controller: controller, screen: screen)
                     } else if !screen.allSettingsOpen {
                         VStack(spacing: 10) {
-                            // ручной фокус — шкала фокуса над строкой значений; слежение от касания — снять
-                            if controller.touchCancelAvailable, screen.touchFocusOn {
+                            // ручной фокус — шкала фокуса над строкой значений; слежение от касания — снять, и когда кнопка
+                            // «Фокус» уже выключена: камера следит дальше
+                            if controller.touchCancelAvailable {
                                 Button("Снять слежение") { controller.cancelTouch() }
                                     .buttonStyle(.plain)
                                     .padding(.horizontal, 12)

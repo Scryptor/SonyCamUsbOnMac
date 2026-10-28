@@ -61,9 +61,18 @@ def run(out, restart_camera):
     check("рамка слежения — там, куда коснулись", frames and near(frames[0]["x"], 0.3) and near(frames[0]["y"], 0.4), frames)
     check("слежение можно снять", lens(s)["touchCancel"], lens(s))
     shot(out, "1-touch-tracking")
+    # выключили кнопку «Фокус» — камера следит дальше: рамка на экране, «Снять слежение» на месте
+    act("toggleTouchFocus")
+    time.sleep(1)
+    s = state()
+    check("кнопку выключили — слежение идёт, снять можно", not s["ui"]["touchFocus"] and lens(s)["touchCancel"]
+          and any(f["kind"] == "tracking" for f in lens(s)["focusFrames"]), (s["ui"]["touchFocus"], lens(s)))
+    shot(out, "1b-tracking-button-off")
     act("cancelTouch")
     s = wait(lambda s: not lens(s)["focusFrames"] and not lens(s)["touchCancel"])
-    check("сняли — рамки нет", not lens(s)["focusFrames"] and not lens(s)["touchCancel"], lens(s))
+    check("сняли и при выключенной кнопке — рамки нет", not lens(s)["focusFrames"] and not lens(s)["touchCancel"], lens(s))
+    act("toggleTouchFocus")
+    act("closeOverlays")
 
     # «Точка L»: точка AF двигает рамку, через 0,3 с фокус найден
     act("request", setting="focusArea", value=AREA_SPOT_L)
