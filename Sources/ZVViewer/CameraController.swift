@@ -2349,12 +2349,17 @@ final class CameraController {
         return Int(v)
     }
 
+    /// Почему фокус касанием сейчас не ставится — для подсказки к кнопке и строки состояния.
+    var touchRefusal: String {
+        TouchFocus.refusal(focusMode: value(SonyProp.focusMode), zoomScale: value(SonyProp.zoomScale))
+    }
+
     /// Фокус в точку кадра (доли 0…1): точка AF или касание экрана камеры. false — сейчас нельзя.
     @discardableResult
     func touchFocus(at point: CGPoint) -> Bool {
         guard phase == .ready, let session else { return false }
         guard let method = touchFocusMethod else {
-            showStatus(TouchFocus.refusal(focusMode: value(SonyProp.focusMode)))
+            showStatus(touchRefusal)
             return false
         }
         let mark = Date()

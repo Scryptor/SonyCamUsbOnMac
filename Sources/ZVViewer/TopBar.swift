@@ -230,11 +230,13 @@ struct SettingsButton: View {
 
 /// Панель поверх кадра, которую можно утащить мышью куда угодно: гистограмма, волновая форма. Видна, пока включена, — и
 /// когда остальные элементы скрыты, и при открытом меню Fn: там она нужнее всего. Место запоминается долями свободного
-/// места (переживает смену размера окна); у края прилипает к отступу.
+/// места (переживает смену размера окна); у края прилипает к отступу. На правую колонку кнопок не ложится — встаёт левее.
 struct FloatingPanel<Content: View>: View {
     let view: CGSize
     let placement: FloatingPlacement?
     let place: (FloatingPlacement) -> Void
+    /// Правая колонка кнопок: панель её не закрывает.
+    let avoiding: CGRect?
     /// Где стоит, пока её не перетаскивали, — по размеру панели.
     let restingDefault: (CGSize) -> CGPoint
     @ViewBuilder let content: () -> Content
@@ -294,8 +296,12 @@ struct FloatingPanel<Content: View>: View {
     }
 
     private var restingOrigin: CGPoint {
-        if let placement { return placement.origin(panel: panel, view: view) }
-        return restingDefault(panel)
+        var origin = placement?.origin(panel: panel, view: view) ?? restingDefault(panel)
+        // легла бы на запись и спуск — встаёт левее колонки, на той же высоте
+        if let column = avoiding, CGRect(origin: origin, size: panel).intersects(column) {
+            origin.x = max(CGFloat(FloatingPlacement.margin), column.minX - 12 - panel.width)
+        }
+        return origin
     }
 }
 
@@ -306,7 +312,8 @@ struct FloatingHistogram: View {
     let view: CGSize
 
     var body: some View {
-        FloatingPanel(view: view, placement: screen.histogramPlacement, place: screen.placeHistogram) { (panel: CGSize) -> CGPoint in
+        FloatingPanel(view: view, placement: screen.histogramPlacement, place: screen.placeHistogram,
+                      avoiding: screen.rightColumnRect) { (panel: CGSize) -> CGPoint in
             let margin = CGFloat(FloatingPlacement.margin)
             return CGPoint(x: margin, y: max(margin, view.height - panel.height - 134))
         } content: {
@@ -315,7 +322,7 @@ struct FloatingHistogram: View {
     }
 }
 
-/// Волновая форма поверх кадра; по умолчанию — справа внизу, над строкой значений.
+/// Волновая форма поверх кадра; по умолчанию — справа внизу, над строкой значений, левее кнопок справа.
 struct FloatingWaveform: View {
     let controller: CameraController
     let screen: ScreenState
@@ -323,7 +330,8 @@ struct FloatingWaveform: View {
     let view: CGSize
 
     var body: some View {
-        FloatingPanel(view: view, placement: screen.waveformPlacement, place: screen.placeWaveform) { (panel: CGSize) -> CGPoint in
+        FloatingPanel(view: view, placement: screen.waveformPlacement, place: screen.placeWaveform,
+                      avoiding: screen.rightColumnRect) { (panel: CGSize) -> CGPoint in
             let margin = CGFloat(FloatingPlacement.margin)
             return CGPoint(x: max(margin, view.width - panel.width - margin), y: max(margin, view.height - panel.height - 134))
         } content: {

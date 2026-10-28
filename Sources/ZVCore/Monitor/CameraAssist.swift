@@ -52,9 +52,12 @@ public enum TouchFocus {
         CGPoint(x: Double(value >> 16 & 0xFFFF) / Double(gridWidth - 1), y: Double(value & 0xFFFF) / Double(gridHeight - 1))
     }
 
-    /// Что сказать, если касание фокус не ставит.
-    public static func refusal(focusMode: Int64?) -> String {
-        focusMode == 1 ? "В ручном фокусе — шкала фокуса внизу" : "Камера сейчас не даёт ставить фокус касанием"
+    /// Что сказать, если касание фокус не ставит. Зум больше ×1,0 (0xD25C) — Clear Image Zoom или цифровой: на нём
+    /// ZV-E10 ставит зону «Центр» и закрывает касание экрана, пока зум не вернут к ×1,0.
+    public static func refusal(focusMode: Int64?, zoomScale: Int64? = nil) -> String {
+        if focusMode == 1 { return "В ручном фокусе — шкала фокуса внизу" }
+        if let zoomScale, zoomScale > 1000 { return "Пока зум больше ×1,0, камера не даёт ставить фокус касанием" }
+        return "Камера сейчас не даёт ставить фокус касанием"
     }
 }
 

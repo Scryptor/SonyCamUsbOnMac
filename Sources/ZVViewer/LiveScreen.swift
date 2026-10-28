@@ -344,6 +344,7 @@ struct LiveScreen: View {
             HStack {
                 Spacer()
                 RightColumn(controller: controller, screen: screen)
+                    .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(Self.space)) } action: { screen.rightColumnRect = $0 }
             }
             .padding(.trailing, 20)
         }

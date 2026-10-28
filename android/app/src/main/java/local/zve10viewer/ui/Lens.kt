@@ -48,8 +48,6 @@ import androidx.compose.ui.unit.sp
 import local.zve10viewer.CameraController
 import local.zve10viewer.monitor.FocusDrive
 import local.zve10viewer.monitor.FocusFrame
-import local.zve10viewer.monitor.TouchFocus
-import local.zve10viewer.settings.SettingID
 
 /*
  * Фокус и зум с экрана — как у программы для Mac: «T» и «W» (держать — зум), фокус касанием (касание кадра ставит
@@ -111,7 +109,7 @@ fun TouchFocusButton(controller: CameraController) {
         Modifier.size(58.dp).background(if (controller.touchFocusOn) Accent else Panel, CircleShape)
             .alpha(if (available) 1f else 0.5f)
             .semantics {
-                contentDescription = if (available) "Фокус касанием" else TouchFocus.refusal(controller.property(SettingID.focusMode)?.current?.intValue)
+                contentDescription = if (available) "Фокус касанием" else controller.touchRefusal
             }
             .clickable { controller.toggleTouchFocus() },
         contentAlignment = Alignment.Center,

@@ -71,6 +71,16 @@ import Testing
     #expect(method(0x8004, 0x103, 1, 2, controls) == .areaPosition)
 }
 
+@Test func touchRefusalSaysWhy() {
+    #expect(TouchFocus.refusal(focusMode: 1, zoomScale: 1100) == "В ручном фокусе — шкала фокуса внизу")
+    // ZV-E10 на Clear Image Zoom ×1,1: зона «Центр», касание экрана закрыто — фокус касанием никак, и сказать почему
+    let controls: Set<UInt16> = [SonyControl.afAreaPosition, SonyControl.remoteTouch]
+    #expect(TouchFocus.method(focusMode: 0x8004, focusArea: 0x3, remoteTouchEnabled: 0, touchFunction: 4, controls: controls) == nil)
+    #expect(TouchFocus.refusal(focusMode: 0x8004, zoomScale: 1100) == "Пока зум больше ×1,0, камера не даёт ставить фокус касанием")
+    #expect(TouchFocus.refusal(focusMode: 0x8004, zoomScale: 1000) == "Камера сейчас не даёт ставить фокус касанием")
+    #expect(TouchFocus.refusal(focusMode: 0x8004) == "Камера сейчас не даёт ставить фокус касанием")
+}
+
 @Test func touchFocusMapsTheFrameTo640x480() {
     #expect(TouchFocus.encode(x: 0, y: 0) == 0)
     #expect(TouchFocus.encode(x: 1, y: 1) == (639 << 16 | 479))

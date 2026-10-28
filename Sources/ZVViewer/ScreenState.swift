@@ -65,6 +65,10 @@ final class ScreenState {
     private(set) var waveformMode: Waveform.Mode
     private(set) var waveformPlacement: FloatingPlacement?
 
+    /// Где правая колонка кнопок (зум, режим, запись): гистограмма и волновая форма на неё не ложатся — встают левее.
+    /// Колонку спрятали вместе с элементами — место остаётся прежним: панели не прыгают туда и обратно.
+    var rightColumnRect: CGRect?
+
     /// Открытая галерея: какой снимок на экране; nil — закрыта. По id, а не по номеру: новый снимок её не сбивает.
     var galleryShot: UUID?
     /// Снимок в галерее увеличен: стрелки не листают.

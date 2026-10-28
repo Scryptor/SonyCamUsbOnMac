@@ -345,11 +345,11 @@ class Camera:
     def focus_frames(self):
         """Блок FocalFrameInfo 1.01 для кадра: рамка «Точки» или «Зоны» и рамка слежения — в сетке 640×480 ×1024."""
         focus, tracking = [], []
-        # в ручном фокусе камера рамку AF не показывает
-        if self.moves_point() and self.props.get(FOCUS_MODE) != 1:
+        # рамка «Точки» видна и в ручном фокусе, как у ZV-E10, — только фокус по ней камера не ищет
+        if self.moves_point():
             area = self.props.get(FOCUS_AREA)
             w = 0.3 if area in (0x2, 0x202) else SPOT_SIZE.get(area if area < 0x200 else area - 0x103, 0.09)
-            found = 2 if time.monotonic() - self.af_moved > 0.3 else 1
+            found = 2 if self.props.get(FOCUS_MODE) != 1 and time.monotonic() - self.af_moved > 0.3 else 1
             focus.append((found, self.af_point[0] / 639, self.af_point[1] / 479, w, w * 4 / 3))
         if self.touch_point:
             tracking.append((2, self.touch_point[0] / 639, self.touch_point[1] / 479, 0.12, 0.16))

@@ -157,6 +157,11 @@ class ScreenState {
     var stripHeight by mutableStateOf<Float?>(null)
     /** Где меню Fn, пока оно открыто: гистограмма поднимается над ним, а не прячется под ним. */
     var fnMenuRect by mutableStateOf<Rect?>(null)
+    /**
+     * Где правая колонка кнопок (зум, режим, запись): гистограмма и волновая форма на неё не ложатся — встают левее.
+     * Колонку спрятали вместе с элементами — место остаётся прежним: панели не прыгают туда и обратно.
+     */
+    var rightColumnRect by mutableStateOf<Rect?>(null)
 
     /** Галерея: какой снимок открыт (по id, а не по месту в ленте — новый снимок его не сбивает); null — закрыта. */
     var galleryShot by mutableStateOf<Long?>(null)
@@ -702,7 +707,8 @@ private fun Controls(controller: CameraController, screen: ScreenState, feedback
                 }
             }
         }
-        RightColumn(controller, feedback, Modifier.align(Alignment.CenterEnd).padding(end = 4.dp))
+        RightColumn(controller, feedback, Modifier.align(Alignment.CenterEnd).padding(end = 4.dp)
+            .onGloballyPositioned { screen.rightColumnRect = it.boundsInRoot() })
         if (!screen.fnOpen && !screen.assistOpen && controller.shots.isNotEmpty()) {
             Box(Modifier.align(Alignment.BottomStart).padding(bottom = 76.dp)
                 .onSizeChanged { screen.stripHeight = it.height.toFloat() }) {
@@ -993,19 +999,25 @@ private fun FloatingPanel(
     fun dp(offset: Offset) = Offset(offset.x / density.density, offset.y / density.density)
     fun px(offset: Offset) = Offset(offset.x * density.density, offset.y * density.density)
 
-    /** Куда положить панель сейчас: по сохранённому месту или на место по умолчанию, но не под меню Fn. */
+    /** Куда положить панель сейчас: по сохранённому месту или на место по умолчанию, но не под меню Fn и не на кнопки справа. */
     fun goal(): Offset? {
         val view = feedback.screenSize
         if (panel == IntSize.Zero || view == Size.Zero) return null
         val size = panel.toSize()
         return with(density) {
+            // легла бы на запись и спуск — встаёт левее колонки, на той же высоте
+            fun besideColumn(at: Offset): Offset {
+                val column = screen.rightColumnRect ?: return at
+                return if (Rect(at, size).overlaps(column)) at.copy(x = maxOf(16.dp.toPx(), column.left - 12.dp.toPx() - size.width)) else at
+            }
             val origin = placement?.let { px(it.origin(dp(size), dp(view))) } ?: defaultOrigin(size, view)
             // меню Fn и плашка увеличения её не закрывают: если легла бы под них — поднимается над ними
-            var placed = origin
+            var placed = besideColumn(origin)
             for (obstacle in listOfNotNull(screen.fnMenuRect, screen.zoomBadgeRect)) {
                 if (Rect(placed, size).overlaps(obstacle)) placed = placed.copy(y = maxOf(16.dp.toPx(), obstacle.top - 10.dp.toPx() - size.height))
             }
-            placed
+            // поднялась — могла выйти на колонку
+            besideColumn(placed)
         }
     }
 
@@ -1088,7 +1100,7 @@ private fun FloatingHistogram(controller: CameraController, screen: ScreenState,
     }
 }
 
-/** Волновая форма; по умолчанию — справа внизу, над строкой значений. */
+/** Волновая форма; по умолчанию — справа внизу, над строкой значений, левее кнопок справа. */
 @Composable
 private fun FloatingWaveform(controller: CameraController, screen: ScreenState, feedback: FeedbackState) {
     val trace = controller.waveform ?: return

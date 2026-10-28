@@ -141,9 +141,15 @@ object TouchFocus {
     fun decode(value: Long): Offset =
         Offset(((value shr 16) and 0xFFFF).toFloat() / (GRID_WIDTH - 1), (value and 0xFFFF).toFloat() / (GRID_HEIGHT - 1))
 
-    /** Что сказать, если касание фокус не ставит. */
-    fun refusal(focusMode: Long?) =
-        if (focusMode == 1L) "В ручном фокусе — шкала фокуса внизу" else "Камера сейчас не даёт ставить фокус касанием"
+    /**
+     * Что сказать, если касание фокус не ставит. Зум больше ×1,0 (0xD25C) — Clear Image Zoom или цифровой: на нём
+     * ZV-E10 ставит зону «Центр» и закрывает касание экрана, пока зум не вернут к ×1,0.
+     */
+    fun refusal(focusMode: Long?, zoomScale: Long? = null) = when {
+        focusMode == 1L -> "В ручном фокусе — шкала фокуса внизу"
+        zoomScale != null && zoomScale > 1000 -> "Пока зум больше ×1,0, камера не даёт ставить фокус касанием"
+        else -> "Камера сейчас не даёт ставить фокус касанием"
+    }
 }
 
 /**

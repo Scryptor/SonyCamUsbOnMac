@@ -87,6 +87,16 @@ class CameraAssistTest {
         assertEquals(TouchFocus.Method.areaPosition, TouchFocus.method(0x8004, 0x103, 1, 2, controls))
     }
 
+    @Test fun touchRefusalSaysWhy() {
+        assertEquals("В ручном фокусе — шкала фокуса внизу", TouchFocus.refusal(1, 1100))
+        // ZV-E10 на Clear Image Zoom ×1,1: зона «Центр», касание экрана закрыто — фокус касанием никак, и сказать почему
+        val controls = setOf(SonyControl.AF_AREA_POSITION, SonyControl.REMOTE_TOUCH)
+        assertNull(TouchFocus.method(0x8004, 0x3, 0, 4, controls))
+        assertEquals("Пока зум больше ×1,0, камера не даёт ставить фокус касанием", TouchFocus.refusal(0x8004, 1100))
+        assertEquals("Камера сейчас не даёт ставить фокус касанием", TouchFocus.refusal(0x8004, 1000))
+        assertEquals("Камера сейчас не даёт ставить фокус касанием", TouchFocus.refusal(0x8004))
+    }
+
     @Test fun touchFocusMapsTheFrameTo640x480() {
         assertEquals(0L, TouchFocus.encode(0.0, 0.0))
         assertEquals((639L shl 16) or 479L, TouchFocus.encode(1.0, 1.0))

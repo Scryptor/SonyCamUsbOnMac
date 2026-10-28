@@ -960,12 +960,16 @@ class CameraController(private val context: Context, private val scope: Coroutin
     val focalPosition: Int?
         get() = properties[SonyProp.FOCAL_POSITION]?.takeIf { it.enabled != 0 }?.current?.intValue?.toInt()
 
+    /** Почему фокус касанием сейчас не ставится — для подсказки к кнопке и строки состояния. */
+    val touchRefusal: String
+        get() = TouchFocus.refusal(value(SonyProp.FOCUS_MODE), value(SonyProp.ZOOM_SCALE))
+
     /** Фокус в точку кадра (доли 0…1): точка AF или касание экрана камеры. false — сейчас нельзя. */
     fun touchFocus(x: Double, y: Double): Boolean {
         val session = session ?: return false
         if (phase != Phase.ready) return false
         val method = touchFocusMethod ?: run {
-            showStatus(TouchFocus.refusal(value(SonyProp.FOCUS_MODE)))
+            showStatus(touchRefusal)
             return false
         }
         touchMark = androidx.compose.ui.geometry.Offset(x.toFloat(), y.toFloat()) to System.currentTimeMillis()
@@ -2819,7 +2823,11 @@ class CameraController(private val context: Context, private val scope: Coroutin
         }
         val line = "касание: ${touchFocusMethod?.name ?: "нет"}${if (touchFocusOn) " вкл" else ""}, снять: $touchCancelAvailable, " +
             "рамки: [$frames], зум: ${if (zoomAvailable) "есть" else "нет"} $zoomDirection ${zoomBar?.let { "${it.box}/${it.boxes} ${it.position}" } ?: "—"}, " +
-            "шкала фокуса: ${if (focusDriveAvailable) "есть" else "нет"} ${focalPosition ?: "—"}"
+            "шкала фокуса: ${if (focusDriveAvailable) "есть" else "нет"} ${focalPosition ?: "—"}; " +
+            // сами свойства: режим и зона фокуса, функция касания и можно ли касаться и снимать, Near/Far, зум
+            listOf(SonyProp.FOCUS_MODE, SonyProp.FOCUS_AREA, SonyProp.TOUCH_FUNCTION, SonyProp.REMOTE_TOUCH_ENABLED,
+                SonyProp.REMOTE_TOUCH_CANCEL_ENABLED, SonyProp.NEAR_FAR_ENABLED, SonyProp.ZOOM_ENABLED, SonyProp.ZOOM_SCALE)
+                .joinToString(" ") { code -> "%X=%s".format(code, value(code)?.let { java.lang.Long.toHexString(it) } ?: "—") }
         if (line != lensLogged) {
             lensLogged = line
             Log.i("ZVLens", line)

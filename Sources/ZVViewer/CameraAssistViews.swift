@@ -64,7 +64,7 @@ struct TouchFocusButton: View {
                 .opacity(method == nil ? 0.5 : 1)
         }
         .buttonStyle(.plain)
-        .help(method == nil ? TouchFocus.refusal(focusMode: controller.property(.focusMode)?.current.intValue)
+        .help(method == nil ? controller.touchRefusal
               : screen.touchFocusOn ? "Фокус касанием включён: щелчок по кадру ставит фокус" : "Фокус касанием: щелчок по кадру ставит фокус")
         .accessibilityLabel("Фокус касанием")
     }
