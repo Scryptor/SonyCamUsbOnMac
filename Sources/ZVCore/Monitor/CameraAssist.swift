@@ -52,6 +52,22 @@ public enum TouchFocus {
         CGPoint(x: Double(value >> 16 & 0xFFFF) / Double(gridWidth - 1), y: Double(value & 0xFFFF) / Double(gridHeight - 1))
     }
 
+    /// Строка «Сейчас» в подсказке к фокусу касанием: что сделает касание кадра при этой зоне фокуса (подпись, как в
+    /// программе) и функции касания камеры (0xD283: 3 — фокус, 4 — слежение).
+    public static func helpNow(method: Method?, area: String, touchFunction: Int64?, focusMode: Int64?, zoomScale: Int64?) -> String {
+        switch method {
+        case .areaPosition:
+            return "Сейчас: зона «\(area)» — касание двигает точку AF."
+        case .remoteTouch:
+            let what = touchFunction == 3 ? "фокус" : touchFunction == 4 ? "слежение" : "фокус или слежение, как в меню камеры"
+            return "Сейчас: зона «\(area)» — касание экрана камеры: \(what)."
+        case nil:
+            if focusMode == 1 { return "Сейчас ручной фокус: касание фокус не ставит, для него — шкала фокуса внизу." }
+            if let zoomScale, zoomScale > 1000 { return "Сейчас зум больше ×1,0: камера закрыла касание, пока зум не вернётся к ×1,0." }
+            return "Сейчас камера не даёт ставить фокус касанием: посмотрите зону фокуса и функцию касания в её меню."
+        }
+    }
+
     /// Что сказать, если касание фокус не ставит. Зум больше ×1,0 (0xD25C) — Clear Image Zoom или цифровой: на нём
     /// ZV-E10 ставит зону «Центр» и закрывает касание экрана, пока зум не вернут к ×1,0.
     public static func refusal(focusMode: Int64?, zoomScale: Int64? = nil) -> String {

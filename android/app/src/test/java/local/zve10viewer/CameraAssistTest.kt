@@ -97,6 +97,19 @@ class CameraAssistTest {
         assertEquals("Камера сейчас не даёт ставить фокус касанием", TouchFocus.refusal(0x8004))
     }
 
+    @Test fun touchFocusHelpSaysWhatATapDoesNow() {
+        assertEquals("Сейчас: зона «Точка M» — касание двигает точку AF.",
+            TouchFocus.helpNow(TouchFocus.Method.areaPosition, "Точка M", 4, 0x8004, 1000))
+        assertEquals("Сейчас: зона «Широкая» — касание экрана камеры: слежение.",
+            TouchFocus.helpNow(TouchFocus.Method.remoteTouch, "Широкая", 4, 0x8004, 1000))
+        assertTrue(TouchFocus.helpNow(TouchFocus.Method.remoteTouch, "Широкая", 3, 0x8004, null).endsWith("касание экрана камеры: фокус."))
+        assertTrue(TouchFocus.helpNow(TouchFocus.Method.remoteTouch, "Широкая", 9, 0x8004, null).endsWith("фокус или слежение, как в меню камеры."))
+        assertTrue(TouchFocus.helpNow(null, "Широкая", 4, 1, null).startsWith("Сейчас ручной фокус"))
+        // Clear Image Zoom ×1,1 на ZV-E10 закрывает касание
+        assertTrue(TouchFocus.helpNow(null, "Центр", 3, 0x8004, 1100).startsWith("Сейчас зум больше ×1,0"))
+        assertTrue(TouchFocus.helpNow(null, "Широкая", 2, 0x8004, 1000).startsWith("Сейчас камера не даёт"))
+    }
+
     @Test fun touchFocusMapsTheFrameTo640x480() {
         assertEquals(0L, TouchFocus.encode(0.0, 0.0))
         assertEquals((639L shl 16) or 479L, TouchFocus.encode(1.0, 1.0))

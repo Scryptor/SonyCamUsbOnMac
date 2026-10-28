@@ -26,6 +26,7 @@ struct LiveScreen: View {
         .onTapGesture(coordinateSpace: .local) { location in
             // открыто меню — щелчок его закрывает; иначе, при фокусе касанием, — фокус в эту точку кадра
             let menus = screen.fnOpen || screen.assistOpen || screen.allSettingsOpen || screen.pillInfo != nil || screen.presetMenuOpen
+                || screen.touchFocusHelpOpen
             screen.closeOverlays()
             screen.noteActivity()
             if !menus, screen.touchFocusOn, let point = framePoint(location) { controller.touchFocus(at: point) }
@@ -160,7 +161,7 @@ struct LiveScreen: View {
                 controller.dismissReview()
                 return .handled
             }
-            guard screen.fnOpen || screen.assistOpen || screen.allSettingsOpen else { return .ignored }
+            guard screen.fnOpen || screen.assistOpen || screen.allSettingsOpen || screen.touchFocusHelpOpen else { return .ignored }
             screen.closeOverlays()
             return .handled
         }
@@ -179,6 +180,14 @@ struct LiveScreen: View {
             }
             if screen.waveformOn, let trace = controller.waveform, controller.review == nil, screen.galleryShot == nil {
                 FloatingWaveform(controller: controller, screen: screen, trace: trace, view: size)
+            }
+            // подсказка к фокусу касанием — левее кнопок справа, на высоте колонки
+            if screen.touchFocusHelpOpen {
+                let column = screen.rightColumnRect ?? CGRect(x: size.width - 80, y: size.height / 2 - 150, width: 60, height: 300)
+                TouchFocusHelp(controller: controller, screen: screen)
+                    .fixedSize()
+                    .position(x: max(206, column.minX - 16 - 190), y: min(max(column.midY, 220), size.height - 220))
+                    .transition(.opacity)
             }
             // панель наложения — тоже не среди элементов: щелчок по миниатюре нужен и когда они спрятаны
             if screen.assist.overlay != .off, let reference = controller.reference, controller.review == nil,

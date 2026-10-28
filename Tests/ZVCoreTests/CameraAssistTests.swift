@@ -81,6 +81,22 @@ import Testing
     #expect(TouchFocus.refusal(focusMode: 0x8004) == "Камера сейчас не даёт ставить фокус касанием")
 }
 
+@Test func touchFocusHelpSaysWhatATapDoesNow() {
+    #expect(TouchFocus.helpNow(method: .areaPosition, area: "Точка M", touchFunction: 4, focusMode: 0x8004, zoomScale: 1000)
+            == "Сейчас: зона «Точка M» — касание двигает точку AF.")
+    #expect(TouchFocus.helpNow(method: .remoteTouch, area: "Широкая", touchFunction: 4, focusMode: 0x8004, zoomScale: 1000)
+            == "Сейчас: зона «Широкая» — касание экрана камеры: слежение.")
+    #expect(TouchFocus.helpNow(method: .remoteTouch, area: "Широкая", touchFunction: 3, focusMode: 0x8004, zoomScale: nil)
+            .hasSuffix("касание экрана камеры: фокус."))
+    #expect(TouchFocus.helpNow(method: .remoteTouch, area: "Широкая", touchFunction: 9, focusMode: 0x8004, zoomScale: nil)
+            .hasSuffix("фокус или слежение, как в меню камеры."))
+    #expect(TouchFocus.helpNow(method: nil, area: "Широкая", touchFunction: 4, focusMode: 1, zoomScale: nil).hasPrefix("Сейчас ручной фокус"))
+    // Clear Image Zoom ×1,1 на ZV-E10 закрывает касание
+    #expect(TouchFocus.helpNow(method: nil, area: "Центр", touchFunction: 3, focusMode: 0x8004, zoomScale: 1100).hasPrefix("Сейчас зум больше ×1,0"))
+    #expect(TouchFocus.helpNow(method: nil, area: "Широкая", touchFunction: 2, focusMode: 0x8004, zoomScale: 1000)
+            .hasPrefix("Сейчас камера не даёт"))
+}
+
 @Test func touchFocusMapsTheFrameTo640x480() {
     #expect(TouchFocus.encode(x: 0, y: 0) == 0)
     #expect(TouchFocus.encode(x: 1, y: 1) == (639 << 16 | 479))

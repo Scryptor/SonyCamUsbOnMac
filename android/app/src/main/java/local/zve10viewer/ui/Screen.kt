@@ -200,9 +200,12 @@ class ScreenState {
 
     val controlsHidden: Boolean get() = manualHidden || autoHidden
     /** Открыто меню, панель, список пресетов или окошко: элементы не прячутся сами, касание видео закрывает. */
+    /** Подсказка «Фокус касанием»: при включении кнопки (пока не отмечено «Больше не показывать») и по долгому нажатию на неё. */
+    var touchFocusHelpOpen by mutableStateOf(false)
+
     val overlayOpen: Boolean
         get() = fnOpen || assistOpen || allSettingsOpen || settingsOpen || pillInfo != null || presetMenuOpen || newPresetOpen ||
-            savePresetOpen || presetsOpen
+            savePresetOpen || presetsOpen || touchFocusHelpOpen
 
     fun togglePillInfo(info: PillInfo) {
         val open = pillInfo != info
@@ -263,6 +266,7 @@ class ScreenState {
     }
 
     fun closeOverlays() {
+        touchFocusHelpOpen = false
         fnOpen = false
         assistOpen = false
         allSettingsOpen = false
@@ -713,8 +717,10 @@ private fun Controls(controller: CameraController, screen: ScreenState, feedback
                 }
             }
         }
-        RightColumn(controller, feedback, Modifier.align(Alignment.CenterEnd).padding(end = 4.dp)
+        RightColumn(controller, screen, feedback, Modifier.align(Alignment.CenterEnd).padding(end = 4.dp)
             .onGloballyPositioned { screen.rightColumnRect = it.boundsInRoot() })
+        // подсказка к фокусу касанием — левее кнопок справа
+        if (screen.touchFocusHelpOpen) TouchFocusHelpCard(controller, screen, Modifier.align(Alignment.CenterEnd).padding(end = 96.dp))
         if (!screen.fnOpen && !screen.assistOpen && controller.shots.isNotEmpty()) {
             Box(Modifier.align(Alignment.BottomStart).padding(bottom = 76.dp)
                 .onSizeChanged { screen.stripHeight = it.height.toFloat() }) {

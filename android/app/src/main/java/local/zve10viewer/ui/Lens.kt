@@ -1,11 +1,14 @@
 package local.zve10viewer.ui
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -19,11 +22,13 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -43,6 +48,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -103,8 +109,9 @@ private fun ZoomKey(controller: CameraController, title: String, direction: Int)
  * Фокус касанием: горит — касание кадра ставит туда фокус (в зонах «Точка» и «Зона» — точка AF, в остальных — касание
  * экрана камеры: фокус или слежение, как настроено в камере), а на кадре видны рамки фокуса камеры.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun TouchFocusButton(controller: CameraController) {
+fun TouchFocusButton(controller: CameraController, screen: ScreenState) {
     val available = controller.touchFocusMethod != null
     // подпись под кнопкой — как «Зум» и режим съёмки: значок сам по себе не говорит, что это
     Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -114,7 +121,19 @@ fun TouchFocusButton(controller: CameraController) {
                 .semantics {
                     contentDescription = if (available) "Фокус касанием" else controller.touchRefusal
                 }
-                .clickable { controller.toggleTouchFocus() },
+                // включили — как это работает, пока не отметили «Больше не показывать»; долгое нажатие — подсказка всегда
+                .combinedClickable(
+                    onClick = {
+                        controller.toggleTouchFocus()
+                        val explain = controller.touchFocusOn && !controller.prefs.touchFocusHelpHidden
+                        if (explain) screen.closeOverlays()
+                        screen.touchFocusHelpOpen = explain
+                    },
+                    onLongClick = {
+                        screen.closeOverlays()
+                        screen.touchFocusHelpOpen = true
+                    },
+                ),
             contentAlignment = Alignment.Center,
         ) {
             // уголки рамки фокуса и точка в середине
@@ -129,6 +148,50 @@ fun TouchFocusButton(controller: CameraController) {
             }
         }
         Text("Фокус", color = Color.White.copy(alpha = 0.8f), fontSize = 14.sp, modifier = Modifier.clearAndSetSemantics { })
+    }
+}
+
+/**
+ * Подсказка «Фокус касанием»: что сделает касание сейчас и как это устроено — как у программы для Mac. Открывается при
+ * включении кнопки (пока не отмечено «Больше не показывать») и по долгому нажатию на неё; закрывается «Понятно» или
+ * касанием мимо.
+ */
+@Composable
+fun TouchFocusHelpCard(controller: CameraController, screen: ScreenState, modifier: Modifier) {
+    var hidden by remember { mutableStateOf(controller.prefs.touchFocusHelpHidden) }
+    Column(
+        modifier.width(440.dp).background(Color(0xF71C1C1E), RoundedCornerShape(14.dp))
+            // касания по карточке не уходят к кадру и кнопкам под ней
+            .pointerInput(Unit) { detectTapGestures { } }
+            .padding(18.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text("Фокус касанием", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+        Text(controller.touchFocusNow, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Medium, lineHeight = 20.sp)
+        val note = TextStyle(color = Secondary, fontSize = 14.sp, lineHeight = 19.sp)
+        Text("Пока кнопка горит синим, касание кадра ставит туда фокус. Как — решает зона фокуса камеры:", style = note)
+        Text("• «Точка» и «Зона» — рамка AF переезжает в точку касания.", style = note)
+        Text("• «Широкая» и другие — программа касается экрана камеры: камера фокусируется или следит за предметом, как выбрано " +
+            "в её меню (Touch Function). Слежение снимает «Снять слежение» над строкой значений.", style = note)
+        Text("• В ручном фокусе касание фокус не ставит — для него шкала фокуса внизу.", style = note)
+        Text("Поверх кадра — рамки фокуса самой камеры: зелёная — фокус найден, пунктир — слежение.", style = note)
+        Text("Кнопка не горит — касание кадра прячет и возвращает элементы. Эта подсказка — по долгому нажатию на кнопку.",
+            style = note)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.weight(1f).clickable {
+                hidden = !hidden
+                controller.prefs.touchFocusHelpHidden = hidden
+            }, verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(hidden, onCheckedChange = {
+                    hidden = it
+                    controller.prefs.touchFocusHelpHidden = it
+                })
+                Text("Больше не показывать", color = Color.White, fontSize = 14.sp)
+            }
+            Text("Понятно", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Medium,
+                modifier = Modifier.background(Accent, RoundedCornerShape(9.dp)).clickable { screen.touchFocusHelpOpen = false }
+                    .padding(horizontal = 16.dp, vertical = 9.dp))
+        }
     }
 }
 

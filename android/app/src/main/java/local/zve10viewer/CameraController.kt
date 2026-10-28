@@ -977,6 +977,11 @@ class CameraController(private val context: Context, private val scope: Coroutin
     val focalPosition: Int?
         get() = properties[SonyProp.FOCAL_POSITION]?.takeIf { it.enabled != 0 }?.current?.intValue?.toInt()
 
+    /** Что сделает касание кадра сейчас — строка «Сейчас» в подсказке к фокусу касанием. */
+    val touchFocusNow: String
+        get() = TouchFocus.helpNow(touchFocusMethod, ValueFormatter.label(SettingID.focusArea, property(SettingID.focusArea)),
+            value(SonyProp.TOUCH_FUNCTION), value(SonyProp.FOCUS_MODE), value(SonyProp.ZOOM_SCALE))
+
     /** Почему фокус касанием сейчас не ставится — для подсказки к кнопке и строки состояния. */
     val touchRefusal: String
         get() = TouchFocus.refusal(value(SonyProp.FOCUS_MODE), value(SonyProp.ZOOM_SCALE))

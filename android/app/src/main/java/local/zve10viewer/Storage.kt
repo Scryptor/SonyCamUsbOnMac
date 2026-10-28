@@ -141,6 +141,11 @@ class Prefs(context: Context) {
         }
 
     /** Вибрация при съёмке — если у планшета есть мотор. */
+    /** «Больше не показывать» в подсказке к фокусу касанием. */
+    var touchFocusHelpHidden: Boolean
+        get() = prefs.getBoolean("touchFocusHelpHidden", false)
+        set(value) = prefs.edit().putBoolean("touchFocusHelpHidden", value).apply()
+
     var hapticsEnabled: Boolean
         get() = prefs.getBoolean("hapticsEnabled", true)
         set(value) = prefs.edit().putBoolean("hapticsEnabled", value).apply()

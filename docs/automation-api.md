@@ -99,7 +99,7 @@ open "/Applications/Sony Cam Viewer.app" --args --automation
 | `status` | строка или `null` | сообщение справа от кнопок вверху слева, например «Сохранено в «Вечер»» или «Не удалось на «C»: ISO 51200» |
 | `review` | объект или `null` | просмотр снимка после съёмки: `title`, `source` («Загруженный снимок», «Кадр с камеры»), `timed` (закроется сам), `hasImage`, `files` (пути) |
 | `shots` | массив | снимки и стоп-кадры сессии, новые сначала: `title`, `files` |
-| `prefs` | объект | настройки программы: `destination`, `folder`, `reviewEnabled`, `reviewSeconds`, `reviewSource`, `autoHide`, `autoHideSeconds`, `wifiAdaptiveQuality`, `tallyEnabled`, `tallyWidth`, `tallyOpacity`, `tallyBlink` |
+| `prefs` | объект | настройки программы: `destination`, `folder`, `reviewEnabled`, `reviewSeconds`, `reviewSource`, `autoHide`, `autoHideSeconds`, `previewQuality` (`auto`, `high`, `low`), `touchFocusHelpHidden`, `wifiAdaptiveQuality` (то же по-старому: `true` — авто), `tallyEnabled`, `tallyWidth`, `tallyOpacity`, `tallyBlink` |
 | `cameraDestination` | число или `null` | куда камера сохраняет снимки (`0xD222`): 1 — Mac, 16 — карта, 17 — оба |
 | `cameras` | массив | список камер, как в подсказке строки состояния: `id` (у знакомой — её отпечаток, иначе `usb:…` / `wifi:адрес`), `name`, `model`, `link` — `usb`, `wifi` или `null` (не видна), `host` и `port` (по Wi-Fi), `state` — `current`, `available`, `needsPairing`, `offline`, `stateLabel` — подпись («свободна», «сопрягаю…»), `detail` — как подключена, `paired`, `known` |
 | `currentCamera` | строка или `null` | id камеры на связи (после того как она назвала себя) |
@@ -115,7 +115,7 @@ open "/Applications/Sony Cam Viewer.app" --args --automation
 | `presetChanges` | массив строк | что именно: `["ISO 800 → 1600", "1/50 → 1/100"]` |
 | `previewingPreset` | число или `null` | какой пресет сейчас в быстром просмотре («Посмотреть» держат или камера ещё возвращается) |
 | `previewReturning` | bool | кнопку отпустили, камера возвращается как была |
-| `ui` | объект | что на экране: `fnOpen`, `allSettingsOpen`, `selected`, `group`, `editing` (если открыта строка), `info` (если открыта подсказка из плашки: `connection`, `frames` или `slowMotion`), `histogram`, `histogramPosition` — где гистограмма (`x`, `y` — доли свободного места; `null` — на месте по умолчанию), `controlsHidden`, `manualHidden`, `debug` — открыта ли панель отладки, `debugTab` — её вкладка, `gallery` — открытая галерея (`index` снимка в `shots`, `title`) или `null`, `zoom` — цифровое увеличение (`factor`, `centerX`, `centerY` — точка кадра в центре экрана, доли), `statusBar` — строка состояния: `pinned` — закреплена ли, `visible` — видна ли сейчас (вместе с элементами или закреплённая), `presetMenu` — открыт ли список пресетов, `presetNaming` — открыто ли окошко «Новый пресет», `presetSaving` — окошко «Сохранить настройки», `presetPeeking` — держат ли «Посмотреть», `presetsWindow` — окно «Пресеты» (`selected` — выбранный в нём пресет) или `null`, `assist` — меню «Монитор»: `open`, `selected` (выбранная плитка), `values` — значения всех инструментов, `waveform` — волновая форма: `on`, `mode`, `position` (доли свободного места или `null`), `overlay` — панель наложения: `hidden` — эталон спрятан, `position` — её место (доли свободного места или `null`), `touchFocus` — горит ли кнопка фокуса касанием |
+| `ui` | объект | что на экране: `fnOpen`, `allSettingsOpen`, `selected`, `group`, `editing` (если открыта строка), `info` (если открыта подсказка из плашки: `connection`, `frames` или `slowMotion`), `histogram`, `histogramPosition` — где гистограмма (`x`, `y` — доли свободного места; `null` — на месте по умолчанию), `controlsHidden`, `manualHidden`, `debug` — открыта ли панель отладки, `debugTab` — её вкладка, `gallery` — открытая галерея (`index` снимка в `shots`, `title`) или `null`, `zoom` — цифровое увеличение (`factor`, `centerX`, `centerY` — точка кадра в центре экрана, доли), `statusBar` — строка состояния: `pinned` — закреплена ли, `visible` — видна ли сейчас (вместе с элементами или закреплённая), `presetMenu` — открыт ли список пресетов, `presetNaming` — открыто ли окошко «Новый пресет», `presetSaving` — окошко «Сохранить настройки», `presetPeeking` — держат ли «Посмотреть», `presetsWindow` — окно «Пресеты» (`selected` — выбранный в нём пресет) или `null`, `assist` — меню «Монитор»: `open`, `selected` (выбранная плитка), `values` — значения всех инструментов, `waveform` — волновая форма: `on`, `mode`, `position` (доли свободного места или `null`), `overlay` — панель наложения: `hidden` — эталон спрятан, `position` — её место (доли свободного места или `null`), `touchFocus` — горит ли кнопка фокуса касанием, `touchFocusHelp` — открыта ли подсказка к ней |
 | `settings` | массив | все 24 настройки, см. ниже |
 
 Элемент `settings`:
@@ -199,7 +199,7 @@ open "/Applications/Sony Cam Viewer.app" --args --automation
 
 | Команда | Параметры | Что делает |
 |---|---|---|
-| `toggleTouchFocus` | — | кнопка фокуса касанием: включить или выключить (щелчок по кадру ставит фокус, рамки камеры видны) |
+| `toggleTouchFocus` | — | кнопка фокуса касанием: включить или выключить (щелчок по кадру ставит фокус, рамки камеры видны); включили — открывается подсказка, как он работает (`ui.touchFocusHelp`), если не отмечено «Больше не показывать»; закрывает её `closeOverlays` |
 | `touchFocus` | `x`, `y` — точка кадра, доли | фокус в эту точку, как щелчок по кадру с включённой кнопкой: точка AF в зонах «Точка» и «Зона», иначе касание экрана камеры. 409 — в ручном фокусе или камера не умеет |
 | `cancelTouch` | — | «Снять слежение»; 409 — снимать нечего |
 | `zoomStart` | `name`: `"tele"` или `"wide"` | зум едет, как будто держат «T» или «W»; 409 — камера не даёт управлять зумом |
@@ -290,7 +290,9 @@ open "/Applications/Sony Cam Viewer.app" --args --automation
 | `autoHide` | `true`, `false` |
 | `autoHideSeconds` | `1`…`30` |
 | `wifiEnabled` | `true`, `false` |
-| `wifiAdaptiveQuality` | `true`, `false` — снижать качество превью при слабом Wi-Fi |
+| `touchFocusHelpHidden` | `true`, `false` — «Больше не показывать» в подсказке к фокусу касанием |
+| `previewQuality` | `auto`, `high`, `low` — качество превью по Wi-Fi: авто (снижать при слабом сигнале), всегда 1024×576 или всегда 640×360; как выбор в подсказке к счётчику кадров |
+| `wifiAdaptiveQuality` | `true`, `false` — прежний переключатель: `true` — `previewQuality auto`, `false` — `high` |
 | `tallyEnabled` | `true`, `false` — красная рамка вокруг картинки во время записи |
 | `tallyWidth` | `1`…`12` — её толщина, pt |
 | `tallyOpacity` | `0.3`…`1` — её яркость |

@@ -245,6 +245,17 @@ final class ScreenState {
     func toggleTouchFocus() {
         touchFocusOn.toggle()
         defaults.set(touchFocusOn, forKey: "touchFocusOn")
+        // включили — как это работает, пока не отметили «Больше не показывать»; выключили — подсказка не нужна
+        touchFocusHelpOpen = touchFocusOn && !touchFocusHelpHidden
+    }
+
+    /// Подсказка «Фокус касанием»: при включении кнопки (пока не отмечено «Больше не показывать») и по правому щелчку на ней.
+    var touchFocusHelpOpen = false
+
+    /// «Больше не показывать» в подсказке к фокусу касанием.
+    var touchFocusHelpHidden: Bool {
+        get { access(keyPath: \.touchFocusHelpOpen); return defaults.bool(forKey: "touchFocusHelpHidden") }
+        set { withMutation(keyPath: \.touchFocusHelpOpen) { defaults.set(newValue, forKey: "touchFocusHelpHidden") } }
     }
 
     func toggleWaveform() {
@@ -368,6 +379,7 @@ final class ScreenState {
         editing = nil
         pillInfo = nil
         presetMenuOpen = false
+        touchFocusHelpOpen = false
     }
 
     func toggleStatusPin() {

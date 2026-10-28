@@ -2363,6 +2363,13 @@ final class CameraController {
         return Int(v)
     }
 
+    /// Что сделает касание кадра сейчас — строка «Сейчас» в подсказке к фокусу касанием.
+    var touchFocusNow: String {
+        TouchFocus.helpNow(method: touchFocusMethod, area: ValueFormatter.label(.focusArea, property(.focusArea)),
+                           touchFunction: value(SonyProp.touchFunction), focusMode: value(SonyProp.focusMode),
+                           zoomScale: value(SonyProp.zoomScale))
+    }
+
     /// Почему фокус касанием сейчас не ставится — для подсказки к кнопке и строки состояния.
     var touchRefusal: String {
         TouchFocus.refusal(focusMode: value(SonyProp.focusMode), zoomScale: value(SonyProp.zoomScale))

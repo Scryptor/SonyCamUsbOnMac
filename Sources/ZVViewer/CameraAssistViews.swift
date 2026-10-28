@@ -48,6 +48,53 @@ struct ZoomRocker: View {
     }
 }
 
+/// Подсказка «Фокус касанием»: что сделает касание сейчас и как это устроено. Открывается при включении кнопки (пока не
+/// отмечено «Больше не показывать») и по правому щелчку на ней; закрывается «Понятно», щелчком мимо или Esc.
+struct TouchFocusHelp: View {
+    let controller: CameraController
+    let screen: ScreenState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 8) {
+                TouchFocusIcon()
+                    .frame(width: 18, height: 18)
+                Text("Фокус касанием").font(.headline)
+            }
+            Text(controller.touchFocusNow)
+                .font(.callout.weight(.semibold))
+            Text("Пока кнопка горит синим, щелчок по кадру ставит туда фокус. Как — решает зона фокуса камеры:")
+            VStack(alignment: .leading, spacing: 5) {
+                Text("• «Точка» и «Зона» — рамка AF переезжает в точку щелчка.")
+                Text("• «Широкая» и другие — программа касается экрана камеры: камера фокусируется или следит за предметом, "
+                     + "как выбрано в её меню (Touch Function). Слежение снимает «Снять слежение» над строкой значений.")
+                Text("• В ручном фокусе щелчок фокус не ставит — для него шкала фокуса внизу.")
+            }
+            Text("Поверх кадра — рамки фокуса самой камеры: зелёная — фокус найден, пунктир — слежение.")
+            Text("Кнопка не горит — щелчок по кадру фокус не трогает. Эта подсказка — по правому щелчку на кнопке.")
+                .foregroundStyle(.secondary)
+            HStack {
+                Toggle("Больше не показывать", isOn: Binding(get: { screen.touchFocusHelpHidden },
+                                                                           set: { screen.touchFocusHelpHidden = $0 }))
+                    .toggleStyle(.checkbox)
+                Spacer()
+                Button("Понятно") { screen.touchFocusHelpOpen = false }
+                    .keyboardShortcut(.defaultAction)
+            }
+            .padding(.top, 2)
+        }
+        .font(.callout)
+        .fixedSize(horizontal: false, vertical: true)
+        .padding(16)
+        .frame(width: 380, alignment: .leading)
+        .background(Color(white: 0.11).opacity(0.96), in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(.white.opacity(0.08)))
+        // щелчки по карточке не уходят к кадру под ней
+        .contentShape(Rectangle())
+        .onTapGesture {}
+    }
+}
+
 /// Фокус касанием: горит — щелчок по кадру ставит туда фокус (в зонах «Точка» и «Зона» — точка AF, в остальных —
 /// касание экрана камеры: фокус или слежение, как настроено в камере), а на кадре видны рамки фокуса камеры.
 struct TouchFocusButton: View {
@@ -69,6 +116,12 @@ struct TouchFocusButton: View {
             .help(method == nil ? controller.touchRefusal
                   : screen.touchFocusOn ? "Фокус касанием включён: щелчок по кадру ставит фокус" : "Фокус касанием: щелчок по кадру ставит фокус")
             .accessibilityLabel("Фокус касанием")
+            .contextMenu {
+                Button("Как работает фокус касанием…") {
+                    screen.closeOverlays()
+                    screen.touchFocusHelpOpen = true
+                }
+            }
             Text("Фокус")
                 .font(.caption)
                 .foregroundStyle(.white.opacity(0.8))

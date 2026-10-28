@@ -35,8 +35,20 @@ def run(out, restart_camera):
     s = state()
     check("камера назвала команды фокуса и зума",
           all(c in lens(s)["controls"] for c in ("0xD2D1", "0xD2DC", "0xD2DD", "0xD2E4")), lens(s)["controls"])
-    if not s["ui"]["touchFocus"]:
+    act("setPreference", key="touchFocusHelpHidden", value="false")
+    if s["ui"]["touchFocus"]:
         act("toggleTouchFocus")
+    act("toggleTouchFocus")
+    s = state()
+    check("включили фокус касанием — подсказка, как он работает", s["ui"]["touchFocus"] and s["ui"]["touchFocusHelp"], s["ui"])
+    shot(out, "0-touch-help")
+    act("closeOverlays")
+    check("«Понятно» или щелчок мимо — подсказка закрыта", not state()["ui"]["touchFocusHelp"], state()["ui"])
+    act("setPreference", key="touchFocusHelpHidden", value="true")
+    act("toggleTouchFocus")
+    act("toggleTouchFocus")
+    s = state()
+    check("«Больше не показывать» — при включении подсказки нет", s["ui"]["touchFocus"] and not s["ui"]["touchFocusHelp"], s["ui"])
     act("setPreference", key="autoHide", value="false")
 
     # «Широкая»: касание экрана камеры — слежение

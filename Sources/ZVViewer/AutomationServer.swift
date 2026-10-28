@@ -416,6 +416,9 @@ final class AutomationServer {
         case "wifiEnabled":
             guard let b = Bool(value) else { return "wifiEnabled: true | false" }
             Prefs.wifiEnabled = b
+        case "touchFocusHelpHidden":
+            guard let b = Bool(value) else { return "touchFocusHelpHidden: true | false" }
+            screen.touchFocusHelpHidden = b
         case "previewQuality":
             guard let mode = PreviewQualityMode(rawValue: value) else { return "previewQuality: auto | high | low" }
             controller.setPreviewQuality(mode)
@@ -522,6 +525,7 @@ final class AutomationServer {
             "values": Dictionary(uniqueKeysWithValues: MonitorTool.allCases.map { ($0.rawValue, screen.assist.value($0)) }),
         ] as [String: Any]
         ui["touchFocus"] = screen.touchFocusOn
+        ui["touchFocusHelp"] = screen.touchFocusHelpOpen
         ui["waveform"] = [
             "on": screen.waveformOn,
             "mode": screen.waveformMode.rawValue,
@@ -611,6 +615,7 @@ final class AutomationServer {
                 "reviewEnabled": Prefs.reviewEnabled, "reviewSeconds": Prefs.reviewSeconds,
                 "reviewSource": Prefs.reviewSource.rawValue, "autoHide": Prefs.autoHide, "autoHideSeconds": Prefs.autoHideSeconds,
                 "previewQuality": controller.previewQualityMode.rawValue,
+                "touchFocusHelpHidden": screen.touchFocusHelpHidden,
                 "wifiAdaptiveQuality": controller.previewQualityMode == .auto,
                 "tallyEnabled": Prefs.tallyEnabled, "tallyWidth": Prefs.tallyWidth, "tallyOpacity": Prefs.tallyOpacity,
                 "tallyBlink": Prefs.tallyBlink,
