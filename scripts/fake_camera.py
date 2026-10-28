@@ -6,6 +6,12 @@
 scripts/make-viewfinder-picture.py), свой JPEG — --picture. Качество превью 0xD26A меняет кадр, как настоящая камера по
 Wi-Fi: высокое — 1024×576, дополнено до ~72 КБ; низкое — 640×360, дополнено до ~34 КБ.
 
+Профиль изображения 0xD23F меняет вид кадра, как у настоящей камеры с гаммами Sony: PP7 — S-Log2, PP8 и PP9 — S-Log3,
+PP10 — HLG показывают «лог» (бледный, малоконтрастный кадр, scripts/assets/viewfinder-<лог>.jpg, его делает
+make-viewfinder-picture.py --log), остальные профили и «выкл» — обычную картинку. У каждого вида свои низкое качество и
+ступени зума; набор строится в фоне при первом выборе профиля. Свой --picture виден при любом профиле как есть.
+Операция, которой нет в списке DeviceInfo, получает 0x2005 (OperationNotSupported), а не OK.
+
 Снимает и пишет, ничего не записывая на настоящую карту:
 - запись в свойства (0x9205) меняет их текущее значение — режим фото/видео, «куда сохранять» и т. п.;
 - спуск (S1 0xD2C1, S2 0xD2C2 через 0x9207): фокус находится за 0,15 с, через 0,4 с после S2 в памяти камеры
@@ -18,6 +24,9 @@ Wi-Fi: высокое — 1024×576, дополнено до ~72 КБ; низк�
   касание 0xD2E4 в «Широкой» начинает слежение (0xD2E5 — снять), рамки — в кадре live view (FocalFrameInfo);
   Near/Far 0xD2D1 двигает фокус 0xD24C, только в MF (0x500A = 1 открывает 0xD235); зум 0xD2DD (1 — теле, −1 — широкий,
   0 — стоп) едет 40 %/с по шкале 0xD25D, и картинка в видоискателе наезжает до 3×.
+Как сам объектив отзывается на Near/Far, задают --focus-gain, --focus-step-ms и --focus-deadband (по умолчанию — 1:1,
+сразу, без мёртвой зоны): шаг сдвигает фокус на round(команда × G), на половинке — от нуля (3,5 → 4, −3,5 → −4); ответ
+приходит через T мс; шаг не больше ±3, когда до края шкалы, куда он идёт, ближе D, фокус не двигает — у ZV-E10 так у края.
 
 Несколько камер сразу (scripts/fake_cameras.py) различаются: --name, --serial (по нему программа отличает камеры),
 --mark (другой план сцены — zoom, pan — или кадр отражён и повёрнут), --battery, --mode, --format. --ssdp — отвечает на поиск в сети, как камера Sony, с портом
@@ -28,11 +37,13 @@ Wi-Fi: высокое — 1024×576, дополнено до ~72 КБ; низк�
                          [--name ZV-E10] [--serial …] [--mark zoom|pan|flip|flop|rotate] [--picture кадр.jpg]
                          [--battery 0–100] [--mode photo|video] [--format jpeg|raw+jpeg] [--ssdp] [--busy] [--pairing]
                          [--reject iso,…] [--record-delay с] [--record сценарий]
+                         [--focus-gain G] [--focus-step-ms T] [--focus-deadband D]
   ZV_PTPIP_HOST=127.0.0.1 …/ZVViewer --automation        # Mac
   am start … --es ptpipHost <IP Mac>                       # планшет: --listen <IP Mac>:15740
   scripts/badnet.py --camera 127.0.0.1:25740 …             # или через прокси: --listen 127.0.0.1:25740
 """
-import argparse, asyncio, os, socket, struct, subprocess, sys, tempfile, time, uuid
+import argparse, asyncio, os, socket, struct, subprocess, sys, tempfile, threading, time, uuid
+from decimal import Decimal, ROUND_HALF_UP
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIX = os.path.join(ROOT, "Tests/ZVCoreTests/Fixtures")
@@ -41,7 +52,7 @@ ASSETS = os.path.join(ROOT, "scripts/assets")
 VIEWS = {"zoom": "viewfinder-zoom.jpg", "pan": "viewfinder-pan.jpg"}      # другие планы той же сцены
 NAME = "ZV-E10"
 FRAME_PERIOD = 0.040
-OK, ACCESS_DENIED, INVALID_HANDLE, DEVICE_BUSY = 0x2001, 0x200F, 0x2009, 0x2019
+OK, OPERATION_NOT_SUPPORTED, ACCESS_DENIED, INVALID_HANDLE, DEVICE_BUSY = 0x2001, 0x2005, 0x200F, 0x2009, 0x2019
 LIVE_VIEW, CAPTURED = 0xFFFFC002, 0xFFFFC001
 PROPERTY_CHANGED = 0xC203
 S1, S2, MOVIE_REC = 0xD2C1, 0xD2C2, 0xD2C8
@@ -53,6 +64,10 @@ ZOOM_LEVELS, ZOOM_MAX = 11, 3.0                            # картинка н
 SPOT_SIZE = {0x101: 0.06, 0x102: 0.09, 0x103: 0.12, 0x104: 0.09}  # рамка «Точки» S/M/L/расширенной, доля ширины
 FOCUS_FOUND, OBJECT_IN_MEMORY, RECORDING, FILE_FORMAT = 0xD213, 0xD215, 0xD21D, 0xD253
 FORMATS_BY_NAME = {"jpeg": 3, "raw+jpeg": 2}              # 0xD253: формат снимка
+PICTURE_PROFILE = 0xD23F                                   # 0 — выкл, 1–10 — PP1–PP10
+# профиль → какой лог камера показывает в превью (заводские гаммы Sony у ZV-E10): имя — в scripts/assets/viewfinder-<имя>.jpg
+LOG_FRAMES = {7: "slog2", 8: "slog3", 9: "slog3", 10: "hlg"}
+NEAR_FAR_SMALL = 3                                         # шаги до ±3 у края шкалы фокуса камера может не отработать
 EXPOSURE_PROGRAM, BATTERY = 0x500E, 0xD218
 WHITE_BALANCE, COLOR_TEMP, MANUAL_WB = 0x5005, 0xD20F, 0x8012  # температура открыта только в «Цвет. темп.»
 MODES = {"photo": 0x1, "video": 0x78053}                   # буква M в фото и в видео
@@ -84,13 +99,15 @@ def fixture(name):
     return open(os.path.join(FIX, name), "rb").read()
 
 
-def frames(mark=None, picture=None, crop=1.0):
+def frames(mark=None, picture=None, crop=1.0, look=None):
     """Ответы GetObject 0xFFFFC002 для высокого и низкого качества: заголовок Sony, JPEG, добивка до размера.
     mark — другой план сцены (zoom, pan) или кадр отражён и повёрнут: у каждой из нескольких камер своя картинка;
-    picture — свой JPEG 1024×576 вместо сцены; crop — наезд зума: середина кадра, растянутая во столько раз."""
+    picture — свой JPEG 1024×576 вместо сцены; crop — наезд зума: середина кадра, растянутая во столько раз;
+    look — лог (slog2, slog3, hlg): кадр из viewfinder-<лог>.jpg вместо сцены (отдельных логов для планов zoom и pan нет:
+    у них в логе главный план); свой picture остаётся как есть."""
     raw = fixture("lv_frame_raw.bin")
     offset, size = struct.unpack_from("<II", raw)
-    path = picture or os.path.join(ASSETS, VIEWS.get(mark, "viewfinder.jpg"))
+    path = picture or os.path.join(ASSETS, f"viewfinder-{look}.jpg" if look else VIEWS.get(mark, "viewfinder.jpg"))
     jpeg_high = open(path, "rb").read() if os.path.exists(path) else raw[offset:offset + size]
     with tempfile.TemporaryDirectory() as tmp:
         src, dst = os.path.join(tmp, "high.jpg"), os.path.join(tmp, "low.jpg")
@@ -142,6 +159,21 @@ def with_serial(info, serial):
         pos += 1 + 2 * info[pos]
     end = pos + 1 + 2 * info[pos]
     return info[:pos] + ptp_string(serial) + info[end:]
+
+
+def device_operations(info):
+    """Коды операций из DeviceInfo — первого массива после FunctionalMode: что камера объявила, то и умеет."""
+    pos = 2 + 4 + 2
+    pos += 1 + 2 * info[pos]                                # описание расширения производителя
+    pos += 2                                                # FunctionalMode
+    count = struct.unpack_from("<I", info, pos)[0]
+    return set(struct.unpack_from(f"<{count}H", info, pos + 4))
+
+
+def scaled_step(value, gain):
+    """Шаг Near/Far с усилением: round(value·gain), на половинке — от нуля (3,5 → 4, −3,5 → −4, 2,5 → 3); встроенный
+    round() округляет к чётному. Считается в десятичных, чтобы 5·1,1 было ровно 5,5, а не 5,4999…"""
+    return int((Decimal(repr(gain)) * value).quantize(Decimal(1), rounding=ROUND_HALF_UP))
 
 
 class SSDPResponder(asyncio.DatagramProtocol):
@@ -265,12 +297,28 @@ class Properties:
         return self.set(code, struct.unpack_from(fmt, data)[0])
 
 
+class FrameSet:
+    """Кадры одного вида картинки — обычного (look = None) или лога (slog2, slog3, hlg): высокое и низкое качество и свои
+    ступени наезда зума."""
+
+    def __init__(self, look, frames):
+        self.look = look
+        self.frames = frames                                # {2: высокое качество, 1: низкое}
+        self.zoom = None                                    # ступени наезда: None — не строили, [] — строятся в фоне
+
+
 class Camera:
     def __init__(self, args):
         self.mark, self.picture = args.mark, args.picture
-        jpeg, self.frames = frames(args.mark, args.picture)
+        jpeg, plain = frames(args.mark, args.picture)
+        self.sets = {None: FrameSet(None, plain)}           # обычный вид — сразу, логи — при первом выборе профиля
+        self.shown = self.sets[None]                        # какой набор отдаём, пока нужный строится
+        self.building = set()
         self.photo = open(args.photo, "rb").read() if args.photo else big_photo(jpeg)
         self.rate = args.rate
+        self.focus_gain = args.focus_gain                   # объектив: на сколько единиц шкалы сдвигает команда Near/Far 1
+        self.focus_step = args.focus_step_ms / 1000         # через сколько секунд камера отвечает на Near/Far
+        self.focus_deadband = args.focus_deadband           # у края шкалы меньше этого малые шаги не двигают фокус
         self.ignore_record = args.ignore_record
         self.record_delay = args.record_delay
         self.record_scenario = args.record
@@ -310,13 +358,18 @@ class Camera:
         self.touch_point = None                             # слежение от касания экрана
         self.zoom_dir = 0                                   # −1, 0, 1
         self.zoom_pos = 0.0                                 # 0…100 на шкале
-        self.zoom_frames = None                             # ступени картинки, считаются в фоне при первом зуме
         self.zoom_task = None
         self.props.set(ZOOM_BAR, 1 << 24)
         self.sync_near_far()
         self.events = []                                    # писатели соединений событий
         self.objects = []                                   # снимки в памяти камеры: (имя, данные)
         self.number = 1000
+
+    @property
+    def operations(self):
+        """Операции из DeviceInfo, который камера отдаёт программе: что не объявлено — отвечаем 0x2005. Берётся из байтов
+        каждый раз, поэтому другой DeviceInfo (другой профиль камеры) сам меняет и список."""
+        return device_operations(self.device_info)
 
     def changed(self, code, value=None):
         """Свойство поменялось: записать и сообщить программе событием, как камера."""
@@ -364,32 +417,77 @@ class Camera:
                 out += struct.pack("<HHB3xIIII", 1, state, 1, round(x * xd), round(y * yd), round(h * yd), round(w * xd))
         return out + b"\0" * 16
 
+    def profile_look(self):
+        """Какой вид картинки по профилю 0xD23F: лог (slog2, slog3, hlg) или None — обычная. Свой --picture виден как есть."""
+        if self.picture or PICTURE_PROFILE not in self.props.current:
+            return None
+        return LOG_FRAMES.get(self.props.get(PICTURE_PROFILE))
+
+    def frame_set(self):
+        """Набор кадров под профиль; пока нужный строится — тот, что показывали, чтобы картинка не мигала не тем видом."""
+        ready = self.sets.get(self.profile_look())
+        if ready:
+            self.shown = ready
+        return self.shown
+
+    def use_profile(self):
+        """Профиль 0xD23F поменялся: набор лога строится в фоне при первом выборе — как ступени зума."""
+        look = self.profile_look()
+        if look is None:
+            self.log("профиль без лога — кадры обычные")
+            return
+        if look in self.sets:
+            self.log(f"профиль — лог {look}, кадры готовы")
+            return
+        if look in self.building:
+            return
+        path = os.path.join(ASSETS, f"viewfinder-{look}.jpg")
+        if not os.path.exists(path):
+            self.log(f"профиль — лог {look}, но нет {os.path.relpath(path, ROOT)} (make-viewfinder-picture.py --log): кадры прежние")
+            return
+        self.building.add(look)
+        self.log(f"профиль — лог {look}, строю кадры")
+
+        def work():
+            try:
+                self.sets[look] = FrameSet(look, frames(self.mark, look=look)[1])
+                self.log(f"кадры лога {look} готовы")
+            except Exception as error:
+                self.log(f"кадры лога {look} не построились: {error}")
+            finally:
+                self.building.discard(look)
+
+        threading.Thread(target=work, daemon=True).start()
+
     def live_view(self):
-        """Кадр для GetObject 0xFFFFC002: картинка (с наездом зума) и рамки фокуса в заголовке."""
-        frames = self.frames
-        if self.zoom_frames and self.zoom_pos > 0:
-            frames = self.zoom_frames[min(ZOOM_LEVELS - 1, round(self.zoom_pos / 100 * (ZOOM_LEVELS - 1)))]
+        """Кадр для GetObject 0xFFFFC002: картинка профиля (с наездом зума) и рамки фокуса в заголовке."""
+        current = self.frame_set()
+        frames = current.frames
+        if self.zoom_pos > 0:
+            self.prepare_zoom(current)                      # у набора свои ступени: нет их — строятся, пока кадр без наезда
+            if current.zoom:
+                frames = current.zoom[min(ZOOM_LEVELS - 1, round(self.zoom_pos / 100 * (ZOOM_LEVELS - 1)))]
         body = bytearray(frames[self.quality])
         info = self.focus_frames()[:FOCAL_INFO_MAX]
         body[FOCAL_INFO_AT:FOCAL_INFO_AT + len(info)] = info
         struct.pack_into("<II", body, 8, FOCAL_INFO_AT, len(info))
         return bytes(body)
 
-    def prepare_zoom(self):
-        """Ступени наезда картинки — в фоне, при первом зуме: sips обрезает середину и растягивает обратно."""
-        if self.zoom_frames is not None:
+    def prepare_zoom(self, current=None):
+        """Ступени наезда картинки — в фоне, при первом зуме набора: sips обрезает середину и растягивает обратно."""
+        current = current or self.frame_set()
+        if current.zoom is not None:
             return
-        self.zoom_frames = []
+        current.zoom = []
 
         def work():
             levels = []
             for i in range(ZOOM_LEVELS):
                 z = 1 + (ZOOM_MAX - 1) * i / (ZOOM_LEVELS - 1)
-                levels.append(frames(self.mark, self.picture, crop=z)[1])
-            self.zoom_frames = levels
-            self.log("ступени зума готовы")
+                levels.append(frames(self.mark, self.picture, crop=z, look=current.look)[1])
+            current.zoom = levels
+            self.log("ступени зума готовы" + (f" ({current.look})" if current.look else ""))
 
-        import threading
         threading.Thread(target=work, daemon=True).start()
 
     def zoom_step(self):
@@ -438,12 +536,20 @@ class Camera:
                 self.log("слежение снято")
             return OK
         if code == NEAR_FAR:
+            self.reply_delay = self.focus_step              # линза едет: ответ приходит через --focus-step-ms
             if self.props.get(NEAR_FAR_ENABLED) != 1:
                 self.log(f"Near/Far {value:+d} — закрыт (не MF), не двигаю")
                 return OK
-            pos = max(0, min(100, self.props.get(FOCAL_POSITION) + value))
+            before = self.props.get(FOCAL_POSITION)
+            to_edge = 100 - before if value > 0 else before     # сколько до края шкалы, куда идёт шаг
+            if value and abs(value) <= NEAR_FAR_SMALL and to_edge < self.focus_deadband:
+                self.log(f"Near/Far {value:+d} — до края {to_edge}, мёртвая зона {self.focus_deadband:g}, не двигаю")
+                return OK
+            moved = scaled_step(value, self.focus_gain)
+            pos = max(0, min(100, before + moved))
             self.changed(FOCAL_POSITION, pos)
-            self.log(f"фокус {'ближе' if value < 0 else 'дальше'} на {abs(value)} → {pos}")
+            gain = f" (×{self.focus_gain:g} = {moved:+d})" if self.focus_gain != 1 else ""
+            self.log(f"фокус {'ближе' if value < 0 else 'дальше'} на {abs(value)}{gain} → {pos}")
             return OK
         if code == ZOOM:
             if self.props.get(ZOOM_ENABLED) != 1:
@@ -624,6 +730,9 @@ async def serve(cam, r, w):
 
 
 def respond(cam, code, params, out):
+    if code not in cam.operations:                              # камера умеет только то, что объявила в DeviceInfo
+        cam.log(f"операция 0x{code:04X} — её нет в списке DeviceInfo, отвечаю 0x2005")
+        return None, OPERATION_NOT_SUPPORTED
     if code == 0x1009 and params and params[0] == LIVE_VIEW:    # кадр live view: не чаще ~25 к/с
         now = time.monotonic()
         if now - cam.last_frame < FRAME_PERIOD:
@@ -659,6 +768,8 @@ def respond(cam, code, params, out):
             if params[0] == FOCUS_MODE:
                 cam.sync_near_far()
                 cam.changed(NEAR_FAR_ENABLED)
+            if params[0] == PICTURE_PROFILE:
+                cam.use_profile()
     if code == 0x9207 and params and out:
         # значение — своего типа: зум INT8, Near/Far INT16, точка AF и касание UINT32, кнопки UINT16
         fmt = {ZOOM: "<b", NEAR_FAR: "<h", AF_POSITION: "<I", TOUCH: "<I"}.get(params[0], "<H")
@@ -666,6 +777,14 @@ def respond(cam, code, params, out):
             return None, 0x2002
         return None, cam.control(params[0], struct.unpack_from(fmt, out)[0])
     return None, OK
+
+
+def non_negative(text):
+    """Для флагов физики фокуса: число от 0 и конечное."""
+    value = float(text)
+    if not 0 <= value < float("inf"):
+        raise argparse.ArgumentTypeError(f"нужно число от 0, а не {text}")
+    return value
 
 
 async def main():
@@ -689,6 +808,14 @@ async def main():
     ap.add_argument("--busy", action="store_true", help="не отвечать на приветствие — камера занята")
     ap.add_argument("--pairing", action="store_true", help="незнакомому GUID отвечать через 3 с — сопряжение")
     ap.add_argument("--reject", help="свойства, запись в которые не меняет значение: " + ",".join(REJECTABLE))
+    ap.add_argument("--focus-gain", type=non_negative, default=1.0, metavar="G",
+                    help="объектив: шаг Near/Far сдвигает фокус на round(команда × G) единиц шкалы 0…100, на половинке — "
+                         "от нуля; по умолчанию 1 — на столько, на сколько просили")
+    ap.add_argument("--focus-step-ms", type=non_negative, default=0.0, metavar="T",
+                    help="объектив: ответ на Near/Far приходит через T миллисекунд; по умолчанию 0 — сразу")
+    ap.add_argument("--focus-deadband", type=non_negative, default=0.0, metavar="D",
+                    help="объектив: шаг Near/Far не больше ±3, когда до края шкалы, куда он идёт, ближе D, фокус не двигает; "
+                         "по умолчанию 0 — мёртвой зоны нет")
     a = ap.parse_args()
     cam = Camera(a)
     host, port = a.listen.rsplit(":", 1)
@@ -698,8 +825,12 @@ async def main():
                                                                   sock=ssdp_socket())
     extras = [f"№ …{a.serial[-4:]}" if a.serial else "", a.mark or "", f"батарея {a.battery}%" if a.battery is not None else "",
               a.mode or "", "SSDP" if a.ssdp else "", "занята" if a.busy else "", "сопряжение" if a.pairing else "",
-              f"не меняет {a.reject}" if a.reject else "", f"запись: {a.record}" if a.record != "normal" else ""]
-    print(f"поддельная {cam.name}: {a.listen}, кадр {len(cam.frames[2]) // 1024} / {len(cam.frames[1]) // 1024} КБ, "
+              f"не меняет {a.reject}" if a.reject else "", f"запись: {a.record}" if a.record != "normal" else "",
+              f"усиление фокуса ×{a.focus_gain:g}" if a.focus_gain != 1 else "",
+              f"шаг фокуса {a.focus_step_ms:g} мс" if a.focus_step_ms else "",
+              f"мёртвая зона фокуса {a.focus_deadband:g}" if a.focus_deadband else ""]
+    plain = cam.sets[None].frames
+    print(f"поддельная {cam.name}: {a.listen}, кадр {len(plain[2]) // 1024} / {len(plain[1]) // 1024} КБ, "
           f"снимок {len(cam.photo) // 1024} КБ" + "".join(f", {e}" for e in extras if e), flush=True)
     async with server:
         await server.serve_forever()

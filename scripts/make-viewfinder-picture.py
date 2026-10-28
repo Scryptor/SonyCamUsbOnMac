@@ -4,9 +4,17 @@
 (крупно, у солнца) и viewfinder-pan.jpg (левый берег): у каждой из нескольких виртуальных камер своя картинка. Каждый —
 1024×576, как превью камеры, и не больше 70 КБ, как настоящий кадр. Нужны numpy и Pillow.
 
-  scripts/make-viewfinder-picture.py
+  scripts/make-viewfinder-picture.py          # озеро и два других плана
+  scripts/make-viewfinder-picture.py --log    # из viewfinder.jpg — viewfinder-slog3.jpg, -slog2.jpg и -hlg.jpg
+  scripts/make-viewfinder-picture.py --bars   # bars.jpg — цветные полосы 75 %
+
+--log рисует то, что камера отдаёт в превью при профиле изображения с логом (PP7 — S-Log2, PP8 и PP9 — S-Log3, PP10 —
+HLG): тот же кадр, обратным путём к LUT программы (docs/superpowers/specs/2026-10-29-monitor-plus-ideas-design.md, §4).
+Кадр 709 → линейный свет → отражение сцены L (100 % белого = 1, 18 % серого = 0,18) → кривая камеры → 8 бит как
+код/1023·255. Охват не пересчитывается: цвета остаются в основных цветах 709, меняется только кривая. Все три файла —
+1024×576, качество 92: scripts/fake_camera.py отдаёт их вместо viewfinder.jpg, когда в камере выбран такой профиль.
 """
-import io, os
+import argparse, io, os
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
 
@@ -131,7 +139,7 @@ def shore(picture):
         draw.rectangle([cx - s * 0.02, by - s * 0.05, cx + s * 0.02, by + s * 0.04], fill=dark)
 
 
-def main():
+def scene():
     img = water(mountains(sky()))
     # зерно и лёгкое затемнение к краям, как у объектива
     img += rng.normal(0, 2.2, img.shape)
@@ -154,6 +162,77 @@ def main():
         path = os.path.join(ASSETS, name)
         open(path, "wb").write(buffer.getvalue())
         print(f"{path}: {buffer.tell() // 1024} КБ, качество {quality}")
+
+
+# --- лог: кадр так, как камера отдаёт его в превью при профиле S-Log2, S-Log3 и HLG -------------------------------------
+
+def to_linear(v):
+    """Обратная кривая BT.709: значение 0–1 → линейный свет. Он и есть отражение сцены L (×1: 18 % серого = 0,18)."""
+    return np.where(v < 4.5 * 0.018, v / 4.5, ((v + 0.099) / 1.099) ** (1 / 0.45))
+
+
+def slog3_code(L):
+    """S-Log3: отражение → код 0–1023. Выше 0,01125 — логарифм, ниже — прямая от кода 95 (L = 0 → 95, 18 % → 420)."""
+    knee = 171.2102946929                                   # код на стыке прямой и логарифма
+    return np.where(L >= 0.01125, 420 + 261.5 * np.log10((np.maximum(L, 0.01125) + 0.01) / 0.19),
+                    95 + L * (knee - 95) / 0.01125)
+
+
+def slog2_code(L):
+    """S-Log2: отражение → код 0–1023. L = x·0,9·219/155; x ≥ 0 — логарифм, ниже — прямая (L = 0 → 90, 18 % → 347)."""
+    x = L * 155 / (0.9 * 219)
+    y = np.where(x >= 0, 0.432699 * np.log10(np.maximum(x, 0) + 0.037584) + 0.646596, 5 * x + 0.030001222851889303)
+    return 64 + y * 876
+
+
+def hlg_code(L):
+    """HLG: отражение → код 0–1023 в «легальном» диапазоне 64–940. L = 1 (диффузный белый) — сигнал 0,75, код 721."""
+    e = L * 0.2647
+    signal = np.where(e <= 1 / 12, np.sqrt(3 * np.maximum(e, 0)),
+                      0.17883277 * np.log(np.maximum(12 * e - 0.28466892, 1e-9)) + 0.55991073)
+    return 64 + signal * 876
+
+
+LOG_CURVES = {"slog3": slog3_code, "slog2": slog2_code, "hlg": hlg_code}
+
+
+def log_pictures():
+    """viewfinder-slog3.jpg, viewfinder-slog2.jpg и viewfinder-hlg.jpg из viewfinder.jpg: 1024×576, качество 92."""
+    source = np.asarray(Image.open(os.path.join(ASSETS, "viewfinder.jpg")).convert("RGB"), float) / 255
+    scene_light = to_linear(source)
+    for name, curve in LOG_CURVES.items():
+        code = np.clip(curve(scene_light), 0, 1023)
+        picture = Image.fromarray(np.rint(code / 1023 * 255).astype(np.uint8))
+        path = os.path.join(ASSETS, f"viewfinder-{name}.jpg")
+        picture.save(path, "JPEG", quality=92, optimize=True)
+        gray = np.rint(curve(np.array(0.18)) / 1023 * 255)
+        print(f"{path}: {os.path.getsize(path) // 1024} КБ, 18 % серого → {int(gray)} из 255")
+
+
+def bars():
+    """bars.jpg: восемь вертикальных полос 75 % по 128 точек — белый, жёлтый, циан, зелёный, пурпурный, красный, синий,
+    чёрный. 75 % — это 191 из 255 в каждом канале. Цветность не уменьшается (4:4:4): полосы стоят ровно на блоках JPEG."""
+    colors = [(1, 1, 1), (1, 1, 0), (0, 1, 1), (0, 1, 0), (1, 0, 1), (1, 0, 0), (0, 0, 1), (0, 0, 0)]
+    level = round(0.75 * 255)
+    picture = np.zeros((576, 1024, 3), np.uint8)
+    for i, color_ in enumerate(colors):
+        picture[:, i * 128:(i + 1) * 128] = np.array(color_) * level
+    path = os.path.join(ASSETS, "bars.jpg")
+    Image.fromarray(picture).save(path, "JPEG", quality=100, subsampling=0, optimize=True)
+    print(f"{path}: {os.path.getsize(path) // 1024} КБ, полосы {level} из 255")
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Картинки для виртуальной камеры (scripts/fake_camera.py) в scripts/assets/")
+    ap.add_argument("--log", action="store_true", help="из viewfinder.jpg — кадры S-Log3, S-Log2 и HLG (viewfinder-<имя>.jpg)")
+    ap.add_argument("--bars", action="store_true", help="bars.jpg — цветные полосы 75 %%")
+    a = ap.parse_args()
+    if not (a.log or a.bars):
+        scene()
+    if a.log:
+        log_pictures()
+    if a.bars:
+        bars()
 
 
 if __name__ == "__main__":
