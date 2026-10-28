@@ -17,7 +17,7 @@
   <a href="https://github.com/Scryptor/SonyCamViewer/releases/latest/download/Sony-Cam-Viewer.dmg"><b>⬇ Скачать для Mac (DMG)</b></a>
 </p>
 
-![Sony Cam Viewer на планшете: четыре камеры, три связаны и пишут; пресеты, «Монитор», зум и фокус касанием, гистограмма, строка значений](docs/screenshots/0-overview.jpg)
+![Sony Cam Viewer на планшете: четыре камеры, три связаны и пишут; гистограмма, волновая форма RGB, панель наложения кадра, «Монитор», зум и фокус касанием, строка значений](docs/screenshots/0-overview.jpg)
 
 Замена Imaging Edge Desktop (Remote) без лишнего — для камер Sony с режимом PC Remote, см. [Какие камеры подойдут](#какие-камеры-подойдут). Бесплатно, без рекламы и регистрации.
 
