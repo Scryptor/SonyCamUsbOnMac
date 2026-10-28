@@ -293,8 +293,12 @@ fun App(controller: CameraController) {
                     screen.zoom = if (command.factor <= 1.0) ViewZoom.identity
                     else ViewZoom(command.factor.coerceAtMost(ViewZoom.MAX_FACTOR), command.x, command.y)
                 }
-                is CameraController.DebugCommand.Gallery ->
-                    screen.galleryShot = if (command.index < 0) null else controller.shots.getOrNull(command.index)?.id
+                is CameraController.DebugCommand.Gallery -> when {
+                    command.undo -> undoDeleteShot(controller, screen)
+                    command.delete -> (controller.shots.getOrNull(command.index)?.id ?: screen.galleryShot.takeIf { command.index < 0 })
+                        ?.let { deleteShot(controller, screen, it) }
+                    else -> screen.galleryShot = if (command.index < 0) null else controller.shots.getOrNull(command.index)?.id
+                }
                 is CameraController.DebugCommand.Assist -> {
                     val tool = command.tool?.let { name -> MonitorTool.entries.firstOrNull { it.name == name } }
                     // волновая форма и эталон — вместе с остальным или отдельно
@@ -552,6 +556,9 @@ private fun LiveScreen(controller: CameraController, screen: ScreenState) {
         }
         controller.review?.let { ReviewOverlay(controller, it) }
         if (screen.galleryShot != null) GalleryOverlay(controller, screen)
+        // «Вернуть» удалённый снимок: над лентой галереи или над строкой значений
+        DeletedShotBanner(controller, screen,
+            Modifier.align(Alignment.BottomCenter).padding(bottom = if (screen.galleryShot != null) 150.dp else 112.dp))
         if (hint) {
             Text("Элементы скрыты · нажмите, чтобы показать", color = Color.White, fontSize = 16.sp,
                 modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 28.dp)

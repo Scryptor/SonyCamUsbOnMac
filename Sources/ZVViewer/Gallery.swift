@@ -159,6 +159,11 @@ struct GalleryOverlay: View {
                     .help("Снимок полупрозрачно поверх живого кадра: повторить сцену. Прозрачность и «спрятать» — на панели наложения")
                     Button("Показать в Finder") { NSWorkspace.shared.activateFileViewerSelecting(urls) }
                     Button("Открыть") { if let first = urls.first { NSWorkspace.shared.open(first) } }
+                    Button { controller.deleteShot(shots[index].id, screen: screen) } label: {
+                        Text("Удалить").foregroundStyle(.red)
+                    }
+                    .keyboardShortcut(.delete, modifiers: .command)
+                    .help("В Корзину (⌘⌫); ещё 6 секунд снимок можно вернуть кнопкой внизу. Копия на карте камеры остаётся")
                 }
             }
             .padding(.horizontal, 16)
@@ -220,6 +225,53 @@ struct GalleryOverlay: View {
             .onChange(of: screen.galleryShot) { _, id in
                 withAnimation(.easeInOut(duration: 0.2)) { proxy.scrollTo(id, anchor: .center) }
             }
+        }
+    }
+}
+
+extension CameraController {
+    /// Удаляет снимок; галерея, открытая на нём, переходит на снимок, вставший на его место (удалили самый старый — на
+    /// соседний новее), а удалили последний — закрывается.
+    @discardableResult
+    func deleteShot(_ id: UUID, screen: ScreenState) -> Bool {
+        guard let index = shots.firstIndex(where: { $0.id == id }) else { return false }
+        let count = shots.count
+        guard deleteShot(id) else { return false }
+        if screen.galleryShot == id {
+            screen.galleryShot = ShotDeletion.neighbor(removing: index, count: count).map { shots[$0].id }
+        }
+        return true
+    }
+
+    /// «Вернуть»: снимок — на своё место в ленте, галерея — на нём (и снова открывается, если закрылась).
+    func undoDeleteShot(screen: ScreenState) {
+        guard let id = undoDeleteShot() else { return }
+        if screen.galleryShot != nil { screen.galleryShot = id } else { screen.openGallery(id) }
+    }
+}
+
+/// «… — в Корзине · Вернуть»: 6 с после удаления снимка, внизу по центру — над галереей, а если она закрылась (удалили
+/// последний снимок), то на основном экране.
+struct DeletedShotBanner: View {
+    let controller: CameraController
+    let screen: ScreenState
+
+    var body: some View {
+        if let deleted = controller.deletedShot {
+            HStack(spacing: 12) {
+                Image(systemName: "trash").foregroundStyle(.secondary)
+                Text("\(deleted.shot.title) — в Корзине").lineLimit(1).truncationMode(.middle)
+                Button("Вернуть") { controller.undoDeleteShot(screen: screen) }
+                    .keyboardShortcut("z", modifiers: .command)
+                    .help("Вернуть снимок из Корзины (⌘Z)")
+            }
+            .font(.callout)
+            .padding(.leading, 14)
+            .padding(.trailing, 8)
+            .padding(.vertical, 7)
+            .background(.ultraThinMaterial, in: Capsule())
+            .frame(maxWidth: 520)
+            .transition(.opacity.combined(with: .move(edge: .bottom)))
         }
     }
 }

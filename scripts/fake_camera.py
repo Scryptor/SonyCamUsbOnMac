@@ -20,14 +20,14 @@ Wi-Fi: высокое — 1024×576, дополнено до ~72 КБ; низк�
   0 — стоп) едет 40 %/с по шкале 0xD25D, и картинка в видоискателе наезжает до 3×.
 
 Несколько камер сразу (scripts/fake_cameras.py) различаются: --name, --serial (по нему программа отличает камеры),
---mark (другой план сцены — zoom, pan — или кадр отражён и повёрнут), --battery, --mode. --ssdp — отвечает на поиск в сети, как камера Sony, с портом
+--mark (другой план сцены — zoom, pan — или кадр отражён и повёрнут), --battery, --mode, --format. --ssdp — отвечает на поиск в сети, как камера Sony, с портом
 в X-PTPIP-Port; --busy — не отвечает на приветствие; --pairing — незнакомому GUID отвечает через 3 с, как будто на
 камере нажали «ОК»; --reject iso,… — запись в эти свойства камера принимает, а значение не меняет.
 
   scripts/fake_camera.py [--listen 127.0.0.1:15740] [--photo снимок.jpg] [--rate байт/с] [--ignore-record]
                          [--name ZV-E10] [--serial …] [--mark zoom|pan|flip|flop|rotate] [--picture кадр.jpg]
-                         [--battery 0–100] [--mode photo|video] [--ssdp] [--busy] [--pairing] [--reject iso,…]
-                         [--record-delay с] [--record сценарий]
+                         [--battery 0–100] [--mode photo|video] [--format jpeg|raw+jpeg] [--ssdp] [--busy] [--pairing]
+                         [--reject iso,…] [--record-delay с] [--record сценарий]
   ZV_PTPIP_HOST=127.0.0.1 …/ZVViewer --automation        # Mac
   am start … --es ptpipHost <IP Mac>                       # планшет: --listen <IP Mac>:15740
   scripts/badnet.py --camera 127.0.0.1:25740 …             # или через прокси: --listen 127.0.0.1:25740
@@ -52,6 +52,7 @@ FOCAL_INFO_AT, FOCAL_INFO_MAX = 1012, 512                  # где в заго�
 ZOOM_LEVELS, ZOOM_MAX = 11, 3.0                            # картинка наезжает до 3× за 11 ступеней
 SPOT_SIZE = {0x101: 0.06, 0x102: 0.09, 0x103: 0.12, 0x104: 0.09}  # рамка «Точки» S/M/L/расширенной, доля ширины
 FOCUS_FOUND, OBJECT_IN_MEMORY, RECORDING, FILE_FORMAT = 0xD213, 0xD215, 0xD21D, 0xD253
+FORMATS_BY_NAME = {"jpeg": 3, "raw+jpeg": 2}              # 0xD253: формат снимка
 EXPOSURE_PROGRAM, BATTERY = 0x500E, 0xD218
 WHITE_BALANCE, COLOR_TEMP, MANUAL_WB = 0x5005, 0xD20F, 0x8012  # температура открыта только в «Цвет. темп.»
 MODES = {"photo": 0x1, "video": 0x78053}                   # буква M в фото и в видео
@@ -300,6 +301,8 @@ class Camera:
             self.props.set(BATTERY, args.battery)
         if args.mode:
             self.props.set(EXPOSURE_PROGRAM, MODES[args.mode])
+        if args.format:
+            self.props.set(FILE_FORMAT, FORMATS_BY_NAME[args.format])
         self.props.enable(COLOR_TEMP, self.props.get(WHITE_BALANCE) == MANUAL_WB)
         # фокус и зум с экрана
         self.af_point = (320, 240)                          # точка AF в сетке 640×480
@@ -681,6 +684,7 @@ async def main():
     ap.add_argument("--picture", help="свой JPEG 1024×576 в видоискателе вместо горного озера")
     ap.add_argument("--battery", type=int, help="заряд батареи, %%")
     ap.add_argument("--mode", choices=sorted(MODES), help="режим на старте: фото или видео (буква M)")
+    ap.add_argument("--format", choices=sorted(FORMATS_BY_NAME), help="формат снимка на старте: raw+jpeg — снимок двумя файлами")
     ap.add_argument("--ssdp", action="store_true", help="отвечать на поиск в сети (SSDP), как камера Sony")
     ap.add_argument("--busy", action="store_true", help="не отвечать на приветствие — камера занята")
     ap.add_argument("--pairing", action="store_true", help="незнакомому GUID отвечать через 3 с — сопряжение")

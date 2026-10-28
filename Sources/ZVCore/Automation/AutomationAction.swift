@@ -40,6 +40,10 @@ public enum AutomationAction: Equatable, Sendable, Decodable {
     case openGallery(Int)
     case galleryStep(Int)
     case closeGallery
+    /// Удалить снимок из ленты (файлы — в Корзину): по месту в ленте, без него — открытый в галерее. Вернуть — пока
+    /// видна плашка «Вернуть».
+    case deleteShot(Int?)
+    case undoDeleteShot
     /// Цифровое увеличение: множитель и точка кадра (доли) в центре экрана; без точки — центр как был.
     case setZoom(factor: Double, x: Double?, y: Double?)
     case resetZoom
@@ -148,6 +152,8 @@ public enum AutomationAction: Equatable, Sendable, Decodable {
         case "openGallery": self = .openGallery(try c.decodeIfPresent(Int.self, forKey: .index) ?? 0)
         case "galleryStep": self = .galleryStep(try c.decode(Int.self, forKey: .offset))
         case "closeGallery": self = .closeGallery
+        case "deleteShot": self = .deleteShot(try c.decodeIfPresent(Int.self, forKey: .index))
+        case "undoDeleteShot": self = .undoDeleteShot
         case "setZoom":
             self = .setZoom(factor: try c.decode(Double.self, forKey: .factor), x: try c.decodeIfPresent(Double.self, forKey: .x),
                             y: try c.decodeIfPresent(Double.self, forKey: .y))

@@ -8,8 +8,10 @@ import android.graphics.BitmapRegionDecoder
 import android.graphics.ImageDecoder
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
+import androidx.annotation.RequiresApi
 import androidx.compose.ui.unit.IntSize
 import kotlin.math.roundToInt
 import local.zve10viewer.settings.CaptureMode
@@ -235,6 +237,44 @@ class MediaSaver(private val context: Context) {
         resolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
         return SavedFile(uri, unique, mime)
     }
+
+    /**
+     * В корзину планшета (trashed) или обратно: в корзине файлы не видны в «Загрузках» и других программах, система
+     * держит их 30 дней. false — не вышло (Android 10, или система не дала): тогда снимок удаляют насовсем — [delete].
+     * Удалось не для всех файлов снимка — те, что успели, возвращаются: половины снимка в корзине не бывает.
+     */
+    fun trash(files: List<SavedFile>, trashed: Boolean): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return false
+        val done = mutableListOf<SavedFile>()
+        for (file in files) {
+            if (!setTrashed(file, trashed)) {
+                done.forEach { setTrashed(it, !trashed) }
+                return false
+            }
+            done += file
+        }
+        return true
+    }
+
+    @RequiresApi(Build.VERSION_CODES.R)
+    private fun setTrashed(file: SavedFile, trashed: Boolean): Boolean = runCatching {
+        val values = ContentValues().apply { put(MediaStore.MediaColumns.IS_TRASHED, if (trashed) 1 else 0) }
+        context.contentResolver.update(file.uri, values, matchTrashed()) == 1
+    }.getOrDefault(false)
+
+    /** Удалить насовсем: свои файлы программа удаляет без вопроса системы. */
+    fun delete(files: List<SavedFile>) {
+        for (file in files) {
+            runCatching {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) context.contentResolver.delete(file.uri, matchTrashed())
+                else context.contentResolver.delete(file.uri, null, null)
+            }
+        }
+    }
+
+    /** Запрос, который находит и файлы в корзине: обычный их не видит. */
+    @RequiresApi(Build.VERSION_CODES.R)
+    private fun matchTrashed() = Bundle().apply { putInt(MediaStore.QUERY_ARG_MATCH_TRASHED, MediaStore.MATCH_INCLUDE) }
 
     /**
      * Снимок из файла — не больше maxSide точек по длинной стороне (для галереи: под экран). hardware — картинку только

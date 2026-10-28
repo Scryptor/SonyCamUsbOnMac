@@ -250,6 +250,13 @@ struct LiveScreen: View {
             if screen.galleryShot != nil {
                 GalleryOverlay(controller: controller, screen: screen)
             }
+            // «Вернуть» удалённый снимок: над лентой галереи или над строкой значений
+            VStack {
+                Spacer()
+                DeletedShotBanner(controller: controller, screen: screen)
+                    .padding(.bottom, screen.galleryShot != nil ? 128 : 96)
+            }
+            .animation(.easeInOut(duration: 0.2), value: controller.deletedShot?.shot.id)
             CaptureFlash(controller: controller)
             if showHiddenHint {
                 VStack {

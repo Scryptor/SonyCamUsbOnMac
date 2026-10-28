@@ -212,7 +212,7 @@ struct RecBadge: View {
     }
 }
 
-/// Последние снимки и стоп-кадры: клик — галерея на этом снимке, правый клик — Finder или «Просмотр».
+/// Последние снимки и стоп-кадры: клик — галерея на этом снимке, правый клик — Finder, «Просмотр» или Корзина.
 struct ShotsStrip: View {
     let controller: CameraController
     let screen: ScreenState
@@ -228,6 +228,8 @@ struct ShotsStrip: View {
                 .contextMenu {
                     Button("Показать в Finder") { NSWorkspace.shared.activateFileViewerSelecting(shot.urls) }
                     if let first = shot.urls.first { Button("Открыть") { NSWorkspace.shared.open(first) } }
+                    Divider()
+                    Button("В Корзину") { controller.deleteShot(shot.id, screen: screen) }
                 }
                 // сюда улетает стоп-кадр
                 .anchorPreference(key: FirstShotSlotKey.self, value: .bounds) { index == 0 ? $0 : nil }

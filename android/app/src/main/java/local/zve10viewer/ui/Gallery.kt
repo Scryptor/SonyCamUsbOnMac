@@ -35,6 +35,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -72,9 +73,12 @@ import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -91,6 +95,7 @@ import kotlinx.coroutines.withContext
 import local.zve10viewer.CameraController
 import local.zve10viewer.CameraController.Shot
 import local.zve10viewer.MediaSaver
+import local.zve10viewer.view.ShotDeletion
 import local.zve10viewer.view.ViewZoom
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -281,7 +286,12 @@ fun GalleryOverlay(controller: CameraController, screen: ScreenState) {
         AnimatedVisibility(chrome && dismiss.value == 0f && shot != null, enter = fadeIn(), exit = fadeOut()) {
             if (shot == null) return@AnimatedVisibility
             Box(Modifier.fillMaxSize()) {
-                GalleryTopBar(controller, shot, currentIndex, shots.size, onClose = { close() }, Modifier.align(Alignment.TopCenter))
+                GalleryTopBar(controller, shot, currentIndex, shots.size, onClose = { close() },
+                    onDelete = {
+                        zoomJob?.cancel()
+                        zoom = ViewZoom.identity
+                        deleteShot(controller, screen, shot.id)
+                    }, Modifier.align(Alignment.TopCenter))
                 Column(
                     Modifier.align(Alignment.BottomCenter).fillMaxWidth()
                         .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xD9000000))))
@@ -318,7 +328,8 @@ private fun galleryCaption(shot: Shot): String = listOf(
 ).joinToString(" · ")
 
 @Composable
-private fun GalleryTopBar(controller: CameraController, shot: Shot, index: Int, count: Int, onClose: () -> Unit, modifier: Modifier) {
+private fun GalleryTopBar(controller: CameraController, shot: Shot, index: Int, count: Int, onClose: () -> Unit, onDelete: () -> Unit,
+                          modifier: Modifier) {
     Box(
         modifier.fillMaxWidth().background(Brush.verticalGradient(listOf(Color(0xB3000000), Color.Transparent)))
             .padding(horizontal = 18.dp, vertical = 16.dp),
@@ -337,14 +348,55 @@ private fun GalleryTopBar(controller: CameraController, shot: Shot, index: Int, 
             }
             GalleryButton("Открыть") { controller.openExternally(shot.jpeg ?: shot.files.first()) }
             GalleryButton("Поделиться") { controller.share(shot.files) }
+            // в корзину планшета; ещё 6 с снимок можно вернуть плашкой внизу
+            GalleryButton("Удалить", color = Danger, onClick = onDelete)
         }
     }
 }
 
 @Composable
-private fun GalleryButton(title: String, onClick: () -> Unit) {
-    Text(title, color = Color.White, fontSize = 16.sp, modifier = Modifier.clip(RoundedCornerShape(10.dp)).background(Panel)
+private fun GalleryButton(title: String, color: Color = Color.White, onClick: () -> Unit) {
+    Text(title, color = color, fontSize = 16.sp, modifier = Modifier.clip(RoundedCornerShape(10.dp)).background(Panel)
         .clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 12.dp))
+}
+
+private val Danger = Color(0xFFFF453A)
+
+/**
+ * Удаляет снимок; галерея, открытая на нём, переходит на снимок, вставший на его место (удалили самый старый — на
+ * соседний новее), а удалили последний — закрывается.
+ */
+fun deleteShot(controller: CameraController, screen: ScreenState, id: Long) {
+    val index = controller.shots.indexOfFirst { it.id == id }
+    if (index < 0) return
+    val count = controller.shots.size
+    if (!controller.deleteShot(id)) return
+    if (screen.galleryShot == id) screen.galleryShot = ShotDeletion.neighbor(index, count)?.let { controller.shots[it].id }
+}
+
+/** «Вернуть»: снимок — на своё место в ленте, галерея — на нём (и снова открывается, если закрылась). */
+fun undoDeleteShot(controller: CameraController, screen: ScreenState) {
+    controller.undoDeleteShot()?.let { screen.galleryShot = it }
+}
+
+/**
+ * «… — в корзине · Вернуть»: 6 с после удаления снимка, внизу по центру — над лентой галереи, а если она закрылась
+ * (удалили последний снимок), то над строкой значений.
+ */
+@Composable
+fun DeletedShotBanner(controller: CameraController, screen: ScreenState, modifier: Modifier) {
+    val deleted = controller.deletedShot ?: return
+    Row(
+        modifier.widthIn(max = 640.dp).background(Panel, RoundedCornerShape(26.dp)).padding(start = 20.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        Text("${deleted.shot.title} — " + if (deleted.trashed) "в корзине" else "удалён", color = Color.White, fontSize = 16.sp,
+            maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+        Text("Вернуть", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.clip(RoundedCornerShape(20.dp)).background(PanelLight)
+                .semantics { contentDescription = "Вернуть удалённый снимок" }
+                .clickable { undoDeleteShot(controller, screen) }.padding(horizontal = 18.dp, vertical = 10.dp))
+    }
 }
 
 /**

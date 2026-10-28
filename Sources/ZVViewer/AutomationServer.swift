@@ -221,6 +221,14 @@ final class AutomationServer {
             screen.galleryShot = controller.shots[min(max(i + offset, 0), controller.shots.count - 1)].id
         case .closeGallery:
             screen.galleryShot = nil
+        case let .deleteShot(index):
+            let id = index.flatMap { controller.shots.indices.contains($0) ? controller.shots[$0].id : nil }
+                ?? (index == nil ? screen.galleryShot : nil)
+            guard let id else { return index.map { "no shot \($0)" } ?? "gallery is closed" }
+            guard controller.deleteShot(id, screen: screen) else { return "not deleted: \(controller.statusMessage ?? "?")" }
+        case .undoDeleteShot:
+            guard controller.deletedShot != nil else { return "nothing to undo" }
+            controller.undoDeleteShot(screen: screen)
         case let .moveHistogram(x, y):
             screen.placeHistogram(FloatingPlacement(x: min(max(x, 0), 1), y: min(max(y, 0), 1)))
         case let .setZoom(factor, x, y):
@@ -513,6 +521,9 @@ final class AutomationServer {
         } else {
             ui["gallery"] = NSNull()
         }
+        ui["deletedShot"] = controller.deletedShot.map { deleted -> [String: Any] in
+            ["title": deleted.shot.title, "trashed": deleted.moves.map(\.to.path)]
+        } ?? NSNull()
         ui["zoom"] = ["factor": screen.zoom.factor, "centerX": screen.zoom.center.x, "centerY": screen.zoom.center.y]
         ui["statusBar"] = ["pinned": screen.statusBarPinned, "visible": screen.controlsShown || screen.statusBarPinned]
         ui["presetMenu"] = screen.presetMenuOpen

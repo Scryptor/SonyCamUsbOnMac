@@ -47,7 +47,8 @@ class MainActivity : ComponentActivity() {
 
     /**
      * `adb shell am broadcast -p local.zve10viewer -a local.zve10viewer.DEBUG_ZOOM --ef factor 4 --ef x 0.3 --ef y 0.4
-     * [--ez bicubic false]`; `… -a local.zve10viewer.DEBUG_GALLERY --ei index 2` (−1 — закрыть); монитор —
+     * [--ez bicubic false]`; `… -a local.zve10viewer.DEBUG_GALLERY --ei index 2` (−1 — закрыть; `--ez delete true` — удалить этот снимок, без index — открытый
+     * в галерее; `--ez undo true` — «Вернуть»); монитор —
      * `… -a local.zve10viewer.DEBUG_ASSIST --es tool zebra --es value 95` (без value — вкл/выкл), `--ez off true` — всё
      * выключить, `--ez menu true|false [--es tool peaking]` — меню, `--es waveform luma|parade|off` — волновая форма,
      * `--ez reference true` — эталон из текущего кадра, `--ei shot 0` — из снимка ленты, `--ez overlayToggle true` — как
@@ -60,7 +61,8 @@ class MainActivity : ComponentActivity() {
                     intent.getFloatExtra("factor", 1f).toDouble(), intent.getFloatExtra("x", 0.5f).toDouble(),
                     intent.getFloatExtra("y", 0.5f).toDouble(),
                     if (intent.hasExtra("bicubic")) intent.getBooleanExtra("bicubic", true) else null))
-                ACTION_DEBUG_GALLERY -> controller.debugCommand(CameraController.DebugCommand.Gallery(intent.getIntExtra("index", -1)))
+                ACTION_DEBUG_GALLERY -> controller.debugCommand(CameraController.DebugCommand.Gallery(intent.getIntExtra("index", -1),
+                    intent.getBooleanExtra("delete", false), intent.getBooleanExtra("undo", false)))
                 ACTION_DEBUG_LENS -> debugLens(intent)
                 ACTION_DEBUG_ASSIST -> controller.debugCommand(CameraController.DebugCommand.Assist(
                     intent.getStringExtra("tool"), intent.getStringExtra("value"), intent.getBooleanExtra("off", false),

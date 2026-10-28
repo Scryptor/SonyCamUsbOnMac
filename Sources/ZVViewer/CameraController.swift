@@ -84,6 +84,9 @@ final class CameraController {
     private(set) var review: Review?
     /// Снимки и стоп-кадры этой сессии, новые сначала.
     private(set) var shots: [Shot] = []
+    /// Удалённый снимок, который ещё можно вернуть; nil — плашки «Вернуть» нет.
+    private(set) var deletedShot: DeletedShot?
+    @ObservationIgnored private var deletedShotTask: Task<Void, Never>?
     /// Где сейчас снимок: фокусировка, спуск, загрузка (доля — по Wi-Fi); nil — не снимаем.
     private(set) var capturePhase: CapturePhase?
     /// Запуск или остановка записи с кнопки, пока камера не подтвердила.
@@ -100,6 +103,13 @@ final class CameraController {
         var pixelSize: CGSize?
         var title: String { urls.map(\.lastPathComponent).joined(separator: " + ") }
         var isFrameGrab: Bool { urls.count == 1 && urls[0].lastPathComponent.hasPrefix("Кадр ") }
+    }
+
+    /// Только что удалённый снимок: файлы в Корзине; пока видна «Вернуть», их можно вернуть на место.
+    struct DeletedShot {
+        let shot: Shot
+        /// Откуда и куда в Корзину ушёл каждый файл.
+        let moves: [(from: URL, to: URL)]
     }
 
     struct Review {
@@ -748,6 +758,58 @@ final class CameraController {
                 self?.showStatus("Не удалось сохранить кадр: \(error)")
             }
         }
+    }
+
+    /// Удаляет снимок из ленты: файлы (у RAW + JPEG — оба) уходят в Корзину, оттуда их можно достать и потом; 6 с видна
+    /// «Вернуть». false — не вышло (файл занят, у папки нет Корзины): снимок остаётся, что не так — в строке состояния.
+    @discardableResult
+    func deleteShot(_ id: UUID) -> Bool {
+        guard let index = shots.firstIndex(where: { $0.id == id }) else { return false }
+        let shot = shots[index]
+        var moves: [(from: URL, to: URL)] = []
+        do {
+            for url in shot.urls {
+                var trashed: NSURL?
+                try FileManager.default.trashItem(at: url, resultingItemURL: &trashed)
+                moves.append((url, (trashed as URL?) ?? url))
+            }
+        } catch {
+            // половину снимка в Корзине не оставляем: что успело уйти — назад
+            for move in moves { try? FileManager.default.moveItem(at: move.to, to: move.from) }
+            showStatus("Не удалось удалить \(shot.title): \(error.localizedDescription)")
+            return false
+        }
+        shots.remove(at: index)
+        if let review, !review.urls.isEmpty, review.urls == shot.urls { dismissReview() }
+        deletedShot = DeletedShot(shot: shot, moves: moves)
+        deletedShotTask?.cancel()
+        deletedShotTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(ShotDeletion.undoSeconds))
+            guard !Task.isCancelled else { return }
+            self?.deletedShot = nil
+        }
+        return true
+    }
+
+    /// «Вернуть»: файлы из Корзины — на прежнее место, снимок — в ленту туда, где был по времени. Отдаёт его id;
+    /// nil — возвращать нечего или ни один файл не вернулся.
+    @discardableResult
+    func undoDeleteShot() -> UUID? {
+        guard let deleted = deletedShot else { return nil }
+        deletedShotTask?.cancel()
+        deletedShot = nil
+        var failed: [String] = []
+        for move in deleted.moves where move.to != move.from {
+            do {
+                try FileManager.default.moveItem(at: move.to, to: move.from)
+            } catch {
+                failed.append(move.from.lastPathComponent)
+            }
+        }
+        if !failed.isEmpty { showStatus("Не удалось вернуть из Корзины: \(failed.joined(separator: ", "))") }
+        guard failed.count < deleted.moves.count else { return nil }
+        shots.insert(deleted.shot, at: ShotDeletion.restoreIndex(takenAt: deleted.shot.takenAt, in: shots.map(\.takenAt)))
+        return deleted.shot.id
     }
 
     func dismissReview() {

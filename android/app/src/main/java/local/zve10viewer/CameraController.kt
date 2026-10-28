@@ -126,6 +126,7 @@ import local.zve10viewer.sony.SonyProp
 import local.zve10viewer.sony.SonyProperty
 import local.zve10viewer.usb.UsbPtpTransport
 import local.zve10viewer.view.FloatingPlacement
+import local.zve10viewer.view.ShotDeletion
 import local.zve10viewer.wifi.LinkLoss
 import local.zve10viewer.wifi.PtpIpIdentity
 import local.zve10viewer.wifi.PtpIpTransport
@@ -163,6 +164,12 @@ class CameraController(private val context: Context, private val scope: Coroutin
         /** JPEG снимка — его показывают и открывают; null — только RAW. */
         val jpeg: SavedFile? get() = files.firstOrNull { it.mime == "image/jpeg" }
     }
+
+    /**
+     * Только что удалённый снимок: пока видна «Вернуть», его можно вернуть. trashed — файлы в корзине планшета; нет
+     * (Android 10 или система не дала) — они ещё на месте и удалятся, когда плашка закроется.
+     */
+    class DeletedShot(val shot: Shot, val trashed: Boolean)
 
     /** Что показывается поверх видео после снимка. */
     data class Review(
@@ -378,6 +385,10 @@ class CameraController(private val context: Context, private val scope: Coroutin
     /** Снимки и стоп-кадры этой сессии, новые сначала. */
     var shots by mutableStateOf<List<Shot>>(emptyList())
         private set
+    /** Удалённый снимок, который ещё можно вернуть; null — плашки «Вернуть» нет. */
+    var deletedShot by mutableStateOf<DeletedShot?>(null)
+        private set
+    private var deletedShotJob: Job? = null
     /** Заряд самого планшета: в полноэкранном режиме системную строку не видно. */
     var tabletBattery by mutableStateOf<Int?>(null)
         private set
@@ -454,8 +465,11 @@ class CameraController(private val context: Context, private val scope: Coroutin
     sealed class DebugCommand {
         /** factor ≤ 1 — без увеличения; x, y — точка кадра (доли) в центре экрана; bicubic — шейдер вкл./выкл. */
         data class Zoom(val factor: Double, val x: Double, val y: Double, val bicubic: Boolean?) : DebugCommand()
-        /** Галерея на снимке с этим местом в ленте (0 — самый новый); меньше нуля — закрыть. */
-        data class Gallery(val index: Int) : DebugCommand()
+        /**
+         * Галерея на снимке с этим местом в ленте (0 — самый новый); меньше нуля — закрыть. delete — удалить снимок с этим
+         * местом, а без места — открытый в галерее; undo — «Вернуть».
+         */
+        data class Gallery(val index: Int, val delete: Boolean = false, val undo: Boolean = false) : DebugCommand()
         /**
          * Монитор: tool + value — значение инструмента, tool без value — включить или выключить его, off — выключить всё,
          * menu — открыть меню (на инструменте tool) или закрыть; waveform, reference и shot — волновая форма и эталон.
@@ -1354,6 +1368,52 @@ class CameraController(private val context: Context, private val scope: Coroutin
         feedbackEvents.tryEmit(event)
     }
 
+    /**
+     * Удаляет снимок из ленты: файлы (у RAW + JPEG — оба) уходят в корзину планшета — система держит их 30 дней; 6 с
+     * видна «Вернуть». Корзины нет (Android 10) или система не дала — файлы удаляются насовсем, когда плашка закроется.
+     * false — такого снимка нет.
+     */
+    fun deleteShot(id: Long): Boolean {
+        val shot = shots.firstOrNull { it.id == id } ?: return false
+        finishDeletion()
+        val trashed = saver.trash(shot.files, true)
+        shots = shots.filter { it.id != id }
+        if (review?.files?.isNotEmpty() == true && review?.files == shot.files) dismissReview()
+        deletedShot = DeletedShot(shot, trashed)
+        deletedShotJob = scope.launch {
+            delay(ShotDeletion.UNDO_MILLIS)
+            deletedShotJob = null
+            finishDeletion()
+        }
+        journal("удалён снимок ${shot.title}: " + if (trashed) "в корзине" else "удалится, когда закроется «Вернуть»")
+        return true
+    }
+
+    /** «Вернуть»: файлы — из корзины, снимок — в ленту туда, где был по времени. Отдаёт его id; null — возвращать нечего. */
+    fun undoDeleteShot(): Long? {
+        val deleted = deletedShot ?: return null
+        deletedShotJob?.cancel()
+        deletedShotJob = null
+        deletedShot = null
+        if (deleted.trashed && !saver.trash(deleted.shot.files, false)) {
+            showStatus("Не удалось вернуть ${deleted.shot.title} из корзины")
+            return null
+        }
+        val at = ShotDeletion.restoreIndex(deleted.shot.takenAt, shots.map { it.takenAt })
+        shots = shots.toMutableList().also { it.add(at, deleted.shot) }
+        journal("снимок ${deleted.shot.title} вернули")
+        return deleted.shot.id
+    }
+
+    /** Плашка «Вернуть» закрылась — время вышло, новое удаление, программа ушла с экрана: что не в корзине — удалить. */
+    private fun finishDeletion() {
+        val deleted = deletedShot ?: return
+        deletedShotJob?.cancel()
+        deletedShotJob = null
+        deletedShot = null
+        if (!deleted.trashed) scope.launch(Dispatchers.IO) { saver.delete(deleted.shot.files) }
+    }
+
     /** Открывает файл в программе для просмотра на планшете. */
     fun openExternally(file: SavedFile) {
         val intent = Intent(Intent.ACTION_VIEW).setDataAndType(file.uri, file.mime)
@@ -2036,6 +2096,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
     /** Программа ушла с экрана: live view на паузе (сеанс держат пробы), через минуту — обычное закрытие. */
     fun onBackground() {
         journal("программа ушла с экрана — live view на паузе")
+        finishDeletion()
         foreground = false
         liveViewWanted.value = false
         backgroundJob?.cancel()
