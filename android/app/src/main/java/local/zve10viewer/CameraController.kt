@@ -1083,6 +1083,9 @@ class CameraController(private val context: Context, private val scope: Coroutin
     private val referenceFile get() = java.io.File(context.filesDir, "reference.jpg")
 
     /** Эталон для наложения есть или будет: в памяти, иначе из файла прошлого раза, иначе — текущий кадр. */
+    /** Эталон для наложения, включённого с прошлого запуска, уже запрошен с первым кадром. */
+    private var referenceRequested = false
+
     fun ensureReference() {
         if (reference != null) return
         scope.launch {
@@ -2932,6 +2935,11 @@ class CameraController(private val context: Context, private val scope: Coroutin
         // новая обёртка на каждый кадр: Bitmap из пула тот же, и с прежней обёрткой Compose не перерисовал бы картинку
         frame = bitmap.asImageBitmap()
         lastSample = sample
+        // наложение включено ещё с прошлого запуска — эталон подгружается с первым кадром: из файла, иначе этот кадр
+        if (reference == null && !referenceRequested && assist.overlay != MonitorAssist.Overlay.off) {
+            referenceRequested = true
+            ensureReference()
+        }
         val now = System.currentTimeMillis()
         noteQuality(now, bitmap, sample)
         sessionFrames++
