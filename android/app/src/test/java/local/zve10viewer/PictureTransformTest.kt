@@ -18,6 +18,10 @@ import org.junit.Test
 import org.junit.rules.Timeout
 import java.util.Locale
 import java.util.Random
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.locks.LockSupport
 import kotlin.math.abs
 import kotlin.math.floor
 import kotlin.math.max
@@ -548,6 +552,56 @@ class PictureTransformTest {
         }
     }
 
+    @Test fun twoThreadsCallingApplyAtOnceAreRefusedNotMixed() {
+        // два потока зовут apply без передышки: пока один считает, второму — отказ (IllegalStateException), а не смесь двух
+        // кадров; кадр, который достался потоку, цел
+        val w = 640
+        val h = 360
+        val src = randomFrame(w, h, 20)
+        val lut = BuiltinLut.slog3cine.make()
+        val want = IntArray(w * h)
+        PictureTransform(1).use { it.apply(src, w, h, FrameOrientation.mirror, lut, want, null) }
+        val served = AtomicInteger()
+        val refused = AtomicInteger()
+        val problem = AtomicReference<Throwable?>(null)
+        val stop = java.util.concurrent.atomic.AtomicBoolean(false)
+        PictureTransform(4).use { transform ->
+            val threads = (0 until 2).map {
+                Thread {
+                    val display = IntArray(w * h)
+                    try {
+                        while (!stop.get()) {
+                            try {
+                                transform.apply(src, w, h, FrameOrientation.mirror, lut, display, null)
+                                if (!display.contentEquals(want)) {
+                                    problem.set(AssertionError("кадр смешался с чужим"))
+                                    return@Thread
+                                }
+                                served.incrementAndGet()
+                            } catch (e: IllegalStateException) {
+                                refused.incrementAndGet()
+                            }
+                        }
+                    } catch (t: Throwable) {
+                        problem.set(t)
+                    }
+                }.also { thread ->
+                    thread.isDaemon = true
+                    thread.start()
+                }
+            }
+            LockSupport.parkNanos(1_000_000_000L)
+            stop.set(true)
+            for (thread in threads) thread.join(2000)
+            verify(threads.none { it.isAlive }) { "поток завис: отказано ${refused.get()}, отдано ${served.get()}" }
+        }
+        val failure = problem.get()
+        if (failure != null) throw AssertionError("$failure", failure)
+        println("PictureTransformTest: два потока зовут apply разом — кадров отдано ${served.get()}, отказов ${refused.get()}")
+        assertTrue("ни одного кадра не отдано", served.get() > 0)
+        assertTrue("ни одного отказа", refused.get() > 0)
+    }
+
     @Test fun callsMayComeFromDifferentThreadsOneAfterAnother() {
         // кадровый цикл может переезжать с потока на поток (корутины): подряд из разных потоков можно, одновременно нельзя
         val src = randomFrame(200, 100, 13)
@@ -619,6 +673,230 @@ class PictureTransformTest {
             transform.apply(threeByTwo, 3, 2, FrameOrientation.mirror, BuiltinLut.hlg.make(2), IntArray(6), IntArray(6))
             assertEquals(before, workerThreads().map { it.id }.toSet())
         }
+    }
+
+    private fun refusedAsClosed(block: () -> Unit) {
+        try {
+            block()
+        } catch (e: IllegalStateException) {
+            return
+        }
+        throw AssertionError("Ожидалось IllegalStateException")
+    }
+
+    /**
+     * close() из другого потока в любой миг работы кадрового цикла — от запуска помощников на первом кадре до установившегося
+     * хода. Не виснет ни кадровый поток (раньше помощник уходил по `closed`, не дождавшись уже объявленного кадра, и `apply`
+     * ждал его вечно), ни сам close; кадр, который успел идти, досчитан правильно; следующий `apply` отказывает сразу.
+     */
+    @Test fun closeFromAnotherThreadCannotHangARunningApply() {
+        val w = 160
+        val h = 90
+        val src = randomFrame(w, h, 14)
+        val lut = BuiltinLut.slog3cine.make()
+        // что должно выйти при каждом повороте, считает один поток без помощников
+        val wantDisplay = FrameOrientation.entries.map { o ->
+            IntArray(w * h).also { out -> PictureTransform(1).use { it.apply(src, w, h, o, lut, out, null) } }
+        }
+        val wantAnalysis = FrameOrientation.entries.map { oriented(src, w, h, it) }
+        val before = workerThreads().map { it.id }.toSet()
+        val random = Random(15)
+        var framesDone = 0L
+        for (trial in 0 until 200) {
+            val transform = PictureTransform(2 + random.nextInt(7))
+            val started = CountDownLatch(1)
+            val problem = AtomicReference<Throwable?>(null)
+            val frames = AtomicInteger()
+            val loop = Thread {
+                val display = IntArray(w * h)
+                val analysis = IntArray(w * h)
+                try {
+                    started.countDown()
+                    while (true) {
+                        val o = frames.get() and 3
+                        transform.apply(src, w, h, FrameOrientation.entries[o], lut, display, analysis)
+                        // кадр, который досчитан, правильный: close не рвёт его посередине
+                        if (!display.contentEquals(wantDisplay[o]) || !analysis.contentEquals(wantAnalysis[o])) {
+                            problem.set(AssertionError("кадр ${frames.get()} расходится"))
+                            return@Thread
+                        }
+                        frames.incrementAndGet()
+                    }
+                } catch (e: IllegalStateException) {
+                    // закрыли: следующий apply отказал, цикл кончился
+                } catch (t: Throwable) {
+                    problem.set(t)
+                }
+            }
+            loop.isDaemon = true
+            loop.start()
+            started.await()
+            // от нуля (кадровый поток ещё запускает помощников и собирает таблицу) до нескольких десятков кадров
+            val delay = when (trial % 4) {
+                0 -> 0L
+                1 -> random.nextInt(300_000).toLong()
+                2 -> random.nextInt(2_000_000).toLong()
+                else -> random.nextInt(10_000_000).toLong()
+            }
+            if (delay > 0) LockSupport.parkNanos(delay)
+            transform.close()
+            loop.join(2000)
+            verify(!loop.isAlive) { "попытка $trial (задержка $delay нс, кадров ${frames.get()}): кадровый поток завис после close" }
+            val failure = problem.get()
+            if (failure != null) throw AssertionError("попытка $trial (задержка $delay нс, кадров ${frames.get()}): $failure", failure)
+            framesDone += frames.get()
+            // после close apply отказывает сразу, а не ждёт
+            val begin = System.nanoTime()
+            refusedAsClosed { transform.apply(src, w, h, FrameOrientation.mirror, lut, IntArray(w * h), null) }
+            verify(System.nanoTime() - begin < 1_000_000_000L) { "попытка $trial: apply после close ответил не сразу" }
+        }
+        println("PictureTransformTest: close среди работы кадрового цикла — 200 попыток, досчитано кадров $framesDone")
+        // помощники всех этих объектов ушли
+        val deadline = System.nanoTime() + 5_000_000_000L
+        while (workerThreads().any { it.id !in before } && System.nanoTime() < deadline) Thread.sleep(10)
+        val left = workerThreads().filter { it.id !in before }
+        assertTrue("после close остались потоки: ${left.map { it.name }}", left.isEmpty())
+    }
+
+    @Test fun severalClosesAtOnceAreHarmless() {
+        // три потока закрывают один объект одновременно, пока идёт кадровый цикл: ни они, ни цикл не виснут
+        val src = randomFrame(64, 36, 16)
+        val lut = BuiltinLut.hlg.make()
+        repeat(60) { trial ->
+            val transform = PictureTransform(4)
+            val go = CountDownLatch(1)
+            val loop = Thread {
+                val display = IntArray(64 * 36)
+                try {
+                    while (true) transform.apply(src, 64, 36, FrameOrientation.mirror180, lut, display, null)
+                } catch (e: IllegalStateException) {
+                    // закрыли
+                }
+            }
+            loop.isDaemon = true
+            loop.start()
+            val closers = (0 until 3).map {
+                Thread {
+                    go.await()
+                    transform.close()
+                }.also { closer ->
+                    closer.isDaemon = true
+                    closer.start()
+                }
+            }
+            LockSupport.parkNanos(trial * 20_000L)
+            go.countDown()
+            for (closer in closers) closer.join(2000)
+            loop.join(2000)
+            verify(closers.none { it.isAlive } && !loop.isAlive) { "попытка $trial: close или кадровый поток завис" }
+        }
+    }
+
+    /**
+     * Кадровый поток зовёт `apply` без передышки, и ворота свободны лишь на миг между кадрами (у кадра с LUT на 640×360 —
+     * сотая доля процента времени). close() не должен ждать, пока ему повезёт попасть в этот миг: с начала закрытия новые
+     * кадры отказывают, ворота достаются закрывающему, и он ждёт только тот кадр, что уже идёт.
+     */
+    @Test fun closeIsNotStarvedByATightFrameLoop() {
+        val w = 640
+        val h = 360
+        val src = randomFrame(w, h, 19)
+        val lut = BuiltinLut.slog3cine.make()
+        val trials = 30
+        var slowest = 0L
+        var total = 0L
+        for (trial in 0 until trials) {
+            val transform = PictureTransform(2 + trial % 4)
+            val frames = AtomicInteger()
+            val loop = Thread {
+                val display = IntArray(w * h)
+                try {
+                    while (true) {
+                        transform.apply(src, w, h, FrameOrientation.mirror, lut, display, null)
+                        frames.incrementAndGet()
+                    }
+                } catch (e: IllegalStateException) {
+                    // закрыли
+                }
+            }
+            loop.isDaemon = true
+            loop.start()
+            while (frames.get() < 20) Thread.yield() // цикл пошёл
+            val begin = System.nanoTime()
+            transform.close()
+            val took = System.nanoTime() - begin
+            loop.join(2000)
+            verify(!loop.isAlive) { "попытка $trial: кадровый поток завис после close" }
+            slowest = max(slowest, took)
+            total += took
+        }
+        println("PictureTransformTest: close при кадрах без передышки — в среднем ${total / trials / 1000} мкс, дольше всего ${slowest / 1000} мкс")
+        assertTrue("close ждал в среднем ${total / trials / 1000} мкс", total / trials < 20_000_000L)
+        assertTrue("самый долгий close — ${slowest / 1000} мкс", slowest < 200_000_000L)
+    }
+
+    /** Вызов `apply` в своём потоке с пределом ожидания: застрявший вызов — провал за 2 секунды, а не за минуту. Ответ — что он бросил. */
+    private fun applyWithWatchdog(transform: PictureTransform, width: Int, height: Int, src: IntArray, display: IntArray): Throwable? {
+        val outcome = AtomicReference<Throwable?>(null)
+        val caller = Thread {
+            try {
+                transform.apply(src, width, height, FrameOrientation.off, null, display, null)
+            } catch (t: Throwable) {
+                outcome.set(t)
+            }
+        }
+        caller.isDaemon = true
+        caller.start()
+        caller.join(2000)
+        verify(!caller.isAlive) { "apply на закрытом объекте завис" }
+        return outcome.get()
+    }
+
+    @Test fun closeBeforeTheFirstFrameStartsNothingAndRefusesFrames() {
+        val before = workerThreads().map { it.id }.toSet()
+        val transform = PictureTransform(4)
+        transform.close()
+        // закрытый отказывает сразу и не запускает помощников, которым тут же пришлось бы уйти, оставив кадр без полос
+        assertTrue(applyWithWatchdog(transform, 3, 2, threeByTwo, IntArray(6)) is IllegalStateException)
+        assertEquals(before, workerThreads().map { it.id }.toSet())
+        // и пустому кадру, и кадру с неправильными размерами: «закрыт» проверяется первым
+        assertTrue(applyWithWatchdog(transform, 0, 0, IntArray(0), IntArray(0)) is IllegalStateException)
+        assertTrue(applyWithWatchdog(transform, 4, 4, IntArray(1), IntArray(1)) is IllegalStateException)
+        transform.close()
+        assertEquals(before, workerThreads().map { it.id }.toSet())
+    }
+
+    /**
+     * Кубы с самыми крутыми ступенями (узлы только 0 и 1, то есть соседи — от чёрного до белого, и случайные) при полном и узком
+     * домене: таблица ошибается на 1/512 ячейки по каждой оси, умноженную на ступень, — до двух уровней с округлением. У
+     * встроенных, плавных и тождественных кубов — не больше одного (см. другие тесты).
+     */
+    @Test fun steepCubesStayWithinTwoLevels() {
+        val random = Random(17)
+        val colours = IntArray(60_000 + 8) {
+            if (it < 8) opaque or (if (it and 1 != 0) 0xFF0000 else 0) or (if (it and 2 != 0) 0xFF00 else 0) or (if (it and 4 != 0) 0xFF else 0)
+            else random.nextInt() or opaque
+        }
+        var worst = 0
+        var cubes = 0
+        PictureTransform(4).use { transform ->
+            for (trial in 0 until 160) {
+                val size = listOf(2, 3, 4, 5, 9)[trial % 5]
+                val binary = trial % 4 < 2
+                val narrow = trial % 2 == 1
+                val values = FloatArray(size * size * size * 3) { if (binary) (if (random.nextBoolean()) 1f else 0f) else random.nextFloat() }
+                val domainMin = FloatArray(3) { if (narrow) random.nextFloat() * 0.6f else 0f }
+                val domainMax = FloatArray(3) { domainMin[it] + if (narrow) 0.01f + random.nextFloat() * 0.4f else 1f }
+                val lut = ColorLut(size, values, domainMin, domainMax)
+                val display = IntArray(colours.size)
+                transform.apply(colours, colours.size, 1, FrameOrientation.off, lut, display, null)
+                val match = compareWithCube(lut, colours, display)
+                worst = max(worst, match.worst)
+                cubes += 1
+                verify(match.worst <= 2) { "куб ${size}³, попытка $trial: $match" }
+            }
+        }
+        println("PictureTransformTest: $cubes случайных крутых кубов — наибольшее расхождение с ColorLut.apply $worst")
     }
 
     /**

@@ -15,14 +15,20 @@ import kotlin.math.min
  * ([close]) — потоки уходят.
  *
  * Не повторно входимый: `apply` вызывает один поток за раз (кадровый цикл); второй одновременный вызов — ошибка
- * [IllegalStateException], а не молчаливая порча кадра. Последовательно из разных потоков можно.
+ * [IllegalStateException], а не молчаливая порча кадра. Последовательно из разных потоков можно. [close] можно из любого
+ * потока и в любой миг, в том числе посреди кадра: он дожидается кадра, а следующий `apply` отказывает.
  *
  * LUT. Из куба ([ColorLut]) один раз строится целочисленная таблица (узлы по 12 бит на канал в одном `Long`, три канала
  * рядом), и её же берут все следующие кадры, пока приходит тот же экземпляр куба. Другой экземпляр — таблица строится
  * заново на этом вызове (на JVM — десятые доли миллисекунды для 33³ и около полумиллисекунды для 65³), так что держите
- * один экземпляр на LUT. Вход точки `v = канал/255` идёт через домен куба так же, как в [ColorLut.apply]; узлы вне 0…1
- * обрезаются ещё до интерполяции — так их получает и Core Image на Mac. От `ColorLut.apply` результат отличается не больше
- * чем на один уровень из 255 на канал.
+ * один экземпляр на LUT. Вход точки `v = канал/255` идёт через домен куба так же, как в [ColorLut.apply].
+ *
+ * Расхождение с [ColorLut.apply] (числа с плавающей точкой, округление до уровня 0…255), если узлы куба в 0…1:
+ * - не больше одного уровня из 255 на канал у встроенных, плавных и тождественных кубов;
+ * - до двух уровней у кубов с очень крутыми ступенями между соседними узлами (от чёрного до белого; заметнее при узком
+ *   домене): таблица ошибается на 1/512 ячейки по каждой из трёх осей, умноженную на ступень;
+ * - узлы вне 0…1 обрезаются ещё до интерполяции — так их получает и Core Image на Mac, — а `ColorLut.apply` обрезает после
+ *   неё; у таких кубов расхождение больше, и это намеренно.
  */
 class PictureTransform(private val bands: Int = 4) : AutoCloseable {
     init {
@@ -42,7 +48,7 @@ class PictureTransform(private val bands: Int = 4) : AutoCloseable {
      * @throws IllegalArgumentException размер отрицательный или не влезает в Int, массив меньше кадра, один массив в двух
      *   ролях, в кубе больше [MAX_LUT_SIZE] точек на ребре (из `.cube` приходят до 65). Массивы могут быть больше кадра
      *   (буфер под самый крупный размер): лишнее не читается и не пишется. Кадр нулевого размера — ничего не делает
-     * @throws IllegalStateException объект закрыт или `apply` уже идёт в другом потоке
+     * @throws IllegalStateException объект закрыт, или `apply` уже идёт в другом потоке, или в этот миг идёт `close()`
      */
     fun apply(
         src: IntArray,
@@ -53,19 +59,22 @@ class PictureTransform(private val bands: Int = 4) : AutoCloseable {
         display: IntArray,
         analysis: IntArray?,
     ) {
-        check(!closed) { "PictureTransform закрыт" }
-        require(width >= 0 && height >= 0) { "размер кадра $width×$height" }
-        val pixels = width.toLong() * height
-        require(pixels <= Int.MAX_VALUE) { "кадр $width×$height не влезает в массив" }
-        val count = pixels.toInt()
-        require(src.size >= count && display.size >= count && (analysis == null || analysis.size >= count)) {
-            "массивы меньше кадра $width×$height: src ${src.size}, display ${display.size}, analysis ${analysis?.size}"
-        }
-        require(src !== display && analysis !== src && analysis !== display) { "src, display и analysis — три разных массива" }
-        require(lut == null || lut.size <= MAX_LUT_SIZE) { "куб ${lut?.size}³: больше $MAX_LUT_SIZE точек на ребре не берём" }
-        if (count == 0) return
-        check(running.compareAndSet(false, true)) { "PictureTransform.apply не вызывают одновременно" }
+        // Ворота первыми, и «закрыт» — первое за ними: close() входит через те же ворота, так что между проверкой и кадром оно
+        // не вклинится. closing ставится до ожидания ворот, поэтому после начала закрытия кадр отказывает сразу, а не
+        // соревнуется с close() за свободный миг между кадрами (у цикла с тяжёлыми кадрами он — сотые доли процента времени)
+        check(running.compareAndSet(false, true)) { "PictureTransform.apply уже идёт в другом потоке или объект закрывается" }
         try {
+            check(!closing) { "PictureTransform закрыт" }
+            require(width >= 0 && height >= 0) { "размер кадра $width×$height" }
+            val pixels = width.toLong() * height
+            require(pixels <= Int.MAX_VALUE) { "кадр $width×$height не влезает в массив" }
+            val count = pixels.toInt()
+            require(src.size >= count && display.size >= count && (analysis == null || analysis.size >= count)) {
+                "массивы меньше кадра $width×$height: src ${src.size}, display ${display.size}, analysis ${analysis?.size}"
+            }
+            require(src !== display && analysis !== src && analysis !== display) { "src, display и analysis — три разных массива" }
+            require(lut == null || lut.size <= MAX_LUT_SIZE) { "куб ${lut?.size}³: больше $MAX_LUT_SIZE точек на ребре не берём" }
+            if (count == 0) return
             if (lut != null) prepare(lut)
             jobSrc = src
             jobDisplay = display
@@ -85,10 +94,21 @@ class PictureTransform(private val bands: Int = 4) : AutoCloseable {
         }
     }
 
-    /** Останавливает потоки объекта. Второй вызов ничего не делает; после него `apply` — ошибка. */
+    /**
+     * Останавливает потоки объекта. Можно из любого потока и сколько угодно раз; с первого мига новые `apply` отказывают
+     * (`IllegalStateException`), а кадр, который считается, доводится до конца, и `close` ждёт его (миллисекунды). Ждать
+     * нужно: помощник, ушедший до уже объявленной полосы, оставил бы `apply` ждать его вечно. Поэтому потоки останавливает
+     * тот же вход `running`, что у кадра, — либо целиком до кадра, либо целиком после.
+     */
     override fun close() {
-        closed = true
-        for (worker in workers) LockSupport.unpark(worker)
+        closing = true
+        while (!running.compareAndSet(false, true)) LockSupport.parkNanos(GATE_POLL_NANOS)
+        try {
+            closed = true
+            for (worker in workers) LockSupport.unpark(worker)
+        } finally {
+            running.set(false)
+        }
     }
 
     // задание вызова: пишет поток вызова до запуска полос, читают полосы после него (передаёт `generation`)
@@ -118,12 +138,16 @@ class PictureTransform(private val bands: Int = 4) : AutoCloseable {
 
     @Volatile private var generation = 0
 
+    /** Закрытие началось: новые кадры отказывают; идущий кадр дойдёт до конца. Ставит close() до того, как встанет в ворота. */
+    @Volatile private var closing = false
+
+    /** Помощникам пора уходить. Ставится только за воротами `running`, когда кадра нет и нового не будет, — полосу не пропустить. */
     @Volatile private var closed = false
 
     @Volatile private var waiter: Thread? = null
 
     @Volatile private var failure: Throwable? = null
-    private var workers: Array<Thread> = NO_WORKERS
+    @Volatile private var workers: Array<Thread> = NO_WORKERS
     private val serial = SERIAL.incrementAndGet()
 
     private inner class Worker(private val band: Int) : Thread("PictureTransform-$serial-$band") {
@@ -136,6 +160,7 @@ class PictureTransform(private val bands: Int = 4) : AutoCloseable {
             while (true) {
                 var current = generation
                 while (current == seen) {
+                    // closed ставят только за воротами running, когда кадра нет и нового не будет: объявленной полосы не пропустить
                     if (closed) return
                     LockSupport.park(this@PictureTransform)
                     Thread.interrupted() // поднятый флаг сделал бы park пустым: ждать нечем, а цикл крутится
@@ -160,6 +185,7 @@ class PictureTransform(private val bands: Int = 4) : AutoCloseable {
         try {
             for (worker in created) worker.start()
         } catch (t: Throwable) {
+            closing = true
             closed = true
             for (worker in created) LockSupport.unpark(worker)
             throw t
@@ -329,6 +355,9 @@ class PictureTransform(private val bands: Int = 4) : AutoCloseable {
         const val MAX_LUT_SIZE = 129
 
         private const val MAX_BANDS = 64
+
+        /** Как часто close() заглядывает в ворота, пока идёт кадр. */
+        private const val GATE_POLL_NANOS = 50_000L
 
         /** Ширина поля одного канала в `Long`: 21 бит. Узел — до 4080, умноженный на вес до 256, — до 2²⁰: влезает с запасом. */
         private const val LANE = 21
