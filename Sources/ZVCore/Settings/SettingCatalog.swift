@@ -31,4 +31,14 @@ public enum SettingCatalog {
     public static func infoLine(for mode: CaptureMode) -> [SettingID] {
         infoLine + [mode == .photo ? .fileFormat : .movieRecordingSetting]
     }
+
+    /// Какая настройка на самом деле стоит на месте `id` у этой камеры (`available` — коды её свойств). Новые камеры Sony
+    /// вместо Creative Style 0xD240 имеют Creative Look 0xD0FA: на место «Творческого стиля» в Fn и во «Всех настройках»
+    /// встаёт он. У камеры, у которой есть и стиль, место за стилем. Остальные настройки — как есть.
+    /// В группах и рядах Fn Creative Look не значится: «Все настройки» показывают строку группы и без свойства камеры.
+    public static func resolved(_ id: SettingID, available: Set<UInt16>) -> SettingID {
+        guard id == .creativeStyle, !available.contains(SonyProp.creativeStyle),
+              available.contains(SonyProp.creativeLook) else { return id }
+        return .creativeLook
+    }
 }

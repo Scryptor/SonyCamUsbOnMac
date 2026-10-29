@@ -65,7 +65,7 @@ public enum PresetCatalog {
     public static let order: [SettingID] = [
         .whiteBalance, .colorTemperature, .wbShiftAB, .wbShiftGM,
         .iso, .exposureComp, .shutter, .aperture,
-        .metering, .dro, .focusMode, .focusArea, .creativeStyle, .pictureProfile,
+        .metering, .dro, .focusMode, .focusArea, .creativeStyle, .creativeLook, .pictureProfile,
     ]
 
     /// Настройка → от какой она зависит.

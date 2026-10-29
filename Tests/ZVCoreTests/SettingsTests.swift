@@ -113,5 +113,7 @@ private func props() throws -> [UInt16: SonyProperty] {
                                            .setting(.creativeStyle), .setting(.movieRecordingSetting), .allSettings])
     #expect(SettingCatalog.infoLine == [.shutter, .aperture, .iso, .whiteBalance, .exposureComp, .focusMode])
     #expect(SettingGroup.allCases.map(\.title) == ["Экспозиция", "Фокус", "Цвет и картинка", "Видео", "Фото", "Камера"])
-    #expect(SettingID.allCases.allSatisfy { id in SettingGroup.allCases.filter { $0.settings.contains(id) }.count == 1 })
+    // Creative Look в группах нет: «Все настройки» показывают строку группы и без свойства камеры, поэтому на место
+    // «Творческого стиля» его ставит SettingCatalog.resolved (OtherCamerasTests); остальные настройки — по одному разу
+    #expect(SettingID.allCases.filter { $0 != .creativeLook }.allSatisfy { id in SettingGroup.allCases.filter { $0.settings.contains(id) }.count == 1 })
 }

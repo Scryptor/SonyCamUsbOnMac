@@ -16,7 +16,10 @@ public enum ValueFormatter {
         return label(.whiteBalance, whiteBalance)
     }
 
-    public static func label(_ id: SettingID, _ value: Int64) -> String {
+    /// Подпись значения. Порядок: название от самой камеры (`names`, список 0x9215) → наши русские подписи и особые ветки →
+    /// английское название из справочника Sony → «#N».
+    public static func label(_ id: SettingID, _ value: Int64, names: [Int64: String]? = nil) -> String {
+        if let name = names?[value] { return name }
         switch id {
         case .shutter: return shutter(value)
         case .aperture: return aperture(value)
@@ -37,17 +40,20 @@ public enum ValueFormatter {
             let hours = value / 3600
             let minutes = (value % 3600) / 60
             return hours > 0 ? "\(hours) ч \(minutes) мин" : "\(minutes) мин"
-        case .focusArea: return focusArea(value) ?? fallback(value)
-        case .dro: return dro(value) ?? fallback(value)
+        case .focusArea: return focusArea(value) ?? fallback(id, value)
+        case .dro: return dro(value) ?? fallback(id, value)
         case .pictureProfile:
             if value == 0 { return "Выкл" }
-            return (1...10).contains(value) ? "PP\(value)" : fallback(value)
+            return (1...10).contains(value) ? "PP\(value)" : fallback(id, value)
         default:
-            return tables[id]?[value] ?? fallback(value)
+            return tables[id]?[value] ?? fallback(id, value)
         }
     }
 
-    private static func fallback(_ value: Int64) -> String { "#\(value)" }
+    /// Значения, которых нет в наших таблицах: английское название Sony из справочника, а если и его нет — «#N».
+    private static func fallback(_ id: SettingID, _ value: Int64) -> String {
+        SonyReferenceTables.valueName(id.code, value) ?? "#\(value)"
+    }
 
     private static func sign(_ value: Int64) -> String { value < 0 ? minus : "+" }
 
@@ -63,7 +69,7 @@ public enum ValueFormatter {
         if v == 0 { return "BULB" }
         let num = (v >> 16) & 0xFFFF
         let den = v & 0xFFFF
-        guard den > 0 else { return fallback(v) }
+        guard den > 0 else { return fallback(.shutter, v) }
         if num == 1 && den > 1 { return "1/\(den)" }
         var s = String(format: "%.1f", Double(num) / Double(den))
         if s.hasSuffix(".0") { s.removeLast(2) }

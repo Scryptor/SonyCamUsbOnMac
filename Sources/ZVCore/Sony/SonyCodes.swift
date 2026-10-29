@@ -10,6 +10,14 @@ public enum SonyOp {
     public static let setExtPropValue: UInt16 = 0x9205
     public static let controlDevice: UInt16 = 0x9207
     public static let getAllExtPropInfo: UInt16 = 0x9209
+
+    // у ZV-E10 в списке операций их нет: зовём, только если камера назвала их в GetDeviceInfo (DeviceInfo.supports)
+    /// Подписи значений от самой камеры (Creative Look и др.); параметр — тип списка, 0 — все списки.
+    public static let getDisplayStringList: UInt16 = 0x9215
+    /// Версия кода производителя (в параметре ответа, ×100: 0x0136 — 3.10).
+    public static let getVendorCodeVersion: UInt16 = 0x9216
+    /// Данные объектива: пары «положение фокуса — расстояние»; параметр 1 — футы, 2 — метры.
+    public static let getLensInformation: UInt16 = 0x9223
 }
 
 /// Коды свойств камеры (стандартные PTP 0x50xx и расширения Sony 0xD2xx).
@@ -67,6 +75,30 @@ public enum SonyProp {
     /// Можно ли «коснуться» экрана камеры командой (0x01 — да) и снять это касание.
     public static let remoteTouchEnabled: UInt16 = 0xD284
     public static let remoteTouchCancelEnabled: UInt16 = 0xD285
+
+    // новые камеры Sony (справочник Camera Control PTP 3 Reference); у ZV-E10 этих свойств нет
+    /// Гамма профиля изображения (UINT16): 0x0303 — S-Log3. По ней и по цвету профиля LUT «Авто» выбирает кривую.
+    public static let ppGamma: UInt16 = 0xD0E1
+    /// Цвет профиля изображения (UINT16): 0x0008 — S-Gamut3.Cine.
+    public static let ppColorMode: UInt16 = 0xD0E9
+    /// Creative Look (UINT16) — вместо Creative Style 0xD240. Числа значений совпадают со стилем, смысл другой.
+    public static let creativeLook: UInt16 = 0xD0FA
+    /// Абсолютный фокус: цель 0…65535 (UINT16), запись.
+    public static let focusPositionSetting: UInt16 = 0xE042
+    /// Абсолютный фокус: положение 0…65535 (UINT16), только чтение.
+    public static let focusPositionCurrent: UInt16 = 0xE043
+    /// Данные объектива готовы (UINT8, 1 — да): тогда можно звать 0x9223.
+    public static let lensInfoEnabled: UInt16 = 0xE086
+}
+
+/// События PTP от новых камер Sony. О смене свойства сообщает Sony.propertyChangedEvent (0xC203).
+public enum SonyEvent {
+    /// Список подписей изменился; в параметре — тип списка: заново 0x9215 с этим типом.
+    public static let displayListChanged: UInt16 = 0xC20F
+    /// Запись в 0xE042 закончилась; параметр 1 — фокус дошёл до цели.
+    public static let focusPositionResult: UInt16 = 0xC218
+    /// Данные объектива изменились: заново 0x9223.
+    public static let lensInfoChanged: UInt16 = 0xC21B
 }
 
 /// Команды управления 0x9207 (Control Device) — кроме кнопок спуска и записи; тип значения — свой у каждой.

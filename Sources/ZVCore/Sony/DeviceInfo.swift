@@ -30,4 +30,8 @@ public struct DeviceInfo: Equatable, Sendable {
 
     /// Команды Sony есть только в режиме PC Remote.
     public var isPCRemote: Bool { operations.contains(SonyOp.connect) }
+
+    /// Назвала ли камера операцию в GetDeviceInfo. Новые операции Sony (0x9215, 0x9216, 0x9223) зовём только если да:
+    /// у ZV-E10 их нет.
+    public func supports(_ op: UInt16) -> Bool { operations.contains(op) }
 }

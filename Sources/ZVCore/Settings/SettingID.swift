@@ -4,7 +4,7 @@ import Foundation
 public enum SettingID: String, CaseIterable, Hashable, Sendable, Codable, CodingKeyRepresentable {
     case exposureProgram, shutter, aperture, iso, exposureComp, metering, dro
     case focusMode, focusArea
-    case whiteBalance, colorTemperature, wbShiftAB, wbShiftGM, creativeStyle, pictureProfile
+    case whiteBalance, colorTemperature, wbShiftAB, wbShiftGM, creativeStyle, creativeLook, pictureProfile
     case movieFileFormat, movieRecordingSetting
     case imageSize, aspectRatio, fileFormat, jpegQuality
     case battery, cardRemaining, overheat
@@ -25,6 +25,7 @@ public enum SettingID: String, CaseIterable, Hashable, Sendable, Codable, Coding
         case .wbShiftAB: return SonyProp.abShift
         case .wbShiftGM: return SonyProp.gmShift
         case .creativeStyle: return SonyProp.creativeStyle
+        case .creativeLook: return SonyProp.creativeLook
         case .pictureProfile: return SonyProp.pictureProfile
         case .movieFileFormat: return SonyProp.movieFileFormat
         case .movieRecordingSetting: return SonyProp.movieRecordingSetting
@@ -54,6 +55,7 @@ public enum SettingID: String, CaseIterable, Hashable, Sendable, Codable, Coding
         case .wbShiftAB: return "Сдвиг A–B"
         case .wbShiftGM: return "Сдвиг G–M"
         case .creativeStyle: return "Творческий стиль"
+        case .creativeLook: return "Creative Look"
         case .pictureProfile: return "Профиль изображения"
         case .movieFileFormat: return "Формат видео"
         case .movieRecordingSetting: return "Параметры записи"
@@ -77,6 +79,7 @@ public enum SettingID: String, CaseIterable, Hashable, Sendable, Codable, Coding
         case .wbShiftAB: return "A–B"
         case .wbShiftGM: return "G–M"
         case .creativeStyle: return "Стиль"
+        case .creativeLook: return "Look"
         case .pictureProfile: return "Профиль"
         case .movieRecordingSetting: return "Запись"
         case .imageSize: return "Размер"

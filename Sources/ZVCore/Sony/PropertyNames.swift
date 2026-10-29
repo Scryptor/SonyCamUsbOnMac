@@ -1,8 +1,9 @@
 import Foundation
 
 /// Имена свойств камеры по libgphoto2 (camlibs/ptp2/ptp.h): для панели отладки — когда своего имени у программы нет.
+/// Кода, которого libgphoto2 не знает (свойства новых камер Sony), — имя из справочника Sony.
 public enum PropertyNames {
-    public static func name(_ code: UInt16) -> String? { names[code] }
+    public static func name(_ code: UInt16) -> String? { names[code] ?? SonyReferenceTables.propertyNames[code] }
 
     static let names: [UInt16: String] = [
         0x5000: "Undefined",
