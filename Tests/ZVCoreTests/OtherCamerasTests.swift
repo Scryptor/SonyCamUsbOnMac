@@ -301,20 +301,81 @@ private func lensTables(_ tables: [[(UInt32, UInt32)]], version: UInt16 = 100) -
 
 @Test func lensDistanceLabels() {
     #expect(LensInformation.label(0.35) == "0,35 м")
+    #expect(LensInformation.label(0.5) == "0,5 м")
+    #expect(LensInformation.label(1.0) == "1 м")
     #expect(LensInformation.label(1.2) == "1,2 м")
     #expect(LensInformation.label(12) == "12 м")
     #expect(LensInformation.label(1_000_000) == "∞")
-    // до 1 м — две цифры после запятой, до 10 м — одна, дальше — целые; от 100 м — «∞»
-    #expect(LensInformation.label(0.25) == "0,25 м")
-    #expect(LensInformation.label(0.3) == "0,30 м")
-    #expect(LensInformation.label(1) == "1,0 м")
-    #expect(LensInformation.label(9.9) == "9,9 м")
-    #expect(LensInformation.label(10) == "10 м")
-    #expect(LensInformation.label(99) == "99 м")
+    // сначала округление до показанной точности, потом выбор формата: «1,00 м», «10,0 м» и «100 м» не бывает
+    #expect(LensInformation.label(0.996) == "1 м")
+    #expect(LensInformation.label(9.99) == "10 м")
+    #expect(LensInformation.label(99.4) == "99 м")
+    #expect(LensInformation.label(99.5) == "∞")
     #expect(LensInformation.label(100) == "∞")
-    #expect(LensInformation.label(.infinity) == "∞")
+    // до 1 м — до двух цифр после запятой, до 10 м — до одной, дальше — целые; хвостовых нулей и запятой в конце нет
+    #expect(LensInformation.label(0.25) == "0,25 м")
+    #expect(LensInformation.label(0.3) == "0,3 м")
+    #expect(LensInformation.label(0.2) == "0,2 м")
+    #expect(LensInformation.label(0.05) == "0,05 м")
+    #expect(LensInformation.label(0.004) == "0 м")
+    #expect(LensInformation.label(0.006) == "0,01 м")
+    #expect(LensInformation.label(2) == "2 м")
+    #expect(LensInformation.label(2.5) == "2,5 м")
+    #expect(LensInformation.label(9.9) == "9,9 м")
+    #expect(LensInformation.label(9.94) == "9,9 м")
+    #expect(LensInformation.label(9.96) == "10 м")
+    #expect(LensInformation.label(10) == "10 м")
+    #expect(LensInformation.label(10.4) == "10 м")
+    #expect(LensInformation.label(10.6) == "11 м")
+    #expect(LensInformation.label(50) == "50 м")
+    #expect(LensInformation.label(99) == "99 м")
     // запятая — всегда, чей бы ни был язык системы
     #expect(!LensInformation.label(2.5).contains("."))
+}
+
+@Test func lensDistanceLabelOfAnythingThatIsNotADistance() {
+    // ноль и всё, что меньше нуля или не число, — «0 м»; бесконечность — «∞»; ни «inf», ни «nan», ни «−» на экран не попадает
+    #expect(LensInformation.label(0) == "0 м")
+    #expect(LensInformation.label(-0.0) == "0 м")
+    #expect(LensInformation.label(-1) == "0 м")
+    #expect(LensInformation.label(-0.001) == "0 м")
+    #expect(LensInformation.label(.nan) == "0 м")
+    #expect(LensInformation.label(-.infinity) == "0 м")
+    #expect(LensInformation.label(-.greatestFiniteMagnitude) == "0 м")
+    #expect(LensInformation.label(.infinity) == "∞")
+    #expect(LensInformation.label(.greatestFiniteMagnitude) == "∞")
+}
+
+@Test func lensDistanceLabelIsTheValueRoundedToWhatItShows() {
+    // каждая тысячная метра от 0 до 120 м (с границами 0,995, 9,95 и 99,5): подпись — число, округлённое до показанной
+    // точности (0,01 до 1 м, 0,1 до 10 м, 1 дальше), без хвостовых нулей, с запятой, не убывающее; «∞» — только от 99,5 м
+    var problems: [String] = []
+    var previous = 0.0
+    var infinity = false
+    for thousandths in 0...120_000 {
+        let meters = Double(thousandths) / 1000
+        let label = LensInformation.label(meters)
+        if label == "∞" {
+            if meters < 99.5 { problems.append("\(meters): ∞") }
+            infinity = true
+            continue
+        }
+        if infinity { problems.append("\(meters): число после ∞") }
+        guard label.hasSuffix(" м") else { problems.append("\(meters): \(label) без « м»"); continue }
+        let text = String(label.dropLast(2))
+        guard !text.contains("."), let shown = Double(text.replacingOccurrences(of: ",", with: ".")) else {
+            problems.append("\(meters): \(label) не число с запятой")
+            continue
+        }
+        let decimals = text.split(separator: ",", omittingEmptySubsequences: false).dropFirst().first?.count ?? 0
+        let precision = shown < 1 ? 0.005 : shown < 10 ? 0.05 : 0.5
+        if abs(shown - meters) > precision + 1e-9 { problems.append("\(meters): \(label) дальше половины шага") }
+        if decimals > (shown < 1 ? 2 : shown < 10 ? 1 : 0) { problems.append("\(meters): \(label) лишний знак") }
+        if decimals > 0, text.hasSuffix("0") { problems.append("\(meters): \(label) хвостовой нуль") }
+        if shown < previous { problems.append("\(meters): \(label) меньше предыдущего") }
+        previous = shown
+    }
+    #expect(problems.isEmpty, "\(problems.count) отклонений, первые: \(problems.prefix(5))")
 }
 
 // MARK: - Creative Look вместо Creative Style

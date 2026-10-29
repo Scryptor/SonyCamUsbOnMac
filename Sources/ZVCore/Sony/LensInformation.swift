@@ -69,13 +69,29 @@ public struct LensInformation: Equatable, Sendable {
         return a.meters + (b.meters - a.meters) * ((p - a.position) / (b.position - a.position))
     }
 
-    /// Расстояние для шкалы фокуса: до 1 м — две цифры после запятой («0,35 м»), до 10 м — одна («1,2 м»), дальше — целые
-    /// («12 м»); от 100 м — «∞». Запятая — всегда, чей бы ни был язык системы.
+    /// Расстояние для шкалы фокуса. Сначала число округляется до того, что будет показано, и только потом выбирается вид:
+    /// до 1 м — до двух цифр после запятой («0,35 м», «0,5 м»), до 10 м — до одной («1,2 м»), дальше — целые («12 м»);
+    /// лишних нулей и запятой в конце нет («1 м», а не «1,0 м»). Округлилось до 100 м и больше — «∞». Запятая — всегда,
+    /// чей бы ни был язык системы. Ноль, отрицательное и не число — «0 м».
     public static func label(_ meters: Double) -> String {
-        if meters.isNaN { return "—" }
-        if meters >= 100 { return "∞" }
-        let format = meters < 1 ? "%.2f" : meters < 10 ? "%.1f" : "%.0f"
-        return String(format: format, meters).replacingOccurrences(of: ".", with: ",") + " м"
+        guard meters > 0 else { return "0 м" }                  // и NaN, и -0.0
+        if meters.isInfinite { return "∞" }
+        let hundredths = (meters * 100).rounded() / 100
+        if hundredths < 1 { return shown(hundredths, digits: 2) + " м" }
+        let tenths = (meters * 10).rounded() / 10
+        if tenths < 10 { return shown(tenths, digits: 1) + " м" }
+        let whole = meters.rounded()
+        return whole >= 100 ? "∞" : shown(whole, digits: 0) + " м"
+    }
+
+    /// Число с запятой и не больше чем `digits` знаков после неё, без хвостовых нулей: «0,5», «1», «1,2».
+    private static func shown(_ value: Double, digits: Int) -> String {
+        var text = String(format: "%.\(digits)f", value)
+        if text.contains(".") {
+            while text.hasSuffix("0") { text.removeLast() }
+            if text.hasSuffix(".") { text.removeLast() }
+        }
+        return text.replacingOccurrences(of: ".", with: ",")
     }
 
     public static func == (lhs: LensInformation, rhs: LensInformation) -> Bool {
