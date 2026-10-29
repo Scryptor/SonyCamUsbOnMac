@@ -371,7 +371,7 @@ while time.time() < deadline and (setting("iso")["pending"] or setting("iso").ge
 print(setting("iso")["label"])
 ```
 
-Готовые сценарии — `scripts/e2e.py`, `scripts/e2e_photo.py` и `scripts/e2e_modes.py` для настоящей камеры, `scripts/e2e_cameras.py`, `scripts/e2e_strip.py` и `scripts/e2e_group.py` (виртуальные камеры, программа ищет их в сети) для виртуальных, а `scripts/e2e_monitor.py`, `scripts/e2e_lens.py`, `scripts/e2e_newer.py`, `scripts/e2e_gallery.py`, `scripts/e2e_quality.py` и `scripts/e2e_record.py` сами запускают виртуальную камеру и программу с `ZV_PTPIP_HOST` — без поиска в сети (см. [Устройство кода](architecture.md#тесты)).
+Готовые сценарии — `scripts/e2e.py`, `scripts/e2e_photo.py`, `scripts/e2e_modes.py` и `scripts/check_log_preview.py` (уровни превью в S-Log и HLG) для настоящей камеры, `scripts/e2e_cameras.py`, `scripts/e2e_strip.py` и `scripts/e2e_group.py` (виртуальные камеры, программа ищет их в сети) для виртуальных, а `scripts/e2e_monitor.py`, `scripts/e2e_lens.py`, `scripts/e2e_newer.py`, `scripts/e2e_gallery.py`, `scripts/e2e_quality.py` и `scripts/e2e_record.py` сами запускают виртуальную камеру и программу с `ZV_PTPIP_HOST` — без поиска в сети (см. [Устройство кода](architecture.md#тесты)).
 
 ## Безопасность
 
