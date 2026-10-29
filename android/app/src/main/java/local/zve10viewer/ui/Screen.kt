@@ -76,6 +76,8 @@ import androidx.compose.ui.unit.round
 import androidx.compose.ui.unit.toSize
 import kotlinx.coroutines.launch
 import local.zve10viewer.view.FloatingPlacement
+import local.zve10viewer.view.HardwareKeys
+import local.zve10viewer.view.KeyAction
 import local.zve10viewer.view.OrientedFrame
 import local.zve10viewer.view.ProbeDragging
 import local.zve10viewer.view.ProbeLayout
@@ -227,6 +229,13 @@ class ScreenState {
             savePresetOpen || presetsOpen || touchFocusHelpOpen || focusMarksHelpOpen
 
     /**
+     * На экране кадр, и поверх него ничего не открыто: ни меню и панелей, ни ⚙, ни окна пресетов, ни галереи, ни отладки, ни просмотра
+     * снимка ([reviewOpen] — он у контроллера, не здесь). Только здесь кнопки громкости и «Камера» что-то делают. Спрятанные элементы
+     * и увеличение этого не отменяют: с пультом снимают и без кнопок на экране.
+     */
+    fun isFrameScreen(reviewOpen: Boolean): Boolean = !overlayOpen && !debugOpen && galleryShot == null && !reviewOpen
+
+    /**
      * Шкала с метками на экране; [doNotShow] — «Больше не показывать» отмечено. Первый раз за запуск открывает карточку — сама, без
      * просьбы пользователя, поэтому ничего из открытого им (окно пресетов, имя пресета, меню) не закрывает; закрывает другие
      * подсказки только долгое нажатие ([openFocusMarksHelp]).
@@ -355,6 +364,27 @@ fun App(controller: CameraController) {
                     // LUT и вектороскоп — после остального: `--ez off true --es lut auto` выключает всё и включает LUT
                     controller.applyAssistExtras(command.extras)
                 }
+            }
+        }
+    }
+    // кнопки громкости и «Камера» (⚙): MainActivity забрала клавишу и передала сюда. Нажимаем то же, что кнопка съёмки на экране
+    // (спуск в фото, запись в видео и S&Q), — но только когда на экране кадр и кнопка сейчас нажималась бы; иначе ничего. Серая
+    // кнопка — тоже «ничего»: второе нажатие, пока камера не ответила на первое, не уходит в камеру
+    LaunchedEffect(Unit) {
+        controller.hardwareShutter.collect {
+            val action = HardwareKeys.press(
+                onFrameScreen = screen.isFrameScreen(reviewOpen = controller.review != null),
+                photoMode = controller.mode == CaptureMode.photo,
+                ready = controller.phase == CameraController.Phase.ready,
+                // снимок идёт или применяется пресет: capturePhoto() такое нажатие пропустил бы без следа, а в журнале должно быть видно
+                photoBusy = controller.isCapturing || controller.isApplyingPreset,
+                recordPending = controller.recordingPending,
+            )
+            controller.noteHardwareKey(action)
+            when (action) {
+                KeyAction.photo -> controller.capturePhoto()
+                KeyAction.record -> controller.toggleRecording()
+                KeyAction.elsewhere, KeyAction.notReady, KeyAction.busy -> Unit
             }
         }
     }
@@ -1405,6 +1435,11 @@ private fun SettingsPanel(controller: CameraController, modifier: Modifier, onDe
             Text("Спуск, запись и стоп-кадр отвечают и вибрацией — если она включена в настройках системы.",
                 color = Secondary, fontSize = 13.sp)
         }
+        Spacer(Modifier.height(8.dp))
+        Toggle("Кнопки громкости — спуск и запись", controller.volumeKeys) { controller.applyVolumeKeys(it) }
+        Text("Кнопки громкости и кнопка «Камера» на Bluetooth-пультах для телефонов — как кнопка съёмки на экране: спуск в " +
+            "фоторежиме, начало и остановка записи в видео и S&Q. Работают на экране с кадром; пока включено, громкость не меняют.",
+            color = Secondary, fontSize = 13.sp)
         Spacer(Modifier.height(8.dp))
         Toggle("Красная рамка во время записи", tally.enabled) { controller.applyTallyStyle(tally.copy(enabled = it)) }
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(18.dp)) {

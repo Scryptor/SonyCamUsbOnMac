@@ -20,6 +20,7 @@ import local.zve10viewer.settings.Preset
 import local.zve10viewer.settings.PresetCatalog
 import local.zve10viewer.monitor.Waveform
 import local.zve10viewer.view.FloatingPlacement
+import local.zve10viewer.view.HardwareKeys
 import local.zve10viewer.session.PreviewQualityMode
 
 /** Настройки программы. Хранятся в SharedPreferences; имена и значения — как у программы для Mac. */
@@ -173,6 +174,14 @@ class Prefs(context: Context) {
     var hapticsEnabled: Boolean
         get() = prefs.getBoolean("hapticsEnabled", true)
         set(value) = prefs.edit().putBoolean("hapticsEnabled", value).apply()
+
+    /**
+     * «Кнопки громкости — спуск и запись» (⚙): кнопки громкости и «Камера» — главная кнопка съёмки, громкость они не меняют.
+     * Выключено по умолчанию: случайная запись хуже, чем лишний поиск в настройках.
+     */
+    var volumeKeys: Boolean
+        get() = prefs.getBoolean(HardwareKeys.PREF_KEY, HardwareKeys.DEFAULT_ENABLED)
+        set(value) = prefs.edit().putBoolean(HardwareKeys.PREF_KEY, value).apply()
 
     /** Красная рамка во время записи: включена, толщина, яркость, мигание. */
     var tallyStyle: TallyStyle

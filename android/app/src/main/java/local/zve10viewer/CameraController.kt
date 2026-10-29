@@ -148,6 +148,7 @@ import local.zve10viewer.sony.SonyProp
 import local.zve10viewer.sony.SonyProperty
 import local.zve10viewer.usb.UsbPtpTransport
 import local.zve10viewer.view.FloatingPlacement
+import local.zve10viewer.view.KeyAction
 import local.zve10viewer.view.ShotDeletion
 import local.zve10viewer.wifi.LinkLoss
 import local.zve10viewer.wifi.PtpIpIdentity
@@ -474,6 +475,11 @@ class CameraController(private val context: Context, private val scope: Coroutin
     private var recordingToggle = RecordingToggle()
     /** Нажатие записи, которое ещё идёт в камеру. */
     private var recordingCall: Job? = null
+    /**
+     * Камера ещё не ответила на прошлое нажатие записи: запрос висит («Запуск записи…», «Остановка…») или сам вызов не вернулся —
+     * и после отказа по времени (6 с) он может идти дальше. Клавиша съёмки в это время не делает ничего.
+     */
+    val recordingPending: Boolean get() = recordingRequest != null || recordingCall?.isActive == true
     /** Код, которым камера отклонила последнее нажатие записи, если запись так и не сменилась, — для сообщения. */
     private var recordingRefusal: Int? = null
     var review by mutableStateOf<Review?>(null)
@@ -1029,6 +1035,37 @@ class CameraController(private val context: Context, private val scope: Coroutin
         tallyStyle = style
         prefs.tallyStyle = style
     }
+
+    // MARK: - Кнопки громкости
+
+    /**
+     * «Кнопки громкости — спуск и запись» (⚙): кнопки громкости и «Камера» (пульты для телефонов) — главная кнопка съёмки. Выключено по
+     * умолчанию. Читает MainActivity.dispatchKeyEvent: пока включено, эти клавиши забирает программа, и громкость не меняется.
+     */
+    var volumeKeys by mutableStateOf(prefs.volumeKeys)
+        private set
+
+    fun applyVolumeKeys(on: Boolean) {
+        if (on == volumeKeys) return
+        volumeKeys = on
+        prefs.volumeKeys = on
+        journal("кнопки громкости: " + if (on) "включены" else "выключены")
+    }
+
+    private val hardwareShutterEvents = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
+    /**
+     * Нажатия клавиш съёмки — по одному на нажатие, без повторов при удержании. Состояние экрана живёт в Compose, поэтому клавиша идёт
+     * туда, а не наоборот: `App` решает, на кадре ли экран, и зовёт то же, что кнопка на экране.
+     */
+    val hardwareShutter: SharedFlow<Unit> = hardwareShutterEvents.asSharedFlow()
+
+    /** Из MainActivity.dispatchKeyEvent. Нажатие, которого никто не слушает (экран ещё не собран), пропадает: потом оно уже ни к чему. */
+    fun pressHardwareShutter() {
+        hardwareShutterEvents.tryEmit(Unit)
+    }
+
+    /** Что сделала клавиша — в журнал («Отладка», logcat ZVLink): и когда пошла в камеру, и когда нет, и почему. */
+    fun noteHardwareKey(action: KeyAction) = journal("кнопки громкости: ${action.journalText}")
 
     /** Значение инструмента монитора; false — у него такого нет. */
     fun setAssist(tool: MonitorTool, value: String): Boolean {

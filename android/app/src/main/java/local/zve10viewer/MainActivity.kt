@@ -7,6 +7,7 @@ import android.content.IntentFilter
 import android.content.pm.ActivityInfo
 import androidx.core.content.ContextCompat
 import android.os.Bundle
+import android.view.KeyEvent
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -22,6 +23,7 @@ import local.zve10viewer.settings.WiFiAddress
 import local.zve10viewer.ui.App
 import local.zve10viewer.ui.FilePickers
 import local.zve10viewer.ui.LocalFilePickers
+import local.zve10viewer.view.HardwareKeys
 
 class MainActivity : ComponentActivity() {
     private lateinit var controller: CameraController
@@ -163,6 +165,21 @@ class MainActivity : ComponentActivity() {
         if (BuildConfig.DEBUG) runCatching { unregisterReceiver(debugReceiver) }
         controller.stop()
         super.onDestroy()
+    }
+
+    /**
+     * Кнопки громкости и «Камера» как главная кнопка съёмки (⚙ → «Кнопки громкости — спуск и запись», по умолчанию выключено).
+     * Пока переключатель включён, программа забирает эти клавиши всегда — и нажатие, и отпускание, — даже когда ничего не делает:
+     * громкость не прыгает. Действует только нажатие без повтора; куда оно идёт — решает экран (`App`): на экране кадра то же, что
+     * кнопка съёмки на экране, в ⚙, галерее, пресетах, отладке, просмотре снимка и меню — ничего. Переключатель выключен — клавиши
+     * не трогаем, система меняет громкость как обычно. Окошки «Новый пресет», «Сохранить настройки» и «Переименовать» — отдельные
+     * окна Android: клавиши идут им, а не сюда, и громкость в них меняется как обычно.
+     */
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (!::controller.isInitialized) return super.dispatchKeyEvent(event)
+        val handling = HardwareKeys.handle(event.keyCode, event.action, event.repeatCount, controller.volumeKeys)
+        if (handling.pressed) controller.pressHardwareShutter()
+        return handling.consumed || super.dispatchKeyEvent(event)
     }
 
     /**
