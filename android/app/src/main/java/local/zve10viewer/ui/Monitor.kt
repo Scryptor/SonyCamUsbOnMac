@@ -13,6 +13,7 @@ import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.rememberTextMeasurer
@@ -56,6 +57,8 @@ import androidx.compose.ui.unit.sp
 import local.zve10viewer.CameraController
 import local.zve10viewer.monitor.AssistRaster
 import local.zve10viewer.monitor.FrameMarkers
+import local.zve10viewer.monitor.FrameOrientation
+import local.zve10viewer.view.OrientedFrame
 import local.zve10viewer.monitor.LutChoice
 import local.zve10viewer.monitor.LutTexts
 import local.zve10viewer.monitor.MonitorAssist
@@ -352,17 +355,20 @@ fun WaveformView(trace: CameraController.WaveformTrace, mode: Waveform.Mode, onM
     }
 }
 
-/** Эталонный кадр поверх живого: заполняет кадр на экране (rect) по большей стороне, лишнее обрезано по краю кадра. */
-fun DrawScope.drawReference(image: ImageBitmap, rect: Rect, alpha: Float) {
-    if (image.width <= 0 || image.height <= 0 || rect.width <= 0f || rect.height <= 0f) return
-    val k = maxOf(rect.width / image.width, rect.height / image.height)
-    val w = image.width * k
-    val h = image.height * k
-    val left = rect.center.x - w / 2
-    val top = rect.center.y - h / 2
-    clipRect(rect.left, rect.top, rect.right, rect.bottom) {
-        drawImage(image, dstOffset = IntOffset(left.roundToInt(), top.roundToInt()), dstSize = IntSize(w.roundToInt(), h.roundToInt()),
-            alpha = alpha, filterQuality = FilterQuality.Low)
+/**
+ * Эталонный кадр поверх живого: заполняет кадр на экране (rect) по большей стороне, лишнее обрезано по краю кадра. Эталон снят
+ * камерой как есть, а живая картинка может быть зеркальной или перевёрнутой ([orientation]): он рисуется с тем же поворотом,
+ * `scale(±1, ±1)` вокруг середины кадра на экране — она же середина эталона, поэтому он остаётся на месте и только переворачивается.
+ */
+fun DrawScope.drawReference(image: ImageBitmap, rect: Rect, alpha: Float, orientation: FrameOrientation) {
+    val box = OrientedFrame.referenceBox(Size(image.width.toFloat(), image.height.toFloat()), rect)
+    if (box.isEmpty) return
+    val flip = OrientedFrame.flip(orientation)
+    withTransform({ scale(flip.x, flip.y, rect.center) }) {
+        clipRect(rect.left, rect.top, rect.right, rect.bottom) {
+            drawImage(image, dstOffset = IntOffset(box.left.roundToInt(), box.top.roundToInt()),
+                dstSize = IntSize(box.width.roundToInt(), box.height.roundToInt()), alpha = alpha, filterQuality = FilterQuality.Low)
+        }
     }
 }
 

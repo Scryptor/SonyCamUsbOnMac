@@ -78,10 +78,12 @@ class MainActivity : ComponentActivity() {
      * `… -a local.zve10viewer.DEBUG_ASSIST --es tool zebra --es value 95` (без value — вкл/выкл), `--ez off true` — всё
      * выключить, `--ez menu true|false [--es tool peaking]` — меню, `--es waveform luma|parade|off` — волновая форма,
      * `--ez reference true` — эталон из текущего кадра, `--ei shot 0` — из снимка ленты, `--ez overlayToggle true` — как
-     * касание миниатюры эталона (включить наложение, спрятать или показать эталон). LUT и вектороскоп —
+     * касание миниатюры эталона (включить наложение, спрятать или показать эталон). LUT, вектороскоп, картинка и пипетка —
      * `--es lut off|auto|slog3cine|slog3|slog2|hlg|file`, `--es lutFile Имя` (свой файл из `filesDir/luts`),
-     * `--ez lutScopes false`, `--ez vectorscope true`, `--ei vectorscopeZoom 2` — после остального, в одной команде.
-     * Растр, картинка и вектороскоп — в logcat с тегом ZVAssist.
+     * `--ez lutScopes false`, `--ez vectorscope true`, `--ei vectorscopeZoom 2`, `--es orientation off|mirror|180|mirror180`
+     * (зеркало и переворот; не путать с `--es orientation portrait` у `am start` — то поворот окна), `--ez probe true`,
+     * `--ef probeX 0.69 --ef probeY 0.3` (где пипетка: экранные доли кадра, каким он виден) — после остального, в одной команде.
+     * Растр, картинка, вектороскоп и пипетка — в logcat с тегом ZVAssist.
      */
     private val debugReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -103,10 +105,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** Extras про LUT и вектороскоп как их положил adb (`--es`, `--ez`, `--ei`): тип разбирает `AssistExtras`. */
+    /** Extras про LUT, вектороскоп, картинку и пипетку как их положил adb (`--es`, `--ez`, `--ei`, `--ef`): тип разбирает `AssistExtras`. */
     private fun assistExtras(intent: Intent) = AssistExtras.Request(
         lut = extra(intent, "lut"), lutFile = extra(intent, "lutFile"), lutScopes = extra(intent, "lutScopes"),
         vectorscope = extra(intent, "vectorscope"), vectorscopeZoom = extra(intent, "vectorscopeZoom"),
+        orientation = extra(intent, "orientation"), probe = extra(intent, "probe"), probeX = extra(intent, "probeX"),
+        probeY = extra(intent, "probeY"),
     )
 
     // типизированные getXxxExtra молча подставляют значение по умолчанию, если тип не тот; тут тип нужен как он есть
@@ -115,8 +119,9 @@ class MainActivity : ComponentActivity() {
 
     /**
      * Фокус и зум с экрана: `… -a local.zve10viewer.DEBUG_LENS --ez touch true|false` — режим «фокус касанием»,
-     * `--ef x 0.3 --ef y 0.4` — фокус в эту точку кадра, `--ez cancel true` — снять слежение, `--es zoom tele|wide|stop`,
-     * `--ei focus -7` — шкала фокуса. Что вышло — в logcat с тегом ZVLens.
+     * `--ef x 0.3 --ef y 0.4` — фокус в эту точку кадра — экранные доли, каким его видно (при зеркале точка AF камеры зеркальна:
+     * x 0,3 → 0,7), `--ez cancel true` — снять слежение, `--es zoom tele|wide|stop`, `--ei focus -7` — шкала фокуса. Что вышло —
+     * в logcat с тегом ZVLens: сразу строка «касание: экран … → камера …», потом рамки камеры в её долях.
      */
     private fun debugLens(intent: Intent) {
         if (intent.hasExtra("touch") && intent.getBooleanExtra("touch", false) != controller.touchFocusOn) controller.toggleTouchFocus()

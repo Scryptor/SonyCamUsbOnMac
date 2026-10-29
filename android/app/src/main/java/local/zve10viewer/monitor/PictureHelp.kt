@@ -62,6 +62,9 @@ object PictureHelp {
      *   обратно за время с прошлой строки, мс; NaN — проход не шёл
      * @param vectorscope включён ли вектороскоп и в каком он масштабе ([vectorscopeZoom]: 1 или 2; называется и у выключенного —
      *   это настройка, а не включатель)
+     * @param probe включена ли пипетка; тогда в конце строки — `probe=47%,182,140,121` (процент, R, G, B; `-`, пока показания
+     *   нет), `probeAt=0.688,0.300` (экранные доли кадра, где она стоит) и `zone=кожа` (зона false color, `-` между зонами).
+     *   Выключена — `probe=off`. Пипетка дописана в конец: прежние проверки ищут свои куски строки, и ничего не сдвигается
      */
     fun report(
         lut: String,
@@ -76,17 +79,27 @@ object PictureHelp {
         passMaxMs: Double = Double.NaN,
         vectorscope: Boolean = false,
         vectorscopeZoom: Int = 1,
+        probe: Boolean = false,
+        probeReading: ColorProbe.Reading? = null,
+        probeAt: FramePoint = ColorProbe.CENTER,
     ): String {
         val low = percentile(levels, 1)
         val high = percentile(levels, 99)
         return String.format(
             Locale.ROOT,
             "картинка: lut=%s mode=%s orient=%s lutScopes=%b vectorscope=%s zoom=%d white=%d p1=%d p99=%d spread=%d mean=%.1f " +
-                "pass=%s passMax=%s size=%dx%d",
+                "pass=%s passMax=%s size=%dx%d %s",
             lut, mode, orientation.value, lutScopes, if (vectorscope) "on" else "off", vectorscopeZoom, white, low, high, high - low,
             mean(levels),
-            milliseconds(passAverageMs), milliseconds(passMaxMs), width, height,
+            milliseconds(passAverageMs), milliseconds(passMaxMs), width, height, probeTokens(probe, probeReading, probeAt),
         )
+    }
+
+    /** Пипетка в строке для logcat: `probe=off` или `probe=47%,182,140,121 probeAt=0.688,0.300 zone=кожа`. */
+    private fun probeTokens(on: Boolean, reading: ColorProbe.Reading?, at: FramePoint): String {
+        if (!on) return "probe=off"
+        val value = if (reading == null) "-" else "${reading.percent}%,${reading.r},${reading.g},${reading.b}"
+        return String.format(Locale.ROOT, "probe=%s probeAt=%.3f,%.3f zone=%s", value, at.x, at.y, reading?.zone?.title ?: "-")
     }
 
     private fun milliseconds(value: Double): String = if (value.isNaN()) "-" else String.format(Locale.ROOT, "%.1f", value)

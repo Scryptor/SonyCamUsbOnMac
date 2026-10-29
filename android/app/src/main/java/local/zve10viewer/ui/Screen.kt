@@ -76,6 +76,11 @@ import androidx.compose.ui.unit.round
 import androidx.compose.ui.unit.toSize
 import kotlinx.coroutines.launch
 import local.zve10viewer.view.FloatingPlacement
+import local.zve10viewer.view.OrientedFrame
+import local.zve10viewer.view.ProbeDragging
+import local.zve10viewer.view.ProbeLayout
+import local.zve10viewer.view.TapAction
+import local.zve10viewer.view.TapRoute
 import local.zve10viewer.view.ViewZoom
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -477,15 +482,20 @@ private fun LiveScreen(controller: CameraController, screen: ScreenState) {
             },
     ) {
         Video(controller, screen, feedback, Modifier.fillMaxSize()) { point ->
-            when {
-                screen.overlayOpen -> screen.closeOverlays()
-                screen.revealTap || screen.manualHidden -> {
+            // point — доли кадра, каким его видно на экране (зеркальный — как есть); null — мимо кадра
+            when (TapRoute.decide(screen.overlayOpen, screen.revealTap || screen.manualHidden, controller.assist.probe,
+                controller.touchFocusOn, point != null)) {
+                TapAction.closeOverlays -> screen.closeOverlays()
+                TapAction.reveal -> {
                     screen.revealTap = false
                     screen.manualHidden = false
                 }
-                // фокус касанием: касание кадра ставит туда фокус, элементы не прячет
-                controller.touchFocusOn && point != null -> controller.touchFocus(point.x.toDouble(), point.y.toDouble())
-                else -> {
+                // пипетка: касание кадра ставит её, а не фокус, что бы ни горело на кнопке «Фокус»; элементы не прячет
+                TapAction.placeProbe -> point?.let { controller.placeProbe(it.x.toDouble(), it.y.toDouble()) }
+                // фокус касанием: касание кадра ставит туда фокус, элементы не прячет; в координаты камеры точку переводит
+                // контроллер (зеркало и переворот)
+                TapAction.focus -> point?.let { controller.touchFocus(it.x.toDouble(), it.y.toDouble()) }
+                TapAction.hide -> {
                     screen.manualHidden = true
                     hint = true
                 }
@@ -583,7 +593,8 @@ private fun LiveScreen(controller: CameraController, screen: ScreenState) {
 
 /**
  * Видео с цифровым увеличением: щипок двумя пальцами, сдвиг при увеличении (с инерцией), касание — onTap (прячет и
- * возвращает элементы; с фокусом касанием — точка кадра, доли, или null мимо кадра). Кадр — бикубически (AGSL, Android 13+), рамка записи — по краю видимой картинки.
+ * возвращает элементы; с фокусом касанием или пипеткой — точка кадра, доли кадра на экране, или null мимо кадра). Метку пипетки
+ * тащит тот же жест. Кадр — бикубически (AGSL, Android 13+), рамка записи — по краю видимой картинки.
  */
 @Composable
 private fun Video(controller: CameraController, screen: ScreenState, feedback: FeedbackState, modifier: Modifier, onTap: (Offset?) -> Unit) {
@@ -607,17 +618,25 @@ private fun Video(controller: CameraController, screen: ScreenState, feedback: F
                 frame = { latestFrame },
                 onStart = { screen.zoomMotion?.cancel() },
                 onTap = { at ->
-                    // точка кадра под пальцем — с увеличением; мимо кадра — null
+                    // точка кадра под пальцем — с увеличением, в долях кадра, каким он на экране; мимо кадра — null
                     val f = latestFrame
                     val rect = f?.let { screen.zoom.imageRect(Size(size.width.toFloat(), size.height.toFloat()), it) }
-                    latestTap(rect?.takeIf { it.width > 0f && it.height > 0f && it.contains(at) }
-                        ?.let { Offset((at.x - it.left) / it.width, (at.y - it.top) / it.height) })
+                    latestTap(rect?.let { OrientedFrame.fraction(at, it) })
                 },
                 onLimit = { feedback.haptic(HapticEvent.zoomLimit) },
                 onEnd = { velocity ->
                     val f = latestFrame ?: return@zoomGestures
                     screen.zoomMotion = settleZoom(scope, { screen.zoom }, { screen.zoom = it }, Size(size.width.toFloat(), size.height.toFloat()),
                         f, velocity) { feedback.haptic(HapticEvent.zoomLimit) }
+                },
+                // метка пипетки (пока пипетка включена): жест одним пальцем, начатый на ней, тащит её
+                probe = {
+                    if (!controller.assist.probe) null
+                    else ProbeDragging.gesture(
+                        point = { controller.probePoint }, place = { controller.placeProbe(it.x, it.y) }, zoom = { screen.zoom },
+                        frame = { latestFrame }, view = Size(size.width.toFloat(), size.height.toFloat()),
+                        sizes = ProbeLayout.Sizes.dp.scaled(density),
+                    )
                 },
             )
         },
@@ -644,7 +663,9 @@ private fun Video(controller: CameraController, screen: ScreenState, feedback: F
                 val rect = screen.zoom.imageRect(size, frameSize)
                 drawFrame(frame, rect, if (dimmed) 0.55f else 1f, if (bicubic) renderer else null)
                 // эталонный кадр — полупрозрачно поверх живого: заполняет кадр, лишнее обрезано по его краю
-                if (reference != null) drawReference(reference.first.image, rect, reference.second * if (dimmed) 0.55f else 1f)
+                // и с тем же поворотом, что у живой картинки: эталон снят камерой как есть
+                if (reference != null) drawReference(reference.first.image, rect, reference.second * if (dimmed) 0.55f else 1f,
+                    assist.orientation)
                 // зебра, false color и пикинг — растр над своей частью кадра; едет вместе с картинкой
                 if (overlay != null) {
                     val area = assistArea(overlay, rect)
@@ -655,7 +676,8 @@ private fun Video(controller: CameraController, screen: ScreenState, feedback: F
                 if (assist.hasMarkers) drawAssistMarkers(assist, frameSize, rect)
                 // рамки фокуса камеры — всегда, как на её экране: выключили кнопку «Фокус» — слежение продолжается, рамка
                 // видна; отметка касания — после касания в режиме фокуса касанием
-                drawFocusFrames(controller.focusFrames, rect, mark?.first, markProgress.value)
+                // и те и другие — в долях кадра камеры; зеркало и переворот переводят их на то место картинки, где камера их видит
+                drawFocusFrames(controller.focusFrames, rect, mark?.first, markProgress.value, assist.orientation)
             }
             // растр помощи считается по видимой части кадра
             SideEffect {
@@ -663,6 +685,8 @@ private fun Video(controller: CameraController, screen: ScreenState, feedback: F
                 controller.assistView = CameraController.AssistView(visible.left.toDouble(), visible.top.toDouble(),
                     visible.width.toDouble(), visible.height.toDouble(), screen.zoom.factor)
             }
+            // пипетка: метка, которую можно тащить, и табличка с показанием — над кадром, под кнопками и панелями
+            if (assist.probe) ProbeLayer(controller, screen, frameSize, viewSize)
             if (assist.falseColor) {
                 FalseColorLegend(Modifier.align(Alignment.TopCenter).padding(top = if (screen.controlsHidden && !screen.overlayOpen) 18.dp else 84.dp))
             }

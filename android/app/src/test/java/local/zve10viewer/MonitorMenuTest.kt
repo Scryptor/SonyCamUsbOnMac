@@ -2,7 +2,9 @@ package local.zve10viewer
 
 import local.zve10viewer.monitor.AssistExtras
 import local.zve10viewer.monitor.BuiltinLut
+import local.zve10viewer.monitor.ColorProbe
 import local.zve10viewer.monitor.FrameOrientation
+import local.zve10viewer.monitor.FramePoint
 import local.zve10viewer.monitor.LutChoice
 import local.zve10viewer.monitor.LutTexts
 import local.zve10viewer.monitor.MonitorAssist
@@ -107,16 +109,23 @@ class MonitorMenuTest {
     // отладочные extras DEBUG_ASSIST
 
     private fun apply(assist: MonitorAssist = MonitorAssist(), lut: Any? = null, lutFile: Any? = null, lutScopes: Any? = null,
-                      vectorscope: Any? = null, zoom: Any? = null) =
-        AssistExtras.apply(assist, AssistExtras.Request(lut, lutFile, lutScopes, vectorscope, zoom))
+                      vectorscope: Any? = null, zoom: Any? = null, orientation: Any? = null, probe: Any? = null, probeX: Any? = null,
+                      probeY: Any? = null, at: FramePoint = ColorProbe.CENTER) =
+        AssistExtras.apply(assist, AssistExtras.Request(lut, lutFile, lutScopes, vectorscope, zoom, orientation, probe, probeX, probeY), at)
 
     @Test fun noExtrasChangeNothing() {
         val assist = MonitorAssist().with(MonitorTool.zebra, "95")!!
         val result = apply(assist)
         assertSame(assist, result.assist)
         assertTrue(result.rejected.isEmpty())
+        assertEquals(ColorProbe.CENTER, result.probe)
         assertTrue(AssistExtras.Request().isEmpty)
         assertFalse(AssistExtras.Request(lut = "auto").isEmpty)
+        // каждый extra делает запрос непустым
+        assertFalse(AssistExtras.Request(orientation = "mirror").isEmpty)
+        assertFalse(AssistExtras.Request(probe = true).isEmpty)
+        assertFalse(AssistExtras.Request(probeX = 0.5).isEmpty)
+        assertFalse(AssistExtras.Request(probeY = 0.5).isEmpty)
     }
 
     @Test fun lutExtraSetsTheMode() {
@@ -203,9 +212,106 @@ class MonitorMenuTest {
     }
 
     @Test fun theLogLineNamesWhatTheCommandLeft() {
-        assertEquals("монитор: lut=off lutFile=- lutScopes=true vectorscope=off zoom=1", AssistExtras.describe(MonitorAssist()))
+        assertEquals("монитор: lut=off lutFile=- lutScopes=true vectorscope=off zoom=1 orient=off probe=off at=0.500,0.500",
+            AssistExtras.describe(MonitorAssist()))
         val assist = apply(lut = "auto", vectorscope = true, zoom = 2, lutScopes = false).assist
-        assertEquals("монитор: lut=auto lutFile=- lutScopes=false vectorscope=on zoom=2", AssistExtras.describe(assist))
-        assertEquals("монитор: lut=file lutFile=Warm lutScopes=true vectorscope=off zoom=1", AssistExtras.describe(apply(lutFile = "Warm").assist))
+        assertEquals("монитор: lut=auto lutFile=- lutScopes=false vectorscope=on zoom=2 orient=off probe=off at=0.500,0.500",
+            AssistExtras.describe(assist))
+        assertEquals("монитор: lut=file lutFile=Warm lutScopes=true vectorscope=off zoom=1 orient=off probe=off at=0.500,0.500",
+            AssistExtras.describe(apply(lutFile = "Warm").assist))
+        // картинка и пипетка: что выбрано и где стоит метка (доли кадра на экране)
+        val mirrored = apply(orientation = "mirror", probe = true, probeX = 0.3, probeY = 0.7)
+        assertEquals("монитор: lut=off lutFile=- lutScopes=true vectorscope=off zoom=1 orient=mirror probe=on at=0.300,0.700",
+            AssistExtras.describe(mirrored.assist, mirrored.probe))
+    }
+
+    // картинка и пипетка: orientation, probe, probeX, probeY
+
+    @Test fun orientationExtraSetsThePictureAndKeepsTheRest() {
+        for (o in FrameOrientation.entries) {
+            val result = apply(orientation = o.value)
+            assertEquals(o, result.assist.orientation)
+            assertTrue(result.rejected.isEmpty())
+        }
+        // «180» приходит строкой, как её кладёт `--es orientation 180`
+        assertEquals(FrameOrientation.rotate180, apply(orientation = "180").assist.orientation)
+        val start = MonitorAssist().with(MonitorTool.zebra, "70")!!.with(MonitorTool.lut, "hlg")!!
+        val result = apply(start, orientation = "mirror180")
+        assertEquals(FrameOrientation.mirror180, result.assist.orientation)
+        assertEquals(MonitorAssist.Zebra.skin70, result.assist.zebra)
+        assertEquals(LutMode.hlg, result.assist.lut)
+        // и обратно
+        assertEquals(FrameOrientation.off, apply(MonitorAssist(orientation = FrameOrientation.mirror), orientation = "off").assist.orientation)
+    }
+
+    @Test fun badOrientationIsRejectedAndNothingChanges() {
+        val start = MonitorAssist(orientation = FrameOrientation.mirror)
+        for (bad in listOf("flip", "MIRROR", "rotate180", "90", "", 180, true)) {
+            val result = apply(start, orientation = bad)
+            assertEquals("$bad", FrameOrientation.mirror, result.assist.orientation)
+            assertEquals("$bad", listOf("orientation"), result.rejected)
+        }
+    }
+
+    @Test fun probeExtraTakesBooleansAndOnOff() {
+        assertTrue(apply(probe = true).assist.probe)
+        assertTrue(apply(probe = "on").assist.probe)
+        assertTrue(apply(probe = "true").assist.probe)
+        assertTrue(apply(probe = 1).assist.probe)
+        val on = MonitorAssist(probe = true)
+        assertFalse(apply(on, probe = false).assist.probe)
+        assertFalse(apply(on, probe = "off").assist.probe)
+        assertFalse(apply(on, probe = 0).assist.probe)
+        val bad = apply(on, probe = "maybe")
+        assertTrue(bad.assist.probe)
+        assertEquals(listOf("probe"), bad.rejected)
+    }
+
+    @Test fun probePointExtrasAreScreenFractionsAndMoveOneCoordinateAtATime() {
+        val both = apply(probeX = 0.6875, probeY = 0.3)
+        assertEquals(FramePoint(0.6875, 0.3), both.probe)
+        assertTrue(both.rejected.isEmpty())
+        // одна координата — вторая остаётся на месте
+        val here = FramePoint(0.2, 0.9)
+        assertEquals(FramePoint(0.4, 0.9), apply(probeX = 0.4, at = here).probe)
+        assertEquals(FramePoint(0.2, 0.1), apply(probeY = 0.1, at = here).probe)
+        // `--ef` приходит Float, `--ei` целым, `--es` строкой
+        assertEquals(0.5, apply(probeX = 0.5f).probe.x, 1e-7)
+        assertEquals(1.0, apply(probeX = 1).probe.x, 0.0)
+        assertEquals(0.25, apply(probeX = "0.25").probe.x, 0.0)
+        assertEquals(0.75, apply(probeY = " 0.75 ").probe.y, 0.0)
+    }
+
+    @Test fun probePointExtrasAreKeptInsideTheFrame() {
+        // как действие API на Mac: за кадром — к краю
+        val far = apply(probeX = -3, probeY = 7.5)
+        assertEquals(FramePoint(0.0, 1.0), far.probe)
+        assertTrue(far.rejected.isEmpty())
+    }
+
+    @Test fun probePointExtrasThatAreNotNumbersAreRejectedAndTheMarkStays() {
+        val here = FramePoint(0.3, 0.4)
+        for (bad in listOf(Double.NaN, Double.POSITIVE_INFINITY, "x", "", true, "NaN")) {
+            val x = apply(probeX = bad, at = here)
+            assertEquals("$bad", here, x.probe)
+            assertEquals("$bad", listOf("probeX"), x.rejected)
+            val y = apply(probeY = bad, at = here)
+            assertEquals("$bad", here, y.probe)
+            assertEquals("$bad", listOf("probeY"), y.rejected)
+        }
+        // одна плохая, одна хорошая: хорошая ставится
+        val mixed = apply(probeX = "bad", probeY = 0.8, at = here)
+        assertEquals(FramePoint(0.3, 0.8), mixed.probe)
+        assertEquals(listOf("probeX"), mixed.rejected)
+    }
+
+    @Test fun probeExtrasWorkTogetherWithTheOldOnes() {
+        val result = apply(lut = "slog3", orientation = "mirror", probe = "on", probeX = 0.3125, probeY = 0.3, vectorscope = true)
+        assertEquals(LutMode.slog3, result.assist.lut)
+        assertEquals(FrameOrientation.mirror, result.assist.orientation)
+        assertTrue(result.assist.probe)
+        assertTrue(result.assist.vectorscope)
+        assertEquals(FramePoint(0.3125, 0.3), result.probe)
+        assertTrue(result.rejected.isEmpty())
     }
 }

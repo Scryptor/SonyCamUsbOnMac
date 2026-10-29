@@ -95,6 +95,8 @@ import local.zve10viewer.monitor.AssistExtras
 import local.zve10viewer.monitor.AssistRaster
 import local.zve10viewer.monitor.BuiltinLut
 import local.zve10viewer.monitor.CameraProfile
+import local.zve10viewer.monitor.ColorProbe
+import local.zve10viewer.monitor.FramePoint
 import local.zve10viewer.monitor.FrameSurface
 import local.zve10viewer.monitor.LookWatch
 import local.zve10viewer.monitor.LutCache
@@ -110,6 +112,7 @@ import local.zve10viewer.monitor.FocusFrame
 import local.zve10viewer.monitor.PowerZoom
 import local.zve10viewer.monitor.TouchFocus
 import local.zve10viewer.sony.SonyControl
+import local.zve10viewer.view.ProbeLayout
 import local.zve10viewer.settings.Preset
 import local.zve10viewer.settings.PresetCatalog
 import local.zve10viewer.settings.PresetChange
@@ -333,6 +336,23 @@ class CameraController(private val context: Context, private val scope: Coroutin
      */
     class VectorscopeTrace(val image: ImageBitmap, val zoom: Int, val counts: IntArray)
 
+    /**
+     * Где пипетка: доли всего кадра, каким он виден на экране (зеркальный или перевёрнутый — как есть; в координаты камеры её
+     * переводить не нужно, помощь считается по той же повёрнутой картинке). Центр при первом включении, помнится, пока работает
+     * программа, в настройки не пишется. Меняют касание кадра, перетаскивание метки и `DEBUG_ASSIST probeX probeY`
+     * ([placeProbe]).
+     */
+    var probePoint by mutableStateOf(ColorProbe.CENTER)
+        private set
+    /** То же для потока кадров: ссылка на неизменяемую точку, читается без замка. */
+    @Volatile private var probeForFrames = probePoint
+    /**
+     * Что показала пипетка на последнем кадре; null — выключена или кадров с ней ещё нет. Меняется с каждым кадром: табличка
+     * берёт его не чаще пяти раз в секунду сама ([local.zve10viewer.monitor.ProbePlateClock]).
+     */
+    var probeReading by mutableStateOf<ColorProbe.Reading?>(null)
+        private set
+
     /** Эталонный кадр для наложения: текущий кадр или снимок из галереи. Хранится в файле — переживает перезапуск. */
     var reference by mutableStateOf<Reference?>(null)
         private set
@@ -355,7 +375,10 @@ class CameraController(private val context: Context, private val scope: Coroutin
     /** Рамки фокуса последнего кадра: где камера фокусирует. */
     var focusFrames by mutableStateOf<List<FocusFrame>>(emptyList())
         private set
-    /** Куда коснулись для фокуса (доли кадра) и когда, мс, — для отметки на кадре. */
+    /**
+     * Куда коснулись для фокуса и когда, мс, — для отметки на кадре. Точка — в долях кадра **камеры**, а не экрана (как рамки
+     * фокуса): на экран её переводит `OrientedFrame.toScreen` по зеркалу и перевороту.
+     */
     var touchMark by mutableStateOf<Pair<androidx.compose.ui.geometry.Offset, Long>?>(null)
         private set
     /** Зум едет: 1 — к теле, −1 — к широкому; 0 — стоит. */
@@ -1001,6 +1024,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
         // растровые выключили — старый растр не показываем, даже если новых кадров нет; так же вектороскоп
         if (!next.needsRaster) assistOverlay = null
         if (!next.vectorscope) vectorscope = null
+        if (!next.probe) probeReading = null
         // наложение включили — эталон нужен: прошлый из файла или текущий кадр
         if (next.overlay != MonitorAssist.Overlay.off) ensureReference()
     }
@@ -1055,7 +1079,14 @@ class CameraController(private val context: Context, private val scope: Coroutin
     val touchRefusal: String
         get() = TouchFocus.refusal(value(SonyProp.FOCUS_MODE), value(SonyProp.ZOOM_SCALE))
 
-    /** Фокус в точку кадра (доли 0…1): точка AF или касание экрана камеры. false — сейчас нельзя. */
+    /**
+     * Фокус в точку кадра (доли 0…1, **каким его видно на экране**): точка AF или касание экрана камеры. false — сейчас нельзя.
+     * Точка экранная: с зеркалом и переворотом картинки она не та, что у камеры. В доли кадра камеры её переводит
+     * `TouchFocus.cameraPoint` здесь, в одном месте, — и для касания пальцем, и для `DEBUG_LENS x y` — по **настройке** «Картинка»,
+     * а не по повороту кадра, который сейчас на экране (после переключения он отстаёт на кадр-два, а касание должно уйти туда, куда
+     * выбрано). Дальше всё — в долях камеры: команда, отметка касания ([touchMark]) и рамки фокуса. Пипетка с этим не связана:
+     * это команда, она ставит фокус, когда камера даёт, что бы ни горело на кнопке и стояло в мониторе.
+     */
     fun touchFocus(x: Double, y: Double): Boolean {
         val session = session ?: return false
         if (phase != Phase.ready) return false
@@ -1063,16 +1094,32 @@ class CameraController(private val context: Context, private val scope: Coroutin
             showStatus(touchRefusal)
             return false
         }
-        touchMark = androidx.compose.ui.geometry.Offset(x.toFloat(), y.toFloat()) to System.currentTimeMillis()
+        val orientation = assist.orientation
+        val camera = TouchFocus.cameraPoint(x, y, orientation) ?: return false
+        touchMark = androidx.compose.ui.geometry.Offset(camera.x.toFloat(), camera.y.toFloat()) to System.currentTimeMillis()
         val code = if (method == TouchFocus.Method.areaPosition) SonyControl.AF_AREA_POSITION else SonyControl.REMOTE_TOUCH
-        val encoded = TouchFocus.encode(x, y)
+        val encoded = TouchFocus.encode(camera.x, camera.y)
         journal("фокус касанием: ${if (method == TouchFocus.Method.areaPosition) "точка AF" else "касание экрана камеры"} " +
             "(${encoded shr 16}, ${encoded and 0xFFFF})")
+        // по строке ZVLens видно, что точка камеры зеркальна экранной: экран 0.300 → камера 0.700 при зеркале
+        Log.i("ZVLens", TouchFocus.report(x.coerceIn(0.0, 1.0), y.coerceIn(0.0, 1.0), camera.x, camera.y, orientation.value,
+            encoded shr 16, encoded and 0xFFFF))
         scope.launch {
             val reply = lensMutex.withLock { runCatching { session.control(code, encoded, PtpType.UINT32) }.getOrNull() }
             if (reply != PtpResponseCode.OK) showStatus("Камера не поставила фокус в эту точку")
         }
         return true
+    }
+
+    /**
+     * Поставить пипетку в точку кадра (доли, каким он виден на экране): касание кадра, перетаскивание метки и
+     * `DEBUG_ASSIST probeX probeY`. За кадром — к его краю; не число — не ставится. Поток кадров берёт новую точку со
+     * следующего кадра (до тех пор показание — ещё со старой, и табличка успеет показать его: ждите ~0,5 с).
+     */
+    fun placeProbe(x: Double, y: Double) {
+        val point = ProbeLayout.clamped(FramePoint(x, y)) ?: return
+        probePoint = point
+        probeForFrames = point
     }
 
     /** Снять слежение, начатое касанием. */
@@ -1210,16 +1257,17 @@ class CameraController(private val context: Context, private val scope: Coroutin
     }.getOrNull()
 
     /**
-     * Отладка (DEBUG_ASSIST, только debug-сборка): extras про LUT и вектороскоп — `lut`, `lutFile`, `lutScopes`, `vectorscope`,
-     * `vectorscopeZoom` (см. [AssistExtras]). Что не понято, не применяется и называется в logcat; что стало — одной строкой
-     * ZVAssist сразу, не дожидаясь кадров (с камерой или без).
+     * Отладка (DEBUG_ASSIST, только debug-сборка): extras про LUT, вектороскоп, картинку и пипетку — `lut`, `lutFile`, `lutScopes`,
+     * `vectorscope`, `vectorscopeZoom`, `orientation`, `probe`, `probeX`, `probeY` (см. [AssistExtras]). Что не понято, не
+     * применяется и называется в logcat; что стало — одной строкой ZVAssist сразу, не дожидаясь кадров (с камерой или без).
      */
     fun applyAssistExtras(request: AssistExtras.Request) {
         if (request.isEmpty) return
-        val applied = AssistExtras.apply(assist, request)
+        val applied = AssistExtras.apply(assist, request, probePoint)
         if (applied.rejected.isNotEmpty()) Log.w("ZVAssist", "DEBUG_ASSIST: не понято ${applied.rejected.joinToString()} в $request")
         if (applied.assist != assist) saveAssist(applied.assist)
-        Log.i("ZVAssist", AssistExtras.describe(applied.assist))
+        if (applied.probe != probePoint) placeProbe(applied.probe.x, applied.probe.y)
+        Log.i("ZVAssist", AssistExtras.describe(applied.assist, probePoint))
     }
 
     /** Файл эталона — в данных программы: снимок, из которого его взяли, можно и удалить. */
@@ -2997,6 +3045,8 @@ class CameraController(private val context: Context, private val scope: Coroutin
                     // одни настройки на весь кадр: картинка, уровни, белый и помощь видят одно и то же, и подсветка не
                     // отстаёт от картинки
                     val tools = assistForFrames
+                    // пипетка — доли кадра на экране; одна точка на весь кадр: показание и строка в logcat говорят об одной
+                    val probeAt = probeForFrames
                     val waveMode = waveformForFrames
                     val video = assistVideo
                     val profile = cameraProfile
@@ -3044,13 +3094,15 @@ class CameraController(private val context: Context, private val scope: Coroutin
                     val white = if (levels != null) PictureHelp.whiteLevel(levels, video, lut != null, tools.lutScopes) else 255
                     val analysis = if (analyzing) {
                         val assistant = assistSampler ?: AssistSampler().also { assistSampler = it }
-                        assistant.analyze(pixels ?: assistant.pixelsOf(bitmap), width, height, white, tools, assistView, waveMode)
+                        assistant.analyze(pixels ?: assistant.pixelsOf(bitmap), width, height, white, tools, assistView, waveMode,
+                            probeAt)
                     } else null
                     if (report && levels != null) {
                         reportedAt = now
                         val passAverageMs = if (passFrames > 0) passNanos / passFrames / 1e6 else Double.NaN
                         val passWorstMs = if (passFrames > 0) passWorst / 1e6 else Double.NaN
-                        noteLook(tools, profile, lut != null, white, levels, width, height, passAverageMs, passWorstMs)
+                        noteLook(tools, profile, lut != null, white, levels, width, height, passAverageMs, passWorstMs, analysis?.probe,
+                            probeAt)
                         passNanos = 0L
                         passWorst = 0L
                         passFrames = 0
@@ -3071,9 +3123,10 @@ class CameraController(private val context: Context, private val scope: Coroutin
      * по adb.
      */
     private fun noteLook(tools: MonitorAssist, profile: CameraProfile, lutOn: Boolean, white: Int, levels: IntArray, width: Int,
-                         height: Int, passAverageMs: Double, passWorstMs: Double) {
+                         height: Int, passAverageMs: Double, passWorstMs: Double, probe: ColorProbe.Reading?, probeAt: FramePoint) {
         Log.i("ZVAssist", PictureHelp.report(luts.appliedName(tools, profile, lutOn), tools.lut.value, tools.orientation,
-            tools.lutScopes, white, levels, width, height, passAverageMs, passWorstMs, tools.vectorscope, tools.vectorscopeZoom))
+            tools.lutScopes, white, levels, width, height, passAverageMs, passWorstMs, tools.vectorscope, tools.vectorscopeZoom,
+            tools.probe, probe, probeAt))
     }
 
     /** Связь по Wi-Fi: провал — для экрана, время ответа на пробы — для качества превью и журнала. */
@@ -3214,6 +3267,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
         assistOverlay = if (assist.needsRaster) analysis?.overlay else null
         waveform = if (waveformOn) analysis?.waveform else null
         vectorscope = if (assist.vectorscope) analysis?.vectorscope else null
+        probeReading = if (assist.probe) analysis?.probe else null
         noteAssist(analysis?.overlay)
         noteVectorscope(vectorscope)
         // новая обёртка на каждый кадр: Bitmap из пула тот же, и с прежней обёрткой Compose не перерисовал бы картинку
@@ -3749,11 +3803,12 @@ private class FramePool {
     }
 }
 
-/** Что посчитано по точкам кадра: растр помощи, волновая форма и вектороскоп. */
+/** Что посчитано по точкам кадра: растр помощи, волновая форма, вектороскоп и показание пипетки. */
 private class FrameAnalysis(
     val overlay: CameraController.AssistOverlay?,
     val waveform: CameraController.WaveformTrace?,
     val vectorscope: CameraController.VectorscopeTrace?,
+    val probe: ColorProbe.Reading?,
 )
 
 /**
@@ -3796,11 +3851,13 @@ private class AssistSampler {
     }
 
     /**
-     * @param argb точки кадра, по которым считается помощь: первые [w] · [h] чисел
+     * @param argb точки кадра, по которым считается помощь: первые [w] · [h] чисел — картинка, которую видно на экране (или её
+     *   повёрнутый сигнал, если помощь «без LUT»), поэтому точка пипетки в долях кадра на экране читается без перевода
      * @param white белый уровень шкалы — тот же, что у гистограммы (`PictureHelp.whiteLevel`)
+     * @param probe где пипетка: доли кадра, каким он виден; читается, только если пипетка включена
      */
     fun analyze(argb: IntArray, w: Int, h: Int, white: Int, assist: MonitorAssist, view: CameraController.AssistView,
-                waveform: Waveform.Mode?): FrameAnalysis {
+                waveform: Waveform.Mode?, probe: FramePoint): FrameAnalysis {
         val overlay = if (assist.needsRaster) render(AssistRaster.luma(argb, w * h), w, h, white, assist, view) else null
         val trace = waveform?.let { mode ->
             val counts = Waveform.counts(argb, w, h, mode)
@@ -3811,7 +3868,8 @@ private class AssistSampler {
             bitmap.setPixels(Waveform.image(counts), 0, counts.columns, 0, 0, counts.columns, Waveform.ROWS)
             CameraController.WaveformTrace(bitmap.asImageBitmap(), counts, white)
         }
-        return FrameAnalysis(overlay, trace, if (assist.vectorscope) vectorscope(argb, w, h, assist.vectorscopeZoom) else null)
+        val reading = if (assist.probe) ColorProbe.readAt(argb, w, h, probe, white) else null
+        return FrameAnalysis(overlay, trace, if (assist.vectorscope) vectorscope(argb, w, h, assist.vectorscopeZoom) else null, reading)
     }
 
     /** Вектороскоп: счётчики корзин → картинка 128×128 в Bitmap из кольца (как у следов волновой формы). */

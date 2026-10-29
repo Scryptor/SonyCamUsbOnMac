@@ -72,6 +72,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import local.zve10viewer.view.ProbeDrag
+import local.zve10viewer.view.ProbeGesture
 import local.zve10viewer.view.ViewZoom
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -139,7 +141,8 @@ fun DrawScope.drawFrame(frame: ImageBitmap, rect: Rect, alpha: Float, renderer: 
 /**
  * Жесты увеличения над видео. zoom/setZoom — увеличение экрана; frame — размер кадра (null — кадров нет); onTap —
  * касание без сдвига одним пальцем (где коснулись — в точках экрана); onLimit — упёрлись в 8× или вернулись к 1×; onEnd — жест кончился (или прервался):
- * пружиной в пределы или с инерцией дальше.
+ * пружиной в пределы или с инерцией дальше. probe — метка пипетки (null — пипетка выключена): жест одним пальцем, начатый на
+ * ней, тащит её; два пальца, как всегда, увеличивают.
  */
 suspend fun PointerInputScope.zoomGestures(
     zoom: () -> ViewZoom,
@@ -149,11 +152,15 @@ suspend fun PointerInputScope.zoomGestures(
     onTap: (Offset) -> Unit,
     onLimit: () -> Unit,
     onEnd: (Velocity) -> Unit,
+    probe: () -> ProbeGesture? = { null },
 ) {
     val slop = viewConfiguration.touchSlop
     awaitEachGesture {
         val down = awaitFirstDown(requireUnconsumed = false)
         onStart()
+        // жест начат на метке пипетки: пока палец один, он тащит метку (после сдвига дальше слопа) — см. ProbeDrag
+        val marker = probe()?.takeIf { it.grabs(down.position) }
+        val markerDrag = ProbeDrag(marker != null, slop)
         var transforming = false
         var multi = false
         var moved = Offset.Zero
@@ -168,6 +175,15 @@ suspend fun PointerInputScope.zoomGestures(
                 if (pressed >= 2) multi = true
                 val pan = event.calculatePan()
                 moved += pan
+                when (markerDrag.step(moved, pressed)) {
+                    ProbeDrag.Step.dragging -> {
+                        marker!!.drag(moved)
+                        event.changes.forEach { if (it.positionChanged()) it.consume() }
+                        continue
+                    }
+                    ProbeDrag.Step.holding -> continue
+                    ProbeDrag.Step.notMarker -> Unit
+                }
                 val view = Size(size.width.toFloat(), size.height.toFloat())
                 val f = frame() ?: continue
                 // двумя пальцами — всегда увеличение; одним — сдвиг, только когда уже увеличено

@@ -1,7 +1,10 @@
 package local.zve10viewer
 
+import local.zve10viewer.monitor.AssistRaster
 import local.zve10viewer.monitor.BuiltinLut
+import local.zve10viewer.monitor.ColorProbe
 import local.zve10viewer.monitor.FrameOrientation
+import local.zve10viewer.monitor.FramePoint
 import local.zve10viewer.monitor.PictureHelp
 import local.zve10viewer.settings.LumaHistogram
 import local.zve10viewer.settings.LumaStats
@@ -190,7 +193,7 @@ class PictureHelpTest {
         )
         assertEquals(
             "картинка: lut=slog3cine mode=auto orient=mirror lutScopes=true vectorscope=off zoom=1 white=255 p1=5 p99=100 " +
-                "spread=95 mean=99.1 pass=8.4 passMax=11.3 size=1024x576",
+                "spread=95 mean=99.1 pass=8.4 passMax=11.3 size=1024x576 probe=off",
             line,
         )
     }
@@ -199,7 +202,7 @@ class PictureHelpTest {
         val line = PictureHelp.report("off", "off", FrameOrientation.off, true, 234, levelsOf(10 to 4, 20 to 4), 640, 360)
         assertEquals(
             "картинка: lut=off mode=off orient=off lutScopes=true vectorscope=off zoom=1 white=234 p1=10 p99=20 spread=10 " +
-                "mean=15.0 pass=- passMax=- size=640x360",
+                "mean=15.0 pass=- passMax=- size=640x360 probe=off",
             line,
         )
     }
@@ -213,5 +216,33 @@ class PictureHelpTest {
         // масштаб называется и у выключенного вектороскопа: он настройка, а не включатель
         val off = PictureHelp.report("off", "off", FrameOrientation.off, true, 234, levels, 640, 360, vectorscope = false, vectorscopeZoom = 2)
         assertTrue(off, "vectorscope=off zoom=2" in off)
+    }
+
+    @Test fun reportLineSaysWhatTheProbeReads() {
+        // строка из задачи: orient=… и probe=47%,182,140,121 — процент, R, G, B; рядом место метки и зона false color
+        val levels = levelsOf(10 to 4, 20 to 4)
+        val reading = ColorProbe.Reading(47, 182, 140, 121, AssistRaster.FalseColorBand.skin)
+        val line = PictureHelp.report("off", "off", FrameOrientation.mirror, true, 234, levels, 1024, 576, probe = true,
+            probeReading = reading, probeAt = FramePoint(0.7, 0.3))
+        assertTrue(line, "orient=mirror" in line)
+        assertTrue(line, line.endsWith("size=1024x576 probe=47%,182,140,121 probeAt=0.700,0.300 zone=кожа"))
+        // между зонами подписи нет
+        val between = PictureHelp.report("off", "off", FrameOrientation.off, true, 234, levels, 640, 360, probe = true,
+            probeReading = ColorProbe.Reading(30, 77, 77, 77, null), probeAt = FramePoint(0.0, 1.0))
+        assertTrue(between, between.endsWith("probe=30%,77,77,77 probeAt=0.000,1.000 zone=-"))
+    }
+
+    @Test fun reportLineSaysTheProbeIsOnBeforeTheFirstReading() {
+        val line = PictureHelp.report("off", "off", FrameOrientation.off, true, 234, levelsOf(10 to 4), 640, 360, probe = true)
+        assertTrue(line, line.endsWith("probe=- probeAt=0.500,0.500 zone=-"))
+    }
+
+    @Test fun reportLineKeepsEveryEarlierTokenWhereItWas() {
+        // старые проверки ищут свои куски строки: пипетка дописывается в конец, ничего не сдвигая
+        val levels = levelsOf(5 to 10, 100 to 980, 105 to 10)
+        val old = "картинка: lut=slog3cine mode=auto orient=mirror lutScopes=true vectorscope=off zoom=1 white=255 p1=5 p99=100 " +
+            "spread=95 mean=99.1 pass=8.4 passMax=11.3 size=1024x576"
+        val line = PictureHelp.report("slog3cine", "auto", FrameOrientation.mirror, true, 255, levels, 1024, 576, 8.44, 11.26)
+        assertTrue(line, line.startsWith(old))
     }
 }

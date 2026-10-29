@@ -55,6 +55,9 @@ import androidx.compose.ui.unit.sp
 import local.zve10viewer.CameraController
 import local.zve10viewer.monitor.FocusDrive
 import local.zve10viewer.monitor.FocusFrame
+import local.zve10viewer.monitor.FrameOrientation
+import local.zve10viewer.monitor.TouchFocus
+import local.zve10viewer.view.OrientedFrame
 
 /*
  * Фокус и зум с экрана — как у программы для Mac: «T» и «W» (держать — зум), фокус касанием (касание кадра ставит
@@ -114,13 +117,15 @@ private fun ZoomKey(controller: CameraController, title: String, direction: Int)
 @Composable
 fun TouchFocusButton(controller: CameraController, screen: ScreenState) {
     val available = controller.touchFocusMethod != null
+    // пипетка отбирает касание у фокуса: кнопка остаётся включённой, но приглушена, и описание говорит почему
+    val probeOn = controller.assist.probe
     // подпись под кнопкой — как «Зум» и режим съёмки: значок сам по себе не говорит, что это
     Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Box(
             Modifier.size(58.dp).background(if (controller.touchFocusOn) Accent else Panel, CircleShape)
-                .alpha(if (available) 1f else 0.5f)
+                .alpha(TouchFocus.buttonAlpha(available, probeOn))
                 .semantics {
-                    contentDescription = if (available) "Фокус касанием" else controller.touchRefusal
+                    contentDescription = TouchFocus.buttonDescription(available, probeOn, controller.touchRefusal)
                 }
                 // включили — как это работает, пока не отметили «Больше не показывать»; долгое нажатие — подсказка всегда
                 .combinedClickable(
@@ -168,7 +173,11 @@ fun TouchFocusHelpCard(controller: CameraController, screen: ScreenState, modifi
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Text("Фокус касанием", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
-        Text(controller.touchFocusNow, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Medium, lineHeight = 20.sp)
+        // пока касание отдано пипетке, строки «Сейчас: … касание двигает точку AF» нет: она была бы неправдой, и жёлтая под ней
+        // противоречила бы ей
+        val probeOn = controller.assist.probe
+        Text(TouchFocus.nowLine(probeOn, controller.touchFocusNow), color = if (probeOn) Warning else Color.White, fontSize = 15.sp,
+            fontWeight = FontWeight.Medium, lineHeight = 20.sp)
         val note = TextStyle(color = Secondary, fontSize = 14.sp, lineHeight = 19.sp)
         Text("Пока кнопка горит синим, касание кадра ставит туда фокус. Как — решает зона фокуса камеры:", style = note)
         Text("• «Точка» и «Зона» — рамка AF переезжает в точку касания.", style = note)
@@ -198,13 +207,13 @@ fun TouchFocusHelpCard(controller: CameraController, screen: ScreenState, modifi
 
 /**
  * Рамки фокуса камеры (зелёные — фокус найден, слежение — пунктиром) и отметка касания: сжимается к точке и гаснет за
- * секунду. rect — где кадр на экране, с увеличением; progress — сколько прошло от касания, 0…1.
+ * секунду. rect — где кадр на экране, с увеличением; progress — сколько прошло от касания, 0…1. И рамки, и отметка лежат в долях
+ * кадра камеры, а кадр на экране может быть зеркальным или перевёрнутым ([orientation], настройка «Картинка»): они переезжают на то
+ * место картинки, где камера их видит (`OrientedFrame.toScreen`).
  */
-fun DrawScope.drawFocusFrames(frames: List<FocusFrame>, rect: Rect, mark: Offset?, progress: Float) {
-    fun area(r: Rect) = Rect(rect.left + r.left * rect.width, rect.top + r.top * rect.height,
-        rect.left + r.right * rect.width, rect.top + r.bottom * rect.height)
+fun DrawScope.drawFocusFrames(frames: List<FocusFrame>, rect: Rect, mark: Offset?, progress: Float, orientation: FrameOrientation) {
     for (frame in frames) {
-        val box = area(frame.rect)
+        val box = OrientedFrame.toScreen(frame.rect, rect, orientation)
         drawRect(Color.Black.copy(alpha = 0.35f), box.topLeft, box.size, style = Stroke(3.dp.toPx()))
         drawRect(if (frame.focused) Color(0xFF34C759) else Color.White, box.topLeft, box.size,
             style = Stroke(1.5.dp.toPx(), pathEffect = if (frame.kind == FocusFrame.Kind.tracking)
@@ -212,7 +221,7 @@ fun DrawScope.drawFocusFrames(frames: List<FocusFrame>, rect: Rect, mark: Offset
     }
     if (mark != null && progress < 1f) {
         val side = (70 - 20 * minOf(progress / 0.25f, 1f)).dp.toPx()
-        val c = Offset(rect.left + mark.x * rect.width, rect.top + mark.y * rect.height)
+        val c = OrientedFrame.toScreen(mark, rect, orientation)
         drawRect(Color(0xFFFFD60A).copy(alpha = (1 - maxOf(0f, progress - 0.5f) * 2).coerceIn(0f, 1f)),
             Offset(c.x - side / 2, c.y - side / 2), Size(side, side), style = Stroke(2.dp.toPx()))
     }

@@ -9,6 +9,9 @@ import kotlin.math.min
  * обрезается краем (в углу это 3×3), метка за кадром упирается в ближайшую точку кадра. Те же числа, что у программы для Mac.
  */
 object ColorProbe {
+    /** Где пипетка стоит при первом включении: в центре кадра, каким он виден. Место помнится до выхода из программы. */
+    val CENTER = FramePoint(0.5, 0.5)
+
     /** Что показала пипетка. */
     data class Reading(
         /**
@@ -79,6 +82,13 @@ object ColorProbe {
             AssistRaster.falseColorBand(roundHalfUp(luma), white),
         )
     }
+
+    /**
+     * То же для метки, заданной долями кадра, **каким он виден на экране**: кадр помощи уже повёрнутый (зеркало, переворот), так что
+     * доли те же, что на экране, и перевода в камеру не нужно. [at] за кадром — к краю.
+     */
+    fun readAt(argb: IntArray, width: Int, height: Int, at: FramePoint, white: Int): Reading =
+        read(argb, width, height, at.x * width, at.y * height, white)
 
     /** Точка кадра, в которую попала координата (точка i занимает i…<i + 1). За кадром — ближайшая точка кадра, не-число — 0. */
     private fun pixel(value: Double, count: Int): Int {
