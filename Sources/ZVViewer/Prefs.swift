@@ -59,6 +59,7 @@ enum Prefs {
         static let tallyWidth = "tallyWidth"
         static let tallyOpacity = "tallyOpacity"
         static let tallyBlink = "tallyBlink"
+        static let focusMarksHelpShown = "focusMarksHelpShown"
     }
 
     private static var defaults: UserDefaults { .standard }
@@ -144,6 +145,13 @@ enum Prefs {
     static var tallyBlink: Bool {
         get { defaults.object(forKey: Key.tallyBlink) as? Bool ?? false }
         set { defaults.set(newValue, forKey: Key.tallyBlink) }
+    }
+
+    /// «Больше не показывать» в карточке «Метки фокуса»: отмечено — сама она не открывается (по правому щелчку на кнопке
+    /// времени открывается всегда).
+    static var focusMarksHelpShown: Bool {
+        get { defaults.bool(forKey: Key.focusMarksHelpShown) }
+        set { defaults.set(newValue, forKey: Key.focusMarksHelpShown) }
     }
 
     /// Качество превью по Wi-Fi: авто, всегда высокое или всегда низкое. Без своего значения — по прежнему переключателю:

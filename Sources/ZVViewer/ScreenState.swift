@@ -358,6 +358,31 @@ final class ScreenState {
         set { withMutation(keyPath: \.touchFocusHelpOpen) { defaults.set(newValue, forKey: "touchFocusHelpHidden") } }
     }
 
+    /// Карточка «Метки фокуса»: сама открывается, когда шкала с метками появилась на экране впервые за запуск (пока не отмечено
+    /// «Больше не показывать»), и по правому щелчку на кнопке времени.
+    var focusMarksHelpOpen = false
+    /// Карточку уже предлагали в этот запуск: шкала то появляется, то прячется, а карточка — один раз.
+    @ObservationIgnored private var focusMarksHelpOffered = false
+
+    /// «Больше не показывать» в карточке «Метки фокуса».
+    var focusMarksHelpShown: Bool {
+        get { access(keyPath: \.focusMarksHelpOpen); return Prefs.focusMarksHelpShown }
+        set { withMutation(keyPath: \.focusMarksHelpOpen) { Prefs.focusMarksHelpShown = newValue } }
+    }
+
+    /// Шкала с метками появилась: первый раз за запуск — открыть карточку, если её не просили не показывать.
+    func offerFocusMarksHelp() {
+        guard !focusMarksHelpOffered else { return }
+        focusMarksHelpOffered = true
+        if !focusMarksHelpShown { focusMarksHelpOpen = true }
+    }
+
+    /// Открыть карточку «Метки фокуса» (правый щелчок на кнопке времени): другие подсказки и меню закрываются.
+    func openFocusMarksHelp() {
+        closeOverlays()
+        focusMarksHelpOpen = true
+    }
+
     func toggleWaveform() {
         waveformOn.toggle()
         defaults.set(waveformOn, forKey: "waveformOn")
@@ -481,6 +506,7 @@ final class ScreenState {
         pillInfo = nil
         presetMenuOpen = false
         touchFocusHelpOpen = false
+        focusMarksHelpOpen = false
     }
 
     func toggleStatusPin() {

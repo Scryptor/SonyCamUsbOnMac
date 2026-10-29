@@ -17,6 +17,9 @@ public actor CameraSession {
     /// Каждое перечитывание свойств — сколько угодно слушателям; поток завершается при разрыве связи.
     private nonisolated let snapshotBroadcast = Broadcast<[UInt16: SonyProperty]>()
     private var eventTask: Task<Void, Never>?
+    /// Слушатели смены объектива (событие 0xC21B): у каждого своя подписка.
+    private var lensChangeSubscribers: [UUID: AsyncStream<Void>.Continuation] = [:]
+    private var closed = false
     private var refreshRunning = false
     private var refreshWanted = false
     /// Кнопка записи у нас «нажата»: мы начали запись и ещё не отпустили (0xD2C8 — удержание, см. toggleRecording).
@@ -33,6 +36,27 @@ public actor CameraSession {
 
     /// То же, что `snapshotStream()`: каждое обращение — своя подписка.
     public nonisolated var snapshots: AsyncStream<[UInt16: SonyProperty]> { snapshotStream() }
+
+    /// Камера сообщает о смене объектива событием 0xC21B (у новых камер Sony): по одному значению на событие. Подписка своя у
+    /// каждого, событие, пришедшее до неё, не повторяется; поток кончается вместе с сеансом. Нужна тем, кто хранит что-то
+    /// по объективу — например, метки фокуса.
+    public func lensChanges() -> AsyncStream<Void> {
+        let (stream, continuation) = AsyncStream.makeStream(of: Void.self, bufferingPolicy: .bufferingNewest(1))
+        guard !closed else {
+            continuation.finish()
+            return stream
+        }
+        let id = UUID()
+        lensChangeSubscribers[id] = continuation
+        continuation.onTermination = { [weak self] _ in
+            Task { await self?.dropLensSubscriber(id) }
+        }
+        return stream
+    }
+
+    private func dropLensSubscriber(_ id: UUID) {
+        lensChangeSubscribers[id] = nil
+    }
 
     /// Рукопожатие Sony, передача приоритета компьютеру и первое чтение свойств.
     public func start() async throws {
@@ -196,8 +220,12 @@ public actor CameraSession {
     private func listenForEvents() {
         let events = transport.events
         eventTask = Task { [weak self] in
-            for await event in events where event.code == Sony.propertyChangedEvent {
-                await self?.propertiesChanged()
+            for await event in events {
+                switch event.code {
+                case Sony.propertyChangedEvent: await self?.propertiesChanged()
+                case SonyEvent.lensInfoChanged: await self?.lensChanged()
+                default: break
+                }
             }
             // поток событий закончился — камера отключена
             await self?.close()
@@ -213,6 +241,11 @@ public actor CameraSession {
         Task { await self.refreshWhileWanted() }
     }
 
+    /// Объектив сменился: всем подписчикам по одному значению.
+    private func lensChanged() {
+        for subscriber in lensChangeSubscribers.values { subscriber.yield() }
+    }
+
     private func refreshWhileWanted() async {
         while refreshWanted {
             refreshWanted = false
@@ -223,8 +256,12 @@ public actor CameraSession {
 
     func close() {
         isReady = false
+        closed = true
         eventTask?.cancel()
         snapshotBroadcast.finish()
+        let subscribers = lensChangeSubscribers.values
+        lensChangeSubscribers = [:]
+        for subscriber in subscribers { subscriber.finish() }
     }
 
     /// Отправка без проверки кода ответа; разрыв связи закрывает сеанс.

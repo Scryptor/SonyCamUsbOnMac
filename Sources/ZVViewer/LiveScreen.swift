@@ -27,7 +27,7 @@ struct LiveScreen: View {
             // открыто меню — щелчок его закрывает; иначе: пока включена пипетка, — пипетка в эту точку кадра, а не фокус
             // (что бы ни горело на кнопке «Фокус»); без неё, при фокусе касанием, — фокус в эту точку
             let menus = screen.fnOpen || screen.assistOpen || screen.allSettingsOpen || screen.pillInfo != nil || screen.presetMenuOpen
-                || screen.touchFocusHelpOpen
+                || screen.touchFocusHelpOpen || screen.focusMarksHelpOpen
             screen.closeOverlays()
             screen.noteActivity()
             guard !menus, let point = framePoint(location) else { return }
@@ -85,7 +85,9 @@ struct LiveScreen: View {
                                         // кнопка записи ждёт камеру или показывает отказ — не прятать её из-под взгляда
                                         || controller.recordingToggle.request != nil || controller.recordingNotice != nil
                                         // держат «T» или «W» — зум не должен оборваться вместе с кнопками
-                                        || controller.zoomDirection != 0)
+                                        || controller.zoomDirection != 0
+                                        // фокус едет к метке, и кнопка метки — его стоп и доля пути; итог подписан на 3 с
+                                        || controller.focusPullMark != nil || controller.focusPullCaption != nil)
             }
         }
         .environment(\.colorScheme, .dark)
@@ -179,7 +181,8 @@ struct LiveScreen: View {
                 controller.dismissReview()
                 return .handled
             }
-            guard screen.fnOpen || screen.assistOpen || screen.allSettingsOpen || screen.touchFocusHelpOpen else { return .ignored }
+            guard screen.fnOpen || screen.assistOpen || screen.allSettingsOpen || screen.touchFocusHelpOpen
+                || screen.focusMarksHelpOpen else { return .ignored }
             screen.closeOverlays()
             return .handled
         }
@@ -209,6 +212,14 @@ struct LiveScreen: View {
                 TouchFocusHelp(controller: controller, screen: screen)
                     .fixedSize()
                     .position(x: max(206, column.minX - 16 - 190), y: min(max(column.midY, 220), size.height - 220))
+                    .transition(.opacity)
+            }
+            // карточка «Метки фокуса» — над шкалой фокуса, по центру внизу
+            if screen.focusMarksHelpOpen {
+                FocusMarksHelp(screen: screen)
+                    .fixedSize()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                    .padding(.bottom, 168)
                     .transition(.opacity)
             }
             // панель наложения — тоже не среди элементов: щелчок по миниатюре нужен и когда они спрятаны
@@ -398,7 +409,7 @@ struct LiveScreen: View {
                                     .padding(.vertical, 6)
                                     .background(.ultraThinMaterial, in: Capsule())
                             }
-                            if controller.focusDriveAvailable { FocusScale(controller: controller) }
+                            if controller.focusDriveAvailable { FocusScale(controller: controller, screen: screen) }
                             InfoLine(controller: controller) { screen.openFn($0) }
                         }
                     }

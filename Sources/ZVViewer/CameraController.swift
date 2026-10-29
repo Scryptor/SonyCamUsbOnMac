@@ -72,6 +72,22 @@ final class CameraController {
     @ObservationIgnored private var focusGeneration = 0
     /// Последняя команда объектива: следующая ждёт её — «стоп» зума не обгонит «пуск».
     @ObservationIgnored private var lensTail: Task<Void, Never>?
+    /// Метки фокуса A и B всех камер: у каждой свои, до выхода из программы (в настройки не пишутся).
+    private(set) var focusMarkBook = FocusMarkBook()
+    /// К какой метке («A» или «B») сейчас едет фокус; nil — не едет.
+    private(set) var focusPullMark: Character?
+    /// Доля пути к ней, 0…1; nil — фокус не едет.
+    private(set) var focusPullProgress: Double?
+    /// Чем кончился последний перевод — подпись у шкалы на 3 с («Фокус у метки A»); nil — подписи нет.
+    private(set) var focusPullCaption: String?
+    /// Сколько переводов кончилось у каждой метки: когда число растёт, кнопка метки мигает.
+    private(set) var focusPullEnds: [Character: Int] = [:]
+    /// Идущий перевод и таймер подписи. Перевод идёт на главном акторе одной задачей, так что `FocusPull` никто не трогает
+    /// из двух мест.
+    @ObservationIgnored private var focusPullTask: Task<Void, Never>?
+    @ObservationIgnored private var focusPullCaptionTask: Task<Void, Never>?
+    /// Когда пришли последние свойства камеры: у абсолютного фокуса, пока они свежие, положение перечитывать не нужно.
+    @ObservationIgnored private var lastSnapshotAt = Date.distantPast
     private(set) var fps: Double = 0
     /// fps для строки состояния: обновляется дважды в секунду, а не с каждым кадром.
     private(set) var shownFPS = 0
@@ -2082,6 +2098,10 @@ final class CameraController {
             let codes = await session.controlCodes
             self?.controlCodes = codes
         })
+        // камера сообщила о смене объектива: метки фокуса прежнего ни к чему
+        tasks.append(Task { [weak self] in
+            for await _ in await session.lensChanges() { self?.lensChanged() }
+        })
         tasks.append(Task { [weak self] in
             for await snapshot in session.snapshots {
                 self?.apply(snapshot)
@@ -2135,6 +2155,9 @@ final class CameraController {
 
     private func apply(_ snapshot: [UInt16: SonyProperty]) {
         properties = snapshot
+        lastSnapshotAt = Date()
+        // вышли из ручного фокуса (Near/Far закрылся): перевод к метке кончился, фокусом занимается камера
+        if focusPullTask != nil, !focusDriveAvailable { cancelFocusPull(stopCamera: false) }
         followPresetMode()
         assistInput.setVideo(mode != .photo)
         // «Авто» в LUT идёт за профилем изображения главной камеры: со следующего кадра
@@ -2558,16 +2581,25 @@ final class CameraController {
         focusGeneration += 1
         focusDriving = false
         touchMark = nil
+        // перевод фокуса к метке — тоже команды этого сеанса; подпись прошлого перевода новой камере не принадлежит
+        cancelFocusPull(stopCamera: false)
+        focusPullCaptionTask?.cancel()
+        focusPullCaptionTask = nil
+        focusPullCaption = nil
     }
 
     /// Перефокусировка на столько единиц Near/Far (отрицательное — ближе): по одной команде за раз, остальное копится.
     func focusStep(_ units: Int) {
         guard units != 0, phase == .ready, focusDriveAvailable, let session else { return }
+        // ручное движение — перевод к метке кончился; у абсолютного фокуса камере перед ним велено встать там, где стоит
+        let stopped = cancelFocusPull(stopCamera: true)
         focusUnits += units
         guard !focusDriving else { return }
         focusDriving = true
         let generation = focusGeneration
         Task { [weak self] in
+            // «встать» уходит раньше первого шага: иначе камера вернула бы фокус туда, где он был до шага
+            await stopped?.value
             while let self, self.focusGeneration == generation, self.focusUnits != 0 {
                 guard let next = FocusDrive.commands(units: self.focusUnits).first else { break }
                 self.focusUnits -= Int(next)
@@ -2576,6 +2608,229 @@ final class CameraController {
             // сеанс ушёл, пока шла команда, — флаг уже сброшен, и новый цикл мог начаться: его не трогаем
             if let self, self.focusGeneration == generation { self.focusDriving = false }
         }
+    }
+
+    // MARK: - Метки фокуса A и B
+
+    /// Как у этой камеры переводить фокус между метками: абсолютно (0xE042, положение 0xE043) или шагами Near/Far (положение
+    /// 0xD24C). nil — положения фокуса камера не отдаёт, и метку запомнить нечем.
+    var focusPullMode: FocusPull.Mode? { FocusPosition.mode(properties) }
+
+    /// Где фокус сейчас — в единицах режима перевода (0…65535 или 0…100).
+    var focusPosition: Double? { focusPullMode.flatMap { FocusPosition.current(properties, mode: $0) } }
+
+    /// Метки есть: шкала фокуса на экране (ручной фокус) и камера отдаёт положение.
+    var focusMarksAvailable: Bool { focusDriveAvailable && focusPullMode != nil }
+
+    /// Метки и время перевода камеры на связи — в единицах её режима; пустые, пока камеры нет.
+    var focusMarks: FocusMarks {
+        guard let camera = currentCameraID else { return FocusMarks() }
+        guard let mode = focusPullMode else { return FocusMarks(duration: focusMarkBook.duration(for: camera)) }
+        return focusMarkBook.marks(for: camera, mode: mode)
+    }
+
+    /// Где метка на линейке, доля 0…1; nil — метка пуста.
+    func focusMarkFraction(_ mark: Character) -> Double? {
+        guard let mode = focusPullMode, let position = focusMarks[mark] else { return nil }
+        return FocusPosition.fraction(of: position, mode: mode)
+    }
+
+    /// Касание кнопки метки: пуста — запомнить, где фокус сейчас; задана — перевести фокус к ней; фокус едет к ней — стоп.
+    func focusMarkTapped(_ mark: Character) {
+        guard focusMarksAvailable else { return }
+        switch FocusMarkBook.tap(on: mark, marks: focusMarks, moving: focusPullMark) {
+        case .save: focusMarkSave(mark)
+        case .go: focusMarkGo(mark)
+        case .stop: focusPullStop()
+        }
+    }
+
+    /// «Запомнить здесь»: положение фокуса сейчас — в метку. Фокус едет к этой метке — перевод кончается: цель сменилась.
+    /// false — запомнить нечего (камеры или положения нет).
+    @discardableResult
+    func focusMarkSave(_ mark: Character) -> Bool {
+        guard let camera = currentCameraID, let mode = focusPullMode, let position = focusPosition,
+              FocusMarkBook.letters.contains(mark) else { return false }
+        if focusPullMark == mark { focusPullStop() }
+        focusMarkBook.save(mark, at: position, for: camera, mode: mode)
+        note("метки фокуса: \(mark) = \(Int(position.rounded()))")
+        return true
+    }
+
+    /// «Стереть»; перевод к стёртой метке кончается.
+    func focusMarkClear(_ mark: Character) {
+        guard let camera = currentCameraID, let mode = focusPullMode else { return }
+        if focusPullMark == mark { focusPullStop() }
+        focusMarkBook.clear(mark, for: camera, mode: mode)
+    }
+
+    /// Время перевода по кругу: 0 → 1 → 2 → 4 → 8 → 0 секунд. Идущий перевод едет с прежним.
+    func focusPullCycleTime() {
+        guard let camera = currentCameraID else { return }
+        focusMarkBook.cycleDuration(for: camera)
+    }
+
+    /// Время перевода из списка (0, 1, 2, 4, 8); false — другое число.
+    @discardableResult
+    func setFocusPullTime(_ seconds: Double) -> Bool {
+        guard let camera = currentCameraID else { return false }
+        return focusMarkBook.setDuration(seconds, for: camera)
+    }
+
+    /// Остановить идущий перевод. Шаги Near/Far просто прекращаются, а абсолютному фокусу камера дойдёт до последней
+    /// записанной цели сама, поэтому ей велено встать там, где фокус стоит.
+    func focusPullStop() {
+        cancelFocusPull(stopCamera: true)
+    }
+
+    /// Перевести фокус к метке за время `focusMarks.duration`. Идущий перевод (к другой метке) уступает новому. false — нельзя:
+    /// не ручной фокус, метка пуста или положения нет.
+    @discardableResult
+    func focusMarkGo(_ mark: Character) -> Bool {
+        guard phase == .ready, focusDriveAvailable, let session, let mode = focusPullMode, let start = focusPosition,
+              let target = focusMarks[mark] else { return false }
+        // перевод вытесняет ручное движение, как ручной шаг — перевод: шаги шкалы, которые ещё не ушли, не доедут
+        focusUnits = 0
+        // фокус уже у метки: ехать некуда, и ждать для этого всё выбранное время (до 8 с) незачем. Если он при этом ехал к
+        // другой метке и проезжал эту, абсолютному фокусу велено встать здесь
+        let there = abs(target - start) <= FocusPosition.tolerance(mode)
+        cancelFocusPull(stopCamera: there)
+        focusPullCaptionTask?.cancel()
+        focusPullCaption = nil
+        if there {
+            note("метки фокуса: \(mark) — фокус уже там")
+            endFocusPull(.reached, mark: mark, seconds: 0)
+            return true
+        }
+        let duration = focusMarks.duration
+        focusPullMark = mark
+        focusPullProgress = 0
+        note("метки фокуса: перевод к \(mark), \(Int(start.rounded())) → \(Int(target.rounded())) за \(Int(duration)) с, "
+             + (mode == .absolute ? "абсолютный фокус" : "шаги Near/Far"))
+        let generation = focusGeneration
+        focusPullTask = Task { [weak self] in
+            await self?.runFocusPull(session: session, mode: mode, mark: mark, from: start, to: target, duration: duration,
+                                     generation: generation)
+        }
+        return true
+    }
+
+    /// Цикл перевода. Тик — 100 мс, считая от начала прошлого: на каждом `FocusPull.next` получает положение фокуса и время, а то,
+    /// что он скажет, уходит камере. Команда с ответом и свежим положением может занять тик и больше — следующий тик тогда
+    /// наступает сразу, а не через такт. Задача одна и на главном акторе: автомат никто не видит, кроме неё.
+    private func runFocusPull(session: CameraSession, mode: FocusPull.Mode, mark: Character, from start: Double, to target: Double,
+                              duration: Double, generation: Int) async {
+        var pull = FocusPull(mode: mode, from: start, to: target, duration: duration)
+        let clock = ContinuousClock()
+        let began = clock.now
+        var position = start
+        while true {
+            let tickStart = clock.now
+            guard !Task.isCancelled, focusGeneration == generation else { return }
+            // вышли из ручного фокуса, пока ждали тик: дальше фокусом занимается камера
+            guard focusDriveAvailable else {
+                cancelFocusPull(stopCamera: false)
+                return
+            }
+            // у абсолютного фокуса положение приходит событиями камеры; если свойств давно нет — спросить самим
+            if mode == .absolute, Date().timeIntervalSince(lastSnapshotAt) > 0.25 {
+                await refreshWithin(session, .milliseconds(300))
+            }
+            if let fresh = FocusPosition.current(await session.properties, mode: mode) { position = fresh }
+            guard !Task.isCancelled, focusGeneration == generation else { return }
+            let elapsed = Self.seconds(began.duration(to: clock.now))
+            let action = pull.next(elapsed: elapsed, position: position)
+            focusPullProgress = pull.progress
+            do {
+                switch action {
+                case let .finish(outcome):
+                    endFocusPull(outcome, mark: mark, seconds: elapsed)
+                    return
+                case .wait:
+                    break
+                case let .write(value):
+                    try await session.setQuietly(SonyProp.focusPositionSetting, to: Int64(value), type: PTPType.uint16)
+                case let .nearFar(steps):
+                    try await session.control(SonyControl.nearFar, value: steps, type: PTPType.int16)
+                    // свежее положение — не дольше 300 мс; не пришло, автомат сам подождёт и посчитает по сроку
+                    await refreshWithin(session, .milliseconds(300))
+                }
+            } catch TransportError.disconnected {
+                // связь оборвалась на этой команде; если перевод к этому времени уже заменили новым, чужой не трогаем
+                if !Task.isCancelled, focusGeneration == generation { cancelFocusPull(stopCamera: false) }
+                return
+            } catch {
+                // камера отказала в этой команде — перевод идёт дальше, без движения его кончит срок
+            }
+            try? await Task.sleep(until: max(tickStart + .milliseconds(100), clock.now), clock: clock)
+        }
+    }
+
+    /// Перечитать свойства камеры и подождать не дольше `limit`. Запрос не отменяется, если время вышло: отмена посреди обмена
+    /// сбила бы его с камерой — просто не ждём ответа.
+    private func refreshWithin(_ session: CameraSession, _ limit: Duration) async {
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            let first = OSAllocatedUnfairLock(initialState: true)
+            let finish: @Sendable () -> Void = {
+                if first.withLock({ isFirst -> Bool in defer { isFirst = false }; return isFirst }) { done.resume() }
+            }
+            Task {
+                try? await session.refresh()
+                finish()
+            }
+            Task {
+                try? await Task.sleep(for: limit)
+                finish()
+            }
+        }
+    }
+
+    /// Перевод кончился сам: подпись на 3 с, кнопка мигает. Остановленный снаружи (`cancelled`) подписи не получает.
+    private func endFocusPull(_ outcome: FocusPull.Outcome, mark: Character, seconds: Double) {
+        focusPullTask = nil
+        focusPullMark = nil
+        focusPullProgress = nil
+        guard let caption = FocusPull.caption(outcome, mark: String(mark)) else { return }
+        focusPullCaption = caption
+        focusPullEnds[mark, default: 0] += 1
+        note("метки фокуса: перевод к \(mark) кончился за " + String(format: "%.1f", seconds) + " с — \(caption)")
+        focusPullCaptionTask?.cancel()
+        focusPullCaptionTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            if !Task.isCancelled { self?.focusPullCaption = nil }
+        }
+    }
+
+    /// Прекратить идущий перевод — без подписи. `stopCamera`: у абсолютного фокуса камера едет к последней записанной цели и
+    /// сама не остановится — ей пишется положение, в котором фокус стоит сейчас (после очередного чтения свойств).
+    /// Отдаёт задачу этой записи, если она есть, — ручной шаг ждёт её, чтобы не получить фокус назад.
+    @discardableResult
+    private func cancelFocusPull(stopCamera: Bool) -> Task<Void, Never>? {
+        guard let task = focusPullTask else { return nil }
+        task.cancel()
+        focusPullTask = nil
+        focusPullMark = nil
+        focusPullProgress = nil
+        note("метки фокуса: перевод остановлен")
+        guard stopCamera, focusPullMode == .absolute, let session else { return nil }
+        lensCommand {
+            try? await session.refresh()
+            guard let here = FocusPosition.current(await session.properties, mode: .absolute) else { return }
+            try? await session.setQuietly(SonyProp.focusPositionSetting, to: Int64(here), type: PTPType.uint16)
+        }
+        return lensTail
+    }
+
+    /// Камера сообщила о смене объектива (0xC21B): метки стёрты, перевод к ним кончился.
+    private func lensChanged() {
+        guard let camera = currentCameraID else { return }
+        cancelFocusPull(stopCamera: false)
+        focusMarkBook.lensChanged(for: camera)
+        note("объектив сменился (0xC21B): метки фокуса стёрты")
+    }
+
+    private static func seconds(_ duration: Duration) -> Double {
+        Double(duration.components.seconds) + Double(duration.components.attoseconds) / 1e18
     }
 
     /// Волновую форму выключили — и её тоже.

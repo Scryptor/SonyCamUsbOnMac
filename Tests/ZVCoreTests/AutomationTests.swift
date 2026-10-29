@@ -154,3 +154,23 @@ import Testing
     #expect(try decode(#"{"action":"zoomStop"}"#) == .zoomStop)
     #expect(try decode(#"{"action":"focusStep","offset":-7}"#) == .focusStep(-7))
 }
+
+@Test func decodesFocusMarkActions() throws {
+    func decode(_ json: String) throws -> AutomationAction {
+        try JSONDecoder().decode(AutomationAction.self, from: Data(json.utf8))
+    }
+    #expect(try decode(#"{"action":"focusMark","mark":"A","op":"save"}"#) == .focusMark(mark: "A", op: "save"))
+    #expect(try decode(#"{"action":"focusMark","mark":"B","op":"go"}"#) == .focusMark(mark: "B", op: "go"))
+    #expect(try decode(#"{"action":"focusMark","mark":"A","op":"clear"}"#) == .focusMark(mark: "A", op: "clear"))
+    // что метка и действие бывают только такие, решает программа (409 с подсказкой), а не разбор тела
+    #expect(try decode(#"{"action":"focusMark","mark":"C","op":"jump"}"#) == .focusMark(mark: "C", op: "jump"))
+    #expect(throws: (any Error).self) { try decode(#"{"action":"focusMark","mark":"A"}"#) }
+    #expect(throws: (any Error).self) { try decode(#"{"action":"focusMark","op":"go"}"#) }
+    #expect(try decode(#"{"action":"focusPullTime","seconds":4}"#) == .focusPullTime(4))
+    #expect(try decode(#"{"action":"focusPullTime","seconds":0}"#) == .focusPullTime(0))
+    // любое число разбирается; допустимо ли оно (0, 1, 2, 4, 8), решает программа
+    #expect(try decode(#"{"action":"focusPullTime","seconds":2.5}"#) == .focusPullTime(2.5))
+    #expect(throws: (any Error).self) { try decode(#"{"action":"focusPullTime"}"#) }
+    #expect(throws: (any Error).self) { try decode(#"{"action":"focusPullTime","seconds":"4"}"#) }
+    #expect(try decode(#"{"action":"focusPullStop"}"#) == .focusPullStop)
+}

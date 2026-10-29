@@ -111,10 +111,15 @@ public enum AutomationAction: Equatable, Sendable, Decodable {
     case zoomStop
     /// Шкала фокуса: столько единиц Near/Far (отрицательное — ближе).
     case focusStep(Int)
+    /// Метки фокуса: метка «A» или «B» и что с ней — «save» (запомнить, где фокус сейчас), «go» (перевести фокус к ней за выбранное
+    /// время), «clear» (стереть); время перевода в секундах (0, 1, 2, 4, 8); остановить идущий перевод.
+    case focusMark(mark: String, op: String)
+    case focusPullTime(Double)
+    case focusPullStop
 
     private enum Keys: String, CodingKey {
         case action, key, setting, offset, value, group, name, index, confirm, mode, x, y, factor, included, from, to, id, linked, onto
-        case path
+        case path, mark, op, seconds
     }
 
     public init(from decoder: Decoder) throws {
@@ -210,6 +215,9 @@ public enum AutomationAction: Equatable, Sendable, Decodable {
         case "zoomStart": self = .zoomStart(try c.decode(String.self, forKey: .name))
         case "zoomStop": self = .zoomStop
         case "focusStep": self = .focusStep(try c.decode(Int.self, forKey: .offset))
+        case "focusMark": self = .focusMark(mark: try c.decode(String.self, forKey: .mark), op: try c.decode(String.self, forKey: .op))
+        case "focusPullTime": self = .focusPullTime(try c.decode(Double.self, forKey: .seconds))
+        case "focusPullStop": self = .focusPullStop
         default:
             throw DecodingError.dataCorruptedError(forKey: .action, in: c, debugDescription: "неизвестная команда \(action)")
         }

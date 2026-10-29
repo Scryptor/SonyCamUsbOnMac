@@ -202,11 +202,18 @@ struct FocusFramesLayer: View {
 }
 
 /// Шкала фокуса — ручной фокус с экрана (в MF): слева ближе, справа дальше. Кнопки — шаги 7, 3 и 1; перетаскивание по
-/// шкале — как поворот кольца фокуса, колесо мыши — по шагу. Метка — где фокус, если камера его отдаёт.
+/// шкале — как поворот кольца фокуса, колесо мыши — по шагу. Метка — где фокус, если камера его отдаёт. Под линейкой — метки
+/// фокуса: `[A] [B] [⏱ 2 с]`.
 struct FocusScale: View {
     let controller: CameraController
+    let screen: ScreenState
     @State private var dragged: CGFloat = 0
     @State private var width: CGFloat = 1
+
+    /// Цвета меток: на линейке, в кнопках и в карточке одни и те же.
+    static func markColor(_ mark: Character) -> Color {
+        mark == "A" ? Color(red: 0.35, green: 0.80, blue: 1.0) : Color(red: 1.0, green: 0.62, blue: 0.20)
+    }
 
     var body: some View {
         HStack(spacing: 10) {
@@ -216,12 +223,13 @@ struct FocusScale: View {
                 HStack {
                     Text("ближе")
                     Spacer()
-                    Text("шкала фокуса").foregroundStyle(.white.opacity(0.5))
+                    caption
                     Spacer()
                     Text("дальше")
                 }
                 .font(.caption2)
                 .foregroundStyle(.white.opacity(0.75))
+                if controller.focusMarksAvailable { marksRow }
             }
             .frame(width: 300)
             ForEach([FocusDrive.Step.small, .medium, .large], id: \.self) { step in button(step, nearer: false) }
@@ -233,11 +241,31 @@ struct FocusScale: View {
         .contentShape(Rectangle())
         .onTapGesture {}
         .onScrollWheelStep { controller.focusStep($0) }
+        // шкала с метками появилась впервые — карточка, как с ними обращаться
+        .onChange(of: controller.focusMarksAvailable, initial: true) { _, available in
+            if available { screen.offerFocusMarksHelp() }
+        }
     }
 
+    /// Посередине под линейкой: чем кончился перевод (3 с), иначе — что это за шкала.
+    private var caption: some View {
+        let text = controller.focusPullCaption
+        return Text(text ?? "шкала фокуса")
+            .fontWeight(text == nil ? .regular : .semibold)
+            .foregroundStyle(text == nil ? Color.white.opacity(0.5) : Color.white)
+            .lineLimit(1)
+            .animation(.easeInOut(duration: 0.15), value: text)
+    }
+
+    /// Над линейкой, пока метки есть, — место под значки меток.
+    private static let flagsHeight: CGFloat = 16
+
     private var ruler: some View {
-        Canvas { context, size in
-            let mid = size.height / 2
+        let flags = controller.focusMarksAvailable ? Self.flagsHeight : 0
+        return Canvas { context, size in
+            let top = flags
+            let barHeight = size.height - top
+            let mid = top + barHeight / 2
             // деления — как на кольце фокуса; сдвигаются, пока шкалу тянут
             let spacing: CGFloat = 12
             let shift = dragged.truncatingRemainder(dividingBy: spacing)
@@ -251,11 +279,34 @@ struct FocusScale: View {
             }
             if let position = controller.focalPosition {
                 let px = size.width * CGFloat(position) / 100
-                context.fill(Path(roundedRect: CGRect(x: px - 2, y: 2, width: 4, height: size.height - 4), cornerRadius: 2),
+                context.fill(Path(roundedRect: CGRect(x: px - 2, y: top + 2, width: 4, height: barHeight - 4), cornerRadius: 2),
                              with: .color(.yellow))
             }
+            guard flags > 0 else { return }
+            // значки меток: буква на цветной плашке и остриё к месту на линейке. Рядом друг с другом плашки расходятся,
+            // чтобы не закрывать буквы; остриё остаётся там, где метка
+            let marks: [(letter: String, fraction: CGFloat)] = ["A", "B"].compactMap { letter in
+                controller.focusMarkFraction(Character(letter)).map { (letter, CGFloat($0)) }
+            }
+            let close = marks.count == 2 && abs(marks[0].fraction - marks[1].fraction) * size.width < 13
+            for (index, mark) in marks.enumerated() {
+                let tip = size.width * mark.fraction
+                let offset: CGFloat = close ? (index == 0 ? -7 : 7) : 0
+                let center = min(max(tip + offset, 7), size.width - 7)
+                let color = Self.markColor(Character(mark.letter))
+                var pointer = Path()
+                pointer.move(to: CGPoint(x: tip - 3.5, y: flags - 5))
+                pointer.addLine(to: CGPoint(x: tip + 3.5, y: flags - 5))
+                pointer.addLine(to: CGPoint(x: tip, y: flags))
+                pointer.closeSubpath()
+                context.fill(pointer, with: .color(color))
+                let badge = CGRect(x: center - 6.5, y: 0, width: 13, height: flags - 4)
+                context.fill(Path(roundedRect: badge, cornerRadius: 3), with: .color(color))
+                context.draw(Text(mark.letter).font(.system(size: 9, weight: .heavy)).foregroundColor(.black),
+                             at: CGPoint(x: badge.midX, y: badge.midY))
+            }
         }
-        .frame(height: 24)
+        .frame(height: 24 + flags)
         .contentShape(Rectangle())
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = max($0, 1) }
         .gesture(DragGesture(minimumDistance: 1)
@@ -270,6 +321,91 @@ struct FocusScale: View {
         .help("Тяните влево — ближе, вправо — дальше; колесо мыши — по шагу")
     }
 
+    // MARK: Метки фокуса
+
+    /// Строка под линейкой: метки A и B, справа — время перевода.
+    private var marksRow: some View {
+        HStack(spacing: 6) {
+            markButton("A")
+            markButton("B")
+            Spacer(minLength: 0)
+            timeButton
+        }
+        .padding(.top, 2)
+    }
+
+    /// Кнопка метки. Пустая — «A+»: касание запоминает, где фокус. Заданная — «A»: касание переводит фокус к ней. Пока фокус
+    /// едет, кнопка заливается по доле пути, и касание её же останавливает; на конце мигает один раз.
+    private func markButton(_ mark: Character) -> some View {
+        let name = String(mark)
+        let isSet = controller.focusMarks[mark] != nil
+        let moving = controller.focusPullMark == mark
+        let color = Self.markColor(mark)
+        let seconds = Int(controller.focusMarks.duration)
+        let shape = RoundedRectangle(cornerRadius: 8)
+        return Button { controller.focusMarkTapped(mark) } label: {
+            HStack(spacing: 4) {
+                Text(isSet ? name : name + "+").font(.system(size: 12, weight: .bold))
+                // едет — значок «стоп»: касание остановит
+                if moving { Image(systemName: "stop.fill").font(.system(size: 8)) }
+            }
+            .foregroundStyle(.white.opacity(isSet ? 1 : 0.85))
+            .frame(width: 60, height: 24)
+            .background {
+                ZStack(alignment: .leading) {
+                    shape.fill(isSet ? color.opacity(0.22) : Color.white.opacity(0.1))
+                    if moving {
+                        GeometryReader { geometry in
+                            color.opacity(0.6).frame(width: geometry.size.width * CGFloat(controller.focusPullProgress ?? 0))
+                        }
+                    }
+                }
+                .clipShape(shape)
+            }
+            .overlay(shape.strokeBorder(isSet ? color.opacity(0.85) : Color.clear, lineWidth: 1))
+            // конец перевода: вспышка один раз
+            .keyframeAnimator(initialValue: 0.0, trigger: controller.focusPullEnds[mark] ?? 0) { content, flash in
+                content.overlay(shape.fill(Color.white.opacity(flash)))
+            } keyframes: { _ in
+                KeyframeTrack {
+                    LinearKeyframe(0.7, duration: 0.1)
+                    LinearKeyframe(0.0, duration: 0.4)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .help(moving ? "Остановить перевод фокуса к метке \(name)"
+              : isSet ? "Перевести фокус к метке \(name) за \(seconds) с. Правый щелчок — запомнить заново или стереть"
+              : "Запомнить, где сейчас фокус, в метку \(name). Правый щелчок — меню")
+        .accessibilityLabel(moving ? "Остановить перевод к метке \(name)"
+                            : isSet ? "Метка \(name): перевести фокус" : "Метка \(name): запомнить фокус")
+        .contextMenu {
+            Button("Запомнить здесь") { controller.focusMarkSave(mark) }
+            Button("Стереть") { controller.focusMarkClear(mark) }
+                .disabled(!isSet)
+        }
+    }
+
+    /// Время перевода по кругу: 0 → 1 → 2 → 4 → 8 с. Правый щелчок — карточка «Метки фокуса».
+    private var timeButton: some View {
+        let seconds = Int(controller.focusMarks.duration)
+        return Button { controller.focusPullCycleTime() } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "timer").font(.system(size: 10, weight: .semibold))
+                Text("\(seconds) с").font(.system(size: 12, weight: .semibold)).monospacedDigit()
+            }
+            .foregroundStyle(.white.opacity(0.9))
+            .frame(width: 66, height: 24)
+            .background(.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .help("Время перевода фокуса к метке: \(seconds) с. Щелчок — следующее: 0, 1, 2, 4, 8; «0 с» — как можно быстрее")
+        .accessibilityLabel("Время перевода: \(seconds) с")
+        .contextMenu {
+            Button("Как работают метки фокуса…") { screen.openFocusMarksHelp() }
+        }
+    }
+
     private func button(_ step: FocusDrive.Step, nearer: Bool) -> some View {
         let arrows = String(repeating: nearer ? "‹" : "›", count: step == .large ? 3 : step == .medium ? 2 : 1)
         return Button { controller.focusStep(Int(FocusDrive.value(step, nearer: nearer))) } label: {
@@ -281,5 +417,55 @@ struct FocusScale: View {
         .buttonStyle(.plain)
         .help((nearer ? "Ближе" : "Дальше") + " на \(step.rawValue)")
         .accessibilityLabel((nearer ? "Фокус ближе на " : "Фокус дальше на ") + "\(step.rawValue)")
+    }
+}
+
+/// Карточка «Метки фокуса»: что делают «A+» и «A», время перевода и правый щелчок. Открывается сама, когда шкала с метками
+/// появилась впервые (пока не отмечено «Больше не показывать»), и по правому щелчку на кнопке времени; закрывается «Понятно»,
+/// щелчком мимо или Esc.
+struct FocusMarksHelp: View {
+    let screen: ScreenState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 8) {
+                HStack(spacing: 3) {
+                    badge("A")
+                    badge("B")
+                }
+                Text("Метки фокуса").font(.headline)
+            }
+            Text("A+ запоминает, где сейчас фокус. A переводит фокус туда за выбранное время, касание во время перевода — стоп. "
+                 + "Правый щелчок по метке — запомнить заново или стереть")
+            Text("Кнопка со временем переключает 0, 1, 2, 4 и 8 секунд по кругу; «0 с» — как можно быстрее. "
+                 + "Эта подсказка — по правому щелчку на ней.")
+                .foregroundStyle(.secondary)
+            HStack {
+                Toggle("Больше не показывать", isOn: Binding(get: { screen.focusMarksHelpShown },
+                                                               set: { screen.focusMarksHelpShown = $0 }))
+                    .toggleStyle(.checkbox)
+                Spacer()
+                Button("Понятно") { screen.focusMarksHelpOpen = false }
+                    .keyboardShortcut(.defaultAction)
+            }
+            .padding(.top, 2)
+        }
+        .font(.callout)
+        .fixedSize(horizontal: false, vertical: true)
+        .padding(16)
+        .frame(width: 380, alignment: .leading)
+        .background(Color(white: 0.11).opacity(0.96), in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(.white.opacity(0.08)))
+        // щелчки по карточке не уходят к кадру под ней
+        .contentShape(Rectangle())
+        .onTapGesture {}
+    }
+
+    private func badge(_ letter: String) -> some View {
+        Text(letter)
+            .font(.system(size: 11, weight: .heavy))
+            .foregroundStyle(.black)
+            .frame(width: 18, height: 18)
+            .background(FocusScale.markColor(Character(letter)), in: RoundedRectangle(cornerRadius: 4))
     }
 }

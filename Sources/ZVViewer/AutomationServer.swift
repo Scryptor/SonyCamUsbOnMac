@@ -398,6 +398,28 @@ final class AutomationServer {
         case let .focusStep(units):
             guard controller.focusDriveAvailable else { return "focus scale needs manual focus (Near/Far is closed)" }
             controller.focusStep(units)
+        case let .focusMark(mark, op):
+            guard mark.count == 1, let letter = mark.first, FocusMarkBook.letters.contains(letter) else { return "mark: A | B" }
+            switch op {
+            case "save":
+                guard controller.focusDriveAvailable else { return "focus marks need manual focus (Near/Far is closed)" }
+                guard controller.focusMarkSave(letter) else { return "the camera gives no focus position" }
+            case "go":
+                guard controller.focusDriveAvailable else { return "focus marks need manual focus (Near/Far is closed)" }
+                guard controller.focusMarks[letter] != nil else { return "mark \(mark) is empty" }
+                guard controller.focusMarkGo(letter) else { return "the camera gives no focus position" }
+            case "clear":
+                controller.focusMarkClear(letter)
+            default:
+                return "op: save | go | clear"
+            }
+        case let .focusPullTime(seconds):
+            guard FocusPull.durations.contains(seconds) else {
+                return "seconds: " + FocusPull.durations.map { String(Int($0)) }.joined(separator: " | ")
+            }
+            guard controller.setFocusPullTime(seconds) else { return "no camera" }
+        case .focusPullStop:
+            controller.focusPullStop()
         }
         return nil
     }
@@ -428,6 +450,9 @@ final class AutomationServer {
         case "touchFocusHelpHidden":
             guard let b = Bool(value) else { return "touchFocusHelpHidden: true | false" }
             screen.touchFocusHelpHidden = b
+        case "focusMarksHelpShown":
+            guard let b = Bool(value) else { return "focusMarksHelpShown: true | false" }
+            screen.focusMarksHelpShown = b
         case "previewQuality":
             guard let mode = PreviewQualityMode(rawValue: value) else { return "previewQuality: auto | high | low" }
             controller.setPreviewQuality(mode)
@@ -538,6 +563,7 @@ final class AutomationServer {
         ] as [String: Any]
         ui["touchFocus"] = screen.touchFocusOn
         ui["touchFocusHelp"] = screen.touchFocusHelpOpen
+        ui["focusMarksHelp"] = screen.focusMarksHelpOpen
         ui["waveform"] = [
             "on": screen.waveformOn,
             "mode": screen.waveformMode.rawValue,
@@ -581,6 +607,8 @@ final class AutomationServer {
                     ["kind": frame.kind.rawValue, "x": frame.rect.midX, "y": frame.rect.midY, "width": frame.rect.width,
                      "height": frame.rect.height, "focused": frame.focused]
                 },
+                "marks": marksState(),
+                "pull": pullState(),
             ] as [String: Any],
             "reference": controller.reference.map { ["source": $0.source, "width": $0.image.width, "height": $0.image.height] as [String: Any] }
                 ?? NSNull(),
@@ -631,6 +659,7 @@ final class AutomationServer {
                 "reviewSource": Prefs.reviewSource.rawValue, "autoHide": Prefs.autoHide, "autoHideSeconds": Prefs.autoHideSeconds,
                 "previewQuality": controller.previewQualityMode.rawValue,
                 "touchFocusHelpHidden": screen.touchFocusHelpHidden,
+                "focusMarksHelpShown": screen.focusMarksHelpShown,
                 "wifiAdaptiveQuality": controller.previewQualityMode == .auto,
                 "tallyEnabled": Prefs.tallyEnabled, "tallyWidth": Prefs.tallyWidth, "tallyOpacity": Prefs.tallyOpacity,
                 "tallyBlink": Prefs.tallyBlink,
@@ -693,6 +722,24 @@ final class AutomationServer {
             "whiteLevel": controller.whiteLevel ?? NSNull(),
             "meanLuma": controller.meanLuma.map { ($0 * 10).rounded() / 10 } ?? NSNull(),
         ]
+    }
+
+    /// Метки фокуса камеры на связи: `A` и `B` — положение в единицах режима перевода (0…65535 у абсолютного фокуса, 0…100 у
+    /// шагов Near/Far), null — метка пуста; `duration` — время перевода, секунд.
+    private func marksState() -> [String: Any] {
+        let marks = controller.focusMarks
+        return ["A": marks.a ?? NSNull(), "B": marks.b ?? NSNull(), "duration": marks.duration]
+    }
+
+    /// Перевод фокуса к метке: пока едет — `mark` и `progress` (0…1); кончился — `caption` на 3 с (`progress` и `mark` пусты);
+    /// иначе null.
+    private func pullState() -> Any {
+        let mark = controller.focusPullMark
+        let progress = controller.focusPullProgress
+        let caption = controller.focusPullCaption
+        guard mark != nil || progress != nil || caption != nil else { return NSNull() }
+        return ["mark": mark.map { String($0) } ?? NSNull(), "progress": progress.map { ($0 * 1000).rounded() / 1000 } ?? NSNull(),
+                "caption": caption ?? NSNull()] as [String: Any]
     }
 
     /// Вектороскоп: включён ли, масштаб (1 или 2) и центр самой полной корзины в Cb и Cr (null — выключен или кадра нет).
