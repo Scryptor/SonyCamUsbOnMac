@@ -1,6 +1,7 @@
 package local.zve10viewer
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
@@ -8,6 +9,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -26,6 +28,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 import kotlin.math.abs
 import kotlin.math.floor
@@ -35,8 +38,12 @@ import kotlin.math.sign
  * Ход фокуса — ручные шаги и перевод к метке — на модели объектива в виртуальном времени. Модель ведёт себя как поддельная камера
  * (`scripts/fake_camera.py --focus-gain 3.5 --focus-step-ms 80 --focus-deadband 2`, у новой — `--model newer`): шаги Near/Far
  * сдвигают 0xD24C на round(n·g) через 80 мс после команды, а положение камера сообщает, когда её перечитывают; запись 0xE042 двигает
- * 0xE043 к цели со скоростью 40 000 единиц в секунду, и положение приходит событиями раз в 50 мс. Обмены с камерой идут по одному
- * (как под замком транспорта) и, начавшись, заканчиваются, даже если вызвавшего отменили.
+ * 0xE043 к цели со скоростью 40 000 единиц в секунду, и положение приходит событиями раз в 50 мс (у некоторых проверок — реже или
+ * никогда). Обмены с камерой идут по одному (как под замком транспорта) и, начавшись, заканчиваются, даже если вызвавшего отменили.
+ *
+ * Корутины хода фокуса в программе идут на `Dispatchers.Main.immediate`: `launch` с главного потока выполняет тело на месте, до первой
+ * остановки. Проверки, где это важно (перевод и стоп, «встать», ручной шаг во время очереди), идут дважды: на обычном тестовом
+ * диспетчере и на `UnconfinedTestDispatcher`, который тоже запускает на месте.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class FocusMoverTest {
@@ -52,6 +59,8 @@ class FocusMoverTest {
         private val speed: Double = 40_000.0,
         var commandMs: Long = 80,
         var refreshMs: Long = 25,
+        /** Как часто камера сообщает положение (событие 0xC203 и перечитывание); объектив при этом едет каждые 50 мс. */
+        private val eventMs: Long = 50,
     ) : FocusMover.Port {
         val now: Long get() = test.testScheduler.currentTime
 
@@ -69,6 +78,11 @@ class FocusMoverTest {
         var refreshesStarted = 0
         var refreshesDone = 0
         var refreshesCancelled = 0
+
+        /** Сколько раз программа узнала положение (событием или перечитыванием). */
+        var reports = 0
+            private set
+        private var sinceReport = 0L
 
         /** Камера не шлёт событий: положение обновляется только перечитыванием. */
         var silent = false
@@ -107,13 +121,18 @@ class FocusMoverTest {
                 val step = speed * 0.05
                 position = if (abs(goal - position) <= step) goal else position + sign(goal - position) * step
             }
-            if (!silent) report()
+            sinceReport += 50
+            if (!silent && sinceReport >= eventMs) {
+                sinceReport = 0
+                report()
+            }
         }
 
         /** Камера сообщила, где объектив. */
         fun report() {
             shown = position
             shownAt = now
+            reports++
         }
 
         /** События и перечитывание перестали доходить: снимок свойств стареет. */
@@ -174,11 +193,16 @@ class FocusMoverTest {
         fun wireOf(kind: String) = wire.filter { it.kind == kind }
     }
 
-    /** Ход фокуса с моделью объектива, журналом и лентой видов для экрана. */
-    private class Rig(val test: TestScope, val lens: Lens) {
+    /**
+     * Ход фокуса с моделью объектива, журналом и лентой видов для экрана. [eager]: корутины идут на `UnconfinedTestDispatcher`, как в
+     * программе на `Main.immediate`, — `launch` выполняет тело на месте; иначе — на обычном тестовом диспетчере (тело ждёт тика).
+     */
+    private class Rig(val test: TestScope, val lens: Lens, eager: Boolean = false) {
         val journal = mutableListOf<String>()
         val views = mutableListOf<Pair<Long, FocusPullView>>()
-        val mover = FocusMover(test.backgroundScope, lens, journal = { journal += it },
+        private val scope: CoroutineScope =
+            if (eager) CoroutineScope(test.backgroundScope.coroutineContext + UnconfinedTestDispatcher(test.testScheduler)) else test.backgroundScope
+        val mover = FocusMover(scope, lens, journal = { journal += it },
             clock = { test.testScheduler.currentTime * 1_000_000L }, onChange = { views += test.testScheduler.currentTime to it })
 
         val view: FocusPullView get() = mover.view
@@ -194,18 +218,40 @@ class FocusMoverTest {
             test.advanceTimeBy(ms)
             test.runCurrent()
         }
+
+        /**
+         * Время идёт, пока не наступит [condition]. Не наступило за [limitMs] виртуального времени — проверка падает с названием
+         * ожидаемого, а не крутится вечно: если код сломан так, что ожидаемого не будет, прогон должен кончиться ошибкой, а не зависнуть.
+         */
+        fun elapseUntil(what: String, limitMs: Long = 5_000, step: Long = 5, condition: () -> Boolean) {
+            var spent = 0L
+            while (!condition()) {
+                if (spent >= limitMs) fail("не дождались: $what (за $limitMs мс)")
+                elapse(step)
+                spent += step
+            }
+        }
     }
 
-    private fun TestScope.stepsRig(start: Double, deadband: Double = 2.0, commandMs: Long = 80, refreshMs: Long = 25, gain: Double = 3.5) =
-        Rig(this, Lens(this, Mode.steps, start, gain = gain, deadband = deadband, commandMs = commandMs, refreshMs = refreshMs))
+    private fun TestScope.stepsRig(start: Double, deadband: Double = 2.0, commandMs: Long = 80, refreshMs: Long = 25, gain: Double = 3.5,
+                                   eager: Boolean = false) =
+        Rig(this, Lens(this, Mode.steps, start, gain = gain, deadband = deadband, commandMs = commandMs, refreshMs = refreshMs), eager)
 
-    private fun TestScope.absoluteRig(start: Double, commandMs: Long = 30, speed: Double = 40_000.0) =
-        Rig(this, Lens(this, Mode.absolute, start, speed = speed, commandMs = commandMs))
+    private fun TestScope.absoluteRig(start: Double, commandMs: Long = 30, speed: Double = 40_000.0, eventMs: Long = 50, eager: Boolean = false) =
+        Rig(this, Lens(this, Mode.absolute, start, speed = speed, commandMs = commandMs, eventMs = eventMs), eager)
 
     // MARK: - Перевод от начала до конца
 
     @Test fun aFourSecondPullOnTheMacLensTakesAboutFourSecondsAndEndsAtTheMark() = runTest {
-        val rig = stepsRig(21.0)
+        aFourSecondPullOnTheMacLensTakesAboutFourSecondsAndEndsAtTheMarkBody(eager = false)
+    }
+
+    @Test fun aFourSecondPullOnTheMacLensTakesAboutFourSecondsAndEndsAtTheMarkOnAnEagerDispatcher() = runTest {
+        aFourSecondPullOnTheMacLensTakesAboutFourSecondsAndEndsAtTheMarkBody(eager = true)
+    }
+
+    private suspend fun TestScope.aFourSecondPullOnTheMacLensTakesAboutFourSecondsAndEndsAtTheMarkBody(eager: Boolean) {
+        val rig = stepsRig(21.0, eager = eager)
         rig.mover.go('A', Mode.steps, 21.0, 100.0, 4.0)
         rig.elapse(6_000)
         assertEquals("Фокус у метки A", rig.view.caption)
@@ -315,7 +361,7 @@ class FocusMoverTest {
         val rig = stepsRig(20.0)
         rig.lens.refreshHangsMs = 1_000
         rig.mover.go('A', Mode.steps, 20.0, 100.0, 4.0)
-        while (rig.lens.wireOf("nearFar").isEmpty()) rig.elapse(10)
+        rig.elapseUntil("первой команды Near/Far", step = 10) { rig.lens.wireOf("nearFar").isNotEmpty() }
         rig.elapse(150)
         assertEquals(1, rig.lens.refreshesStarted)
         rig.mover.stop()
@@ -346,8 +392,16 @@ class FocusMoverTest {
     // MARK: - «Встать»: стоп пользователя и ручной шаг в абсолютном фокусе
 
     @Test fun stoppingAnAbsolutePullWritesWhereTheLensStandsAndTheLensStops() = runTest {
+        stoppingAnAbsolutePullWritesWhereTheLensStandsAndTheLensStopsBody(eager = false)
+    }
+
+    @Test fun stoppingAnAbsolutePullWritesWhereTheLensStandsAndTheLensStopsOnAnEagerDispatcher() = runTest {
+        stoppingAnAbsolutePullWritesWhereTheLensStandsAndTheLensStopsBody(eager = true)
+    }
+
+    private suspend fun TestScope.stoppingAnAbsolutePullWritesWhereTheLensStandsAndTheLensStopsBody(eager: Boolean) {
         // время 0: цель записана сразу, и без «встать» объектив доехал бы до неё
-        val rig = absoluteRig(10_000.0)
+        val rig = absoluteRig(10_000.0, eager = eager)
         rig.mover.go('A', Mode.absolute, 10_000.0, 60_000.0, 0.0)
         rig.elapse(510)
         val stoppedAt = rig.now
@@ -400,7 +454,15 @@ class FocusMoverTest {
     }
 
     @Test fun aManualStepAfterAnAbsolutePullComesAfterTheStopWrite() = runTest {
-        val rig = absoluteRig(10_000.0)
+        aManualStepAfterAnAbsolutePullComesAfterTheStopWriteBody(eager = false)
+    }
+
+    @Test fun aManualStepAfterAnAbsolutePullComesAfterTheStopWriteOnAnEagerDispatcher() = runTest {
+        aManualStepAfterAnAbsolutePullComesAfterTheStopWriteBody(eager = true)
+    }
+
+    private suspend fun TestScope.aManualStepAfterAnAbsolutePullComesAfterTheStopWriteBody(eager: Boolean) {
+        val rig = absoluteRig(10_000.0, eager = eager)
         rig.mover.go('A', Mode.absolute, 10_000.0, 60_000.0, 4.0)
         rig.elapse(1_010)
         val stepAt = rig.now
@@ -420,9 +482,17 @@ class FocusMoverTest {
     }
 
     @Test fun aManualStepThatArrivesWhileTheStepLoopIsStillDrainingAlsoWaitsForTheStopWrite() = runTest {
+        aManualStepThatArrivesWhileTheStepLoopIsStillDrainingAlsoWaitsForTheStopWriteBody(eager = false)
+    }
+
+    @Test fun aManualStepThatArrivesWhileTheStepLoopIsStillDrainingAlsoWaitsForTheStopWriteOnAnEagerDispatcher() = runTest {
+        aManualStepThatArrivesWhileTheStepLoopIsStillDrainingAlsoWaitsForTheStopWriteBody(eager = true)
+    }
+
+    private suspend fun TestScope.aManualStepThatArrivesWhileTheStepLoopIsStillDrainingAlsoWaitsForTheStopWriteBody(eager: Boolean) {
         // цикл ручных шагов ещё занят командой, а перевод уже начался и отменён: шаг, пришедший сейчас, не должен уйти раньше
         // «встать», иначе «встать» откатит шаг
-        val rig = absoluteRig(10_000.0, commandMs = 80)
+        val rig = absoluteRig(10_000.0, commandMs = 80, eager = eager)
         rig.mover.step(21)
         rig.elapse(10)
         rig.mover.go('A', Mode.absolute, 10_000.0, 60_000.0, 4.0)
@@ -499,6 +569,85 @@ class FocusMoverTest {
         assertEquals(writes, rig.lens.wireOf("write").size)
     }
 
+    // MARK: - «Встать» не пишет вчерашнее положение
+
+    /**
+     * Снимок свойств старше тика (100 мс), но моложе предела петли перевода (250 мс), а объектив едет: запись по такому снимку откатила
+     * бы его на пройденное с тех пор. [eventMs]: как часто камера сообщает положение; null — никогда (только перечитывание петлёй).
+     */
+    private suspend fun TestScope.stopRereadsAnOldSnapshotBody(eager: Boolean, eventMs: Long?) {
+        val rig = absoluteRig(10_000.0, commandMs = 30, eventMs = eventMs ?: 50, eager = eager)
+        if (eventMs == null) rig.lens.silent = true
+        rig.mover.go('A', Mode.absolute, 10_000.0, 60_000.0, 0.0)
+        // первое сообщение о положении (событие или перечитывание петлёй), и ещё 150 мс: объектив за это время проехал далеко
+        rig.elapseUntil("первого сообщения о положении") { rig.lens.reports > 0 }
+        rig.elapse(150)
+        val age = rig.lens.snapshotAgeMs()
+        assertTrue("возраст снимка $age мс", age in 101..250)
+        val old = rig.lens.shown
+        val before = rig.lens.refreshesStarted
+        rig.mover.stop()
+        rig.elapse(1_000)
+        assertEquals("«встать» перечитало состояние", before + 1, rig.lens.refreshesStarted)
+        val written = rig.lens.wireOf("write").last().value
+        assertTrue("записано $written, а старый снимок говорил $old", written >= old.toLong() + 4_000)
+    }
+
+    @Test fun theStopWriteReadsTheStateAgainWhenTheCameraSendsNothing() = runTest {
+        stopRereadsAnOldSnapshotBody(eager = false, eventMs = null)
+    }
+
+    @Test fun theStopWriteReadsTheStateAgainWhenTheEventsComeEveryThreeHundredMilliseconds() = runTest {
+        stopRereadsAnOldSnapshotBody(eager = false, eventMs = 300)
+    }
+
+    @Test fun theStopWriteReadsTheStateAgainWhenTheEventsComeEveryThreeHundredMillisecondsOnAnEagerDispatcher() = runTest {
+        stopRereadsAnOldSnapshotBody(eager = true, eventMs = 300)
+    }
+
+    @Test fun aStopWhoseRereadDoesNotFinishInTimeWritesTheOldPositionAndSaysSo() = runTest {
+        // перечитывание отвечает через секунду, ждать — до 300 мс: пишется то, что есть, и в журнале видно, что оно старое
+        val rig = absoluteRig(10_000.0)
+        rig.lens.silent = true
+        rig.lens.refreshHangsMs = 1_000
+        rig.mover.go('A', Mode.absolute, 10_000.0, 60_000.0, 0.0)
+        rig.elapse(200)
+        rig.mover.stop()
+        rig.elapse(1_000)
+        assertEquals(2, rig.lens.wireOf("write").size)
+        assertTrue(rig.journal.toString(), rig.journal.any { it.contains("встать") && it.contains("не перечитались") })
+    }
+
+    // MARK: - Ручной шаг ждёт и «встать», что прибавилось, пока он ждал
+
+    private suspend fun TestScope.aStepWaitsForAStopWriteThatWasAddedWhileItWaitedBody(eager: Boolean) {
+        // снимок стареет (событий нет, перечитывание отвечает через секунду): каждое «встать» ждёт перечитывания 300 мс
+        val rig = absoluteRig(10_000.0, commandMs = 30, eager = eager)
+        rig.lens.silent = true
+        rig.lens.refreshHangsMs = 1_000
+        rig.mover.go('A', Mode.absolute, 10_000.0, 60_000.0, 0.0)
+        rig.elapse(200)
+        rig.mover.stop()               // первое «встать»: перечитывание до 500 мс, запись в 500
+        rig.elapse(10)
+        rig.mover.step(3)              // цикл шагов начался и ждёт первое «встать»
+        rig.elapse(40)
+        rig.mover.go('B', Mode.absolute, 10_000.0, 5_000.0, 0.0)    // сбрасывает очередь шагов; ждёт первое «встать»
+        rig.elapse(50)
+        rig.mover.step(2)              // отменяет перевод, второе «встать»: запись в 600; цикл всё ещё ждёт первое
+        rig.elapse(3_000)
+        // оба «встать» ушли раньше шагов: иначе второе откатило бы шаг, ушедший сразу за первым
+        assertEquals(rig.lens.wire.toString(), listOf("write", "write", "write", "nearFar", "nearFar"), rig.lens.wire.map { it.kind })
+        assertEquals(listOf(1L, 1L), rig.lens.wireOf("nearFar").map { it.value })
+    }
+
+    @Test fun aStepWaitsForAStopWriteThatWasAddedWhileItWaited() = runTest {
+        aStepWaitsForAStopWriteThatWasAddedWhileItWaitedBody(eager = false)
+    }
+
+    @Test fun aStepWaitsForAStopWriteThatWasAddedWhileItWaitedOnAnEagerDispatcher() = runTest {
+        aStepWaitsForAStopWriteThatWasAddedWhileItWaitedBody(eager = true)
+    }
+
     // MARK: - Метка, у которой фокус уже стоит
 
     @Test fun aMarkTheFocusAlreadyStandsAtEndsAtOnceWithTheCaptionAndWithoutCommands() = runTest {
@@ -543,8 +692,16 @@ class FocusMoverTest {
     }
 
     @Test fun aPullDropsTheManualStepsStillQueued() = runTest {
+        aPullDropsTheManualStepsStillQueuedBody(eager = false)
+    }
+
+    @Test fun aPullDropsTheManualStepsStillQueuedOnAnEagerDispatcher() = runTest {
+        aPullDropsTheManualStepsStillQueuedBody(eager = true)
+    }
+
+    private suspend fun TestScope.aPullDropsTheManualStepsStillQueuedBody(eager: Boolean) {
         // шаг Near/Far сдвигает на единицу: 60 единиц — это девять команд, а метка рядом
-        val rig = stepsRig(20.0, deadband = 0.0, gain = 1.0)
+        val rig = stepsRig(20.0, deadband = 0.0, gain = 1.0, eager = eager)
         rig.mover.step(60)
         rig.elapse(170)
         // три семёрки ушли (третья ещё в пути), остальные 39 единиц ждут
@@ -562,7 +719,15 @@ class FocusMoverTest {
     }
 
     @Test fun goingToAnotherMarkReplacesTheRunningPullWithOneLoop() = runTest {
-        val rig = stepsRig(50.0, deadband = 0.0)
+        goingToAnotherMarkReplacesTheRunningPullWithOneLoopBody(eager = false)
+    }
+
+    @Test fun goingToAnotherMarkReplacesTheRunningPullWithOneLoopOnAnEagerDispatcher() = runTest {
+        goingToAnotherMarkReplacesTheRunningPullWithOneLoopBody(eager = true)
+    }
+
+    private suspend fun TestScope.goingToAnotherMarkReplacesTheRunningPullWithOneLoopBody(eager: Boolean) {
+        val rig = stepsRig(50.0, deadband = 0.0, eager = eager)
         rig.mover.go('A', Mode.steps, 50.0, 90.0, 4.0)
         rig.elapse(1_000)
         val replacedAt = rig.now
@@ -581,9 +746,17 @@ class FocusMoverTest {
     }
 
     @Test fun aNewPullWaitsForTheStopWriteWhichWaitsForTheLastCommandOfThePullBeforeIt() = runTest {
+        aNewPullWaitsForTheStopWriteWhichWaitsForTheLastCommandOfThePullBeforeItBody(eager = false)
+    }
+
+    @Test fun aNewPullWaitsForTheStopWriteWhichWaitsForTheLastCommandOfThePullBeforeItOnAnEagerDispatcher() = runTest {
+        aNewPullWaitsForTheStopWriteWhichWaitsForTheLastCommandOfThePullBeforeItBody(eager = true)
+    }
+
+    private suspend fun TestScope.aNewPullWaitsForTheStopWriteWhichWaitsForTheLastCommandOfThePullBeforeItBody(eager: Boolean) {
         // последняя запись отменённого перевода ещё в пути (обмен 500 мс), а новый перевод уже начался: «встать» ждёт этой записи,
         // а запись нового перевода — «встать»; иначе цель нового перевода ушла бы раньше «встать», и «встать» легло бы поверх неё
-        val rig = absoluteRig(10_000.0, commandMs = 500)
+        val rig = absoluteRig(10_000.0, commandMs = 500, eager = eager)
         rig.mover.go('A', Mode.absolute, 10_000.0, 60_000.0, 0.0)
         rig.elapse(100)
         rig.mover.stop()
@@ -641,7 +814,7 @@ class FocusMoverTest {
         val rig = stepsRig(20.0, deadband = 0.0)
         rig.lens.replyCode = 0x2019
         rig.mover.go('A', Mode.steps, 20.0, 100.0, 8.0)
-        while (rig.lens.wireOf("nearFar").size < 2) rig.elapse(10)
+        rig.elapseUntil("двух команд Near/Far", step = 10) { rig.lens.wireOf("nearFar").size >= 2 }
         rig.elapse(120)
         rig.mover.stop()
         assertEquals(1, rig.journal.count { it.contains("0x2019") })
@@ -677,6 +850,26 @@ class FocusMoverTest {
         // 60000 (первый перевод), встать, 5000 (второй): «встать» — раньше цели второго перевода
         assertEquals(listOf(60_000L, standing.toLong(), 5_000L), writes)
         assertEquals("объектив доехал до B, а не остановился на месте стопа", 5_000.0, rig.lens.position, 0.0)
+    }
+
+    @Test fun whenAPullIsReplacedByAnotherTheJournalSaysReplacedNotStopped() = runTest {
+        val rig = stepsRig(50.0, deadband = 0.0)
+        rig.mover.go('A', Mode.steps, 50.0, 90.0, 4.0)
+        rig.elapse(1_000)
+        rig.lens.report()
+        rig.mover.go('B', Mode.steps, rig.lens.shown, 10.0, 2.0)
+        assertTrue(rig.journal.toString(), rig.journal.any { it.contains("перевод к A заменён") })
+        assertTrue(rig.journal.toString(), rig.journal.none { it.contains("остановлен") })
+        // и «фокус уже у метки B» заменяет идущий перевод так же
+        rig.mover.cancel()
+        rig.mover.go('A', Mode.steps, 50.0, 90.0, 4.0)
+        rig.elapse(500)
+        rig.mover.go('B', Mode.steps, 50.0, 50.5, 4.0)
+        assertTrue(rig.journal.toString(), rig.journal.count { it.contains("заменён") } == 2)
+        // стоп пользователя и ручной шаг остаются «остановлен»
+        rig.mover.go('A', Mode.steps, 50.0, 90.0, 4.0)
+        rig.mover.stop()
+        assertEquals(rig.journal.toString(), 2, rig.journal.count { it.contains("остановлен") })
     }
 
     @Test fun startingAPullClearsTheCaptionOfThePreviousOneAndItsTimerDoesNotClearTheNewOne() = runTest {

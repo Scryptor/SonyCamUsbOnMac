@@ -4,6 +4,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import local.zve10viewer.ptp.PtpEvent
@@ -119,13 +120,16 @@ class FocusSessionTest {
 
     @Test fun theSnapshotGetsOlderAndRefreshMakesItYoungAgain() = runTest {
         val camera = FakeCamera()
-        val session = CameraSession(camera, fast)
+        // часы сеанса — виртуальные тестовые: возраст снимка точный, а не «примерно» по стенным часам, и загруженный Mac его не собьёт
+        val session = CameraSession(camera, fast, clock = { testScheduler.currentTime * 1_000_000L })
         session.start(this)
-        assertTrue("после рукопожатия снимок свежий: ${session.snapshotAgeMs()} мс", session.snapshotAgeMs() < 1_000)
-        Thread.sleep(120)
-        assertTrue("снимок старится: ${session.snapshotAgeMs()} мс", session.snapshotAgeMs() >= 100)
+        assertEquals("после рукопожатия снимок только что прочитан", 0L, session.snapshotAgeMs())
+        advanceTimeBy(120)
+        assertEquals(120L, session.snapshotAgeMs())
         session.refresh()
-        assertTrue("после перечитывания снова свежий: ${session.snapshotAgeMs()} мс", session.snapshotAgeMs() < 100)
+        assertEquals("после перечитывания снова свежий", 0L, session.snapshotAgeMs())
+        advanceTimeBy(1)
+        assertEquals(1L, session.snapshotAgeMs())
         session.close()
     }
 

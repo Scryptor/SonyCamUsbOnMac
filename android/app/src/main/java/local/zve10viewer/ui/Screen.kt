@@ -226,12 +226,13 @@ class ScreenState {
         get() = fnOpen || assistOpen || allSettingsOpen || settingsOpen || pillInfo != null || presetMenuOpen || newPresetOpen ||
             savePresetOpen || presetsOpen || touchFocusHelpOpen || focusMarksHelpOpen
 
-    /** Шкала с метками на экране; [doNotShow] — «Больше не показывать» отмечено. Первый раз за запуск открывает карточку. */
+    /**
+     * Шкала с метками на экране; [doNotShow] — «Больше не показывать» отмечено. Первый раз за запуск открывает карточку — сама, без
+     * просьбы пользователя, поэтому ничего из открытого им (окно пресетов, имя пресета, меню) не закрывает; закрывает другие
+     * подсказки только долгое нажатие ([openFocusMarksHelp]).
+     */
     fun offerFocusMarksHelp(doNotShow: Boolean) {
-        if (focusMarksHelpOffer.shouldOpen(doNotShow)) {
-            closeOverlays()
-            focusMarksHelpOpen = true
-        }
+        if (focusMarksHelpOffer.shouldOpen(doNotShow)) focusMarksHelpOpen = true
     }
 
     /** Открыть карточку «Метки фокуса» (долгое нажатие на кнопке времени): меню и другие подсказки закрываются. */

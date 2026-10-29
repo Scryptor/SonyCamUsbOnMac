@@ -109,7 +109,12 @@ class RefreshCoalescer(scope: CoroutineScope, private val refresh: suspend () ->
 }
 
 /** Сеанс работы с камерой Sony в режиме PC Remote. */
-class CameraSession(private val transport: PtpTransport, private val timing: SessionTiming = SessionTiming()) {
+class CameraSession(
+    private val transport: PtpTransport,
+    private val timing: SessionTiming = SessionTiming(),
+    /** Монотонные часы, нс: по ним считается возраст снимка свойств ([snapshotAgeMs]); в тестах — виртуальные. */
+    private val clock: () -> Long = System::nanoTime,
+) {
     @Volatile var deviceInfo: DeviceInfo? = null
         private set
     @Volatile var isReady = false
@@ -122,7 +127,7 @@ class CameraSession(private val transport: PtpTransport, private val timing: Ses
     /** Последнее чтение свойств камеры. */
     val properties: StateFlow<Map<Int, SonyProperty>> = _properties
 
-    /** Когда свойства перечитаны в последний раз (System.nanoTime); [Long.MIN_VALUE] — ни разу. */
+    /** Когда свойства перечитаны в последний раз (по [clock]); [Long.MIN_VALUE] — ни разу. */
     @Volatile private var refreshedAt = Long.MIN_VALUE
 
     /**
@@ -130,7 +135,7 @@ class CameraSession(private val transport: PtpTransport, private val timing: Ses
      * не меняет [properties] (StateFlow не повторяет равное), поэтому возраст снимка — не по их выдаче, а по самому обмену.
      */
     fun snapshotAgeMs(): Long =
-        if (refreshedAt == Long.MIN_VALUE) Long.MAX_VALUE else maxOf(0L, (System.nanoTime() - refreshedAt) / 1_000_000)
+        if (refreshedAt == Long.MIN_VALUE) Long.MAX_VALUE else maxOf(0L, (clock() - refreshedAt) / 1_000_000)
 
     private val lensChangeEvents = MutableSharedFlow<Unit>(extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
 
@@ -199,7 +204,7 @@ class CameraSession(private val transport: PtpTransport, private val timing: Ses
     suspend fun refresh() {
         val reply = call(SonyOp.GET_ALL_EXT_PROP_INFO)
         _properties.value = SonyPropertyParser.parse(reply.data)
-        refreshedAt = System.nanoTime()
+        refreshedAt = clock()
     }
 
     /** Записывает значение и ждёт, пока камера подтвердит его чтением. */

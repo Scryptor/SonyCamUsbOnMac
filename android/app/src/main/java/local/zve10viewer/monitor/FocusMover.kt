@@ -45,9 +45,10 @@ data class FocusPullView(
  *
  * **Встать.** Абсолютный фокус после отмены сам не остановится: камера едет к последней записанной цели. Поэтому стоп пользователя,
  * ручной шаг и «уже у метки» после перевода пишут в 0xE042 положение, где объектив стоит сейчас. Эта запись уходит раньше любой
- * следующей команды — ручной шаг (любой, и тот, что пришёл, пока цикл ещё доигрывал прежнюю очередь) и новый перевод ждут её перед
- * каждой своей командой, иначе «встать» откатило бы шаг. Пока события идут (снимок моложе 250 мс), положение берётся из снимка как
- * есть: полное чтение перед записью только отнимало бы время, а объектив едет.
+ * следующей команды — ручной шаг (любой, и тот, что пришёл, пока цикл ещё доигрывал прежнюю очередь, и второе «встать», что
+ * прибавилось, пока он ждал) и новый перевод ждут её перед каждой своей командой, иначе «встать» откатило бы шаг. Положение берётся
+ * из снимка свойств, только пока он моложе тика ([STOP_FRESH_MS], 100 мс): объектив едет, и по более старому снимку «встать»
+ * откатило бы его на пройденное с тех пор. Старше — свойства перечитываются (не дольше 300 мс), и пишется перечитанное.
  *
  * **Отказы** камеры в этих командах (код ответа не OK, не дошла, свойства не перечитались) идут в журнал — первый раз с причиной, а
  * сколько их было всего за перевод — одной строкой в конце: иначе на настоящей камере нечем объяснить, почему объектив не встал.
@@ -152,7 +153,7 @@ class FocusMover(
                 while (queuedUnits != 0 && generation == mine) {
                     // «встать» и последняя команда отменённого перевода — раньше шага; перед каждой командой, а не только перед
                     // первой: цикл мог ещё доигрывать очередь, когда перевод начался и был отменён
-                    settle?.join()
+                    awaitSettled()
                     if (generation != mine || queuedUnits == 0) break
                     val next = FocusDrive.commands(queuedUnits).firstOrNull() ?: break
                     queuedUnits -= next.toInt()
@@ -184,7 +185,7 @@ class FocusMover(
     fun go(mark: Char, mode: FocusPull.Mode, start: Double, target: Double, duration: Double) {
         queuedUnits = 0
         val there = abs(target - start) <= FocusPosition.tolerance(mode)
-        cancelRun(stopCamera = there)
+        cancelRun(stopCamera = there, replaced = true)
         captionJob?.cancel()
         captionJob = null
         publish(view.copy(caption = null))
@@ -240,6 +241,18 @@ class FocusMover(
     // MARK: Цикл перевода
 
     private fun alive(run: Run): Boolean = this.run === run && generation == run.generation
+
+    /**
+     * Ждёт всё, что должно уйти раньше следующей команды ([settle]). Пока ждали, могло прибавиться ещё — «встать» второго стопа,
+     * который сложился с первым в [settle], — поэтому ждём, пока [settle] не перестанет меняться: шаг не уйдёт под запись, которая
+     * откатила бы его.
+     */
+    private suspend fun awaitSettled() {
+        while (true) {
+            val pending = settle?.takeIf { it.isActive } ?: return
+            pending.join()
+        }
+    }
 
     private suspend fun runPull(run: Run) {
         // «встать» и последняя команда прошлого перевода — раньше первого тика этого
@@ -304,9 +317,9 @@ class FocusMover(
 
     /**
      * Перечитать свойства камеры и подождать не дольше [limitMs]. Запрос не отменяется, если время вышло, и не привязан к переводу:
-     * он идёт своим путём, а перевод просто не ждёт ответа.
+     * он идёт своим путём, а перевод просто не ждёт ответа. false — время вышло, а ответа нет.
      */
-    private suspend fun refreshWithin(limitMs: Long, failures: Failures?) {
+    private suspend fun refreshWithin(limitMs: Long, failures: Failures?): Boolean {
         val done = CompletableDeferred<Unit>()
         scope.launch {
             try {
@@ -321,7 +334,7 @@ class FocusMover(
                 done.complete(Unit)
             }
         }
-        withTimeoutOrNull(limitMs) { done.await() }
+        return withTimeoutOrNull(limitMs) { done.await() } != null
     }
 
     // MARK: Конец и отмена
@@ -349,14 +362,15 @@ class FocusMover(
     /**
      * Прекратить идущий перевод — без подписи. [stopCamera]: у абсолютного фокуса камера едет к последней записанной цели и сама
      * не остановится — ей пишется положение, в котором фокус стоит сейчас. Что бы ни ушло, следующая команда (ручной шаг, новый
-     * перевод) ждёт этого и последней команды отменённого перевода.
+     * перевод) ждёт этого и последней команды отменённого перевода. [replaced]: перевод не остановили, а заменили другим — в журнале
+     * это «заменён», а не «остановлен».
      */
-    private fun cancelRun(stopCamera: Boolean) {
+    private fun cancelRun(stopCamera: Boolean, replaced: Boolean = false) {
         val cancelled = run ?: return
         run = null
         cancelled.job?.cancel()
         publish(view.copy(mark = null, progress = null))
-        journal("метки фокуса: перевод остановлен")
+        journal(if (replaced) "метки фокуса: перевод к ${cancelled.mark} заменён" else "метки фокуса: перевод остановлен")
         cancelled.failures.summary().forEach(journal)
         val last = if (stopCamera && cancelled.mode == FocusPull.Mode.absolute) launchStop(cancelled) else cancelled.job
         if (last == null) return
@@ -373,7 +387,10 @@ class FocusMover(
             // последняя команда перевода уходит раньше «встать»: иначе «встать» легло бы под неё
             cancelled.job?.join()
             try {
-                if (port.snapshotAgeMs() > FRESH_SNAPSHOT_MS) refreshWithin(REFRESH_WAIT_MS, null)
+                // положение старше тика — «встать» откатило бы объектив на пройденное с тех пор: читаем заново
+                if (port.snapshotAgeMs() > STOP_FRESH_MS && !refreshWithin(REFRESH_WAIT_MS, null)) {
+                    journal("метки фокуса: свойства не перечитались за $REFRESH_WAIT_MS мс — «встать» пишет прежнее положение")
+                }
                 // сеанс ушёл, пока ждали, — чужой камере «встать» не уйдёт
                 if (generation != cancelled.generation) return@launch
                 val here = FocusPosition.current(port.properties, FocusPull.Mode.absolute)
@@ -431,8 +448,18 @@ class FocusMover(
         /** Сколько ждать свежее положение после команды, мс. */
         const val REFRESH_WAIT_MS = 300L
 
-        /** Снимок свойств моложе этого, мс, у абсолютного фокуса считается свежим: положение приходит событиями камеры. */
+        /**
+         * Снимок свойств моложе этого, мс, у абсолютного фокуса годится петле перевода: положение приходит событиями камеры, а
+         * опоздать на долю секунды для неё не страшно (перевод кончается чуть позже).
+         */
         const val FRESH_SNAPSHOT_MS = 250L
+
+        /**
+         * Снимок свойств моложе этого, мс, годится для «встать» — один тик. Объектив едет до 40 000 единиц в секунду, и по снимку в
+         * 250 мс возраста «встать» откатило бы его на 10 000. Камера, что шлёт 0xE043 редко или молчит, держит старый снимок
+         * «свежим» для петли перевода надолго — для «встать» он не годится.
+         */
+        const val STOP_FRESH_MS = 100L
 
         /** Сколько держится подпись итога, мс. */
         const val CAPTION_MS = 3000L
