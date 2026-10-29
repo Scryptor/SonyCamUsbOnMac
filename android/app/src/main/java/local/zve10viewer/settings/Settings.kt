@@ -19,6 +19,7 @@ enum class SettingID(val code: Int, val title: String, private val short: String
     wbShiftAB(SonyProp.AB_SHIFT, "Сдвиг A–B", "A–B"),
     wbShiftGM(SonyProp.GM_SHIFT, "Сдвиг G–M", "G–M"),
     creativeStyle(SonyProp.CREATIVE_STYLE, "Творческий стиль", "Стиль"),
+    creativeLook(SonyProp.CREATIVE_LOOK, "Creative Look", "Look"),
     pictureProfile(SonyProp.PICTURE_PROFILE, "Профиль изображения", "Профиль"),
     movieFileFormat(SonyProp.MOVIE_FILE_FORMAT, "Формат видео"),
     movieRecordingSetting(SonyProp.MOVIE_RECORDING_SETTING, "Параметры записи", "Запись"),
@@ -84,6 +85,19 @@ object SettingCatalog {
         CaptureMode.photo -> listOf(SettingID.focusArea, SettingID.metering, SettingID.dro,
             SettingID.fileFormat, SettingID.aspectRatio).map { FnSlot.Setting(it) } + FnSlot.AllSettings
     }
+
+    /**
+     * Какая настройка на самом деле стоит на месте [id] у этой камеры ([available] — коды её свойств). Новые камеры Sony
+     * вместо Creative Style 0xD240 имеют Creative Look 0xD0FA: на место «Творческого стиля» в Fn и во «Всех настройках»
+     * встаёт он. У камеры, у которой есть и стиль, место за стилем. Остальные настройки — как есть.
+     * В группах и рядах Fn Creative Look не значится: «Все настройки» показывают строку группы и без свойства камеры.
+     */
+    fun resolved(id: SettingID, available: Set<Int>): SettingID =
+        if (id == SettingID.creativeStyle && SonyProp.CREATIVE_STYLE !in available && SonyProp.CREATIVE_LOOK in available) {
+            SettingID.creativeLook
+        } else {
+            id
+        }
 
     private val infoLine = listOf(SettingID.shutter, SettingID.aperture, SettingID.iso, SettingID.whiteBalance,
         SettingID.exposureComp, SettingID.focusMode)

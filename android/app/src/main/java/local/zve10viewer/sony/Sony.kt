@@ -16,6 +16,14 @@ object SonyOp {
     const val SET_EXT_PROP_VALUE = 0x9205
     const val CONTROL_DEVICE = 0x9207
     const val GET_ALL_EXT_PROP_INFO = 0x9209
+
+    // у ZV-E10 в списке операций их нет: зовём, только если камера назвала их в GetDeviceInfo (DeviceInfo.supports)
+    /** Подписи значений от самой камеры (Creative Look и др.); параметр — тип списка, 0 — все списки. */
+    const val GET_DISPLAY_STRING_LIST = 0x9215
+    /** Версия кода производителя (в параметре ответа, ×100: 0x0136 — 3.10). */
+    const val GET_VENDOR_CODE_VERSION = 0x9216
+    /** Данные объектива: пары «положение фокуса — расстояние»; параметр 1 — футы, 2 — метры. */
+    const val GET_LENS_INFORMATION = 0x9223
 }
 
 /** Коды свойств камеры (стандартные PTP 0x50xx и расширения Sony 0xD2xx). */
@@ -75,6 +83,30 @@ object SonyProp {
     /** Можно ли «коснуться» экрана камеры командой (0x01 — да) и снять это касание. */
     const val REMOTE_TOUCH_ENABLED = 0xD284
     const val REMOTE_TOUCH_CANCEL_ENABLED = 0xD285
+
+    // новые камеры Sony (справочник Camera Control PTP 3 Reference); у ZV-E10 этих свойств нет
+    /** Гамма профиля изображения (UINT16): 0x0303 — S-Log3. По ней и по цвету профиля LUT «Авто» выбирает кривую. */
+    const val PP_GAMMA = 0xD0E1
+    /** Цвет профиля изображения (UINT16): 0x0008 — S-Gamut3.Cine. */
+    const val PP_COLOR_MODE = 0xD0E9
+    /** Creative Look (UINT16) — вместо Creative Style 0xD240. Числа значений совпадают со стилем, смысл другой. */
+    const val CREATIVE_LOOK = 0xD0FA
+    /** Абсолютный фокус: цель 0…65535 (UINT16), запись. */
+    const val FOCUS_POSITION_SETTING = 0xE042
+    /** Абсолютный фокус: положение 0…65535 (UINT16), только чтение. */
+    const val FOCUS_POSITION_CURRENT = 0xE043
+    /** Данные объектива готовы (UINT8, 1 — да): тогда можно звать 0x9223. */
+    const val LENS_INFO_ENABLED = 0xE086
+}
+
+/** События PTP от новых камер Sony. О смене свойства сообщает Sony.PROPERTY_CHANGED_EVENT (0xC203). */
+object SonyEvent {
+    /** Список подписей изменился; в параметре — тип списка: заново 0x9215 с этим типом. */
+    const val DISPLAY_LIST_CHANGED = 0xC20F
+    /** Запись в 0xE042 закончилась; параметр 1 — фокус дошёл до цели. */
+    const val FOCUS_POSITION_RESULT = 0xC218
+    /** Данные объектива изменились: заново 0x9223. */
+    const val LENS_INFO_CHANGED = 0xC21B
 }
 
 /** Команды управления 0x9207 (Control Device) — кроме кнопок спуска и записи; тип значения — свой у каждой. */
@@ -129,6 +161,12 @@ data class DeviceInfo(
 ) {
     /** Команды Sony есть только в режиме PC Remote. */
     val isPcRemote: Boolean get() = operations.contains(SonyOp.CONNECT)
+
+    /**
+     * Назвала ли камера операцию в GetDeviceInfo. Новые операции Sony (0x9215, 0x9216, 0x9223) зовём только если да:
+     * у ZV-E10 их нет.
+     */
+    fun supports(op: Int): Boolean = operations.contains(op)
 
     companion object {
         fun parse(data: ByteArray): DeviceInfo {

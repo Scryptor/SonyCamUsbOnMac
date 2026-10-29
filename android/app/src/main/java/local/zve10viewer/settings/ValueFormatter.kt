@@ -1,6 +1,7 @@
 package local.zve10viewer.settings
 
 import local.zve10viewer.sony.SonyProperty
+import local.zve10viewer.sony.SonyReferenceTables
 import java.util.Locale
 import kotlin.math.abs
 
@@ -20,7 +21,16 @@ object ValueFormatter {
         return label(SettingID.whiteBalance, whiteBalance)
     }
 
-    fun label(id: SettingID, value: Long): String = when (id) {
+    /**
+     * Подпись значения. Порядок: название от самой камеры ([names], список 0x9215) → наши русские подписи и особые ветки →
+     * английское название из справочника Sony → «#N».
+     */
+    fun label(id: SettingID, value: Long, names: Map<Long, String>? = null): String {
+        names?.get(value)?.let { return it }
+        return russianOrReference(id, value)
+    }
+
+    private fun russianOrReference(id: SettingID, value: Long): String = when (id) {
         SettingID.shutter -> shutter(value)
         SettingID.aperture -> aperture(value)
         SettingID.iso -> {
@@ -44,17 +54,18 @@ object ValueFormatter {
             val minutes = (value % 3600) / 60
             if (hours > 0) "$hours ч $minutes мин" else "$minutes мин"
         }
-        SettingID.focusArea -> focusArea(value) ?: fallback(value)
-        SettingID.dro -> dro(value) ?: fallback(value)
+        SettingID.focusArea -> focusArea(value) ?: fallback(id, value)
+        SettingID.dro -> dro(value) ?: fallback(id, value)
         SettingID.pictureProfile -> when (value) {
             0L -> "Выкл"
             in 1L..10L -> "PP$value"
-            else -> fallback(value)
+            else -> fallback(id, value)
         }
-        else -> tables[id]?.get(value) ?: fallback(value)
+        else -> tables[id]?.get(value) ?: fallback(id, value)
     }
 
-    private fun fallback(value: Long) = "#$value"
+    /** Значения, которых нет в наших таблицах: английское название Sony из справочника, а если и его нет — «#N». */
+    private fun fallback(id: SettingID, value: Long): String = SonyReferenceTables.valueName(id.code, value) ?: "#$value"
 
     private fun sign(value: Long) = if (value < 0) MINUS else "+"
 
@@ -67,7 +78,7 @@ object ValueFormatter {
         if (v == 0L) return "BULB"
         val num = (v shr 16) and 0xFFFF
         val den = v and 0xFFFF
-        if (den <= 0) return fallback(v)
+        if (den <= 0) return fallback(SettingID.shutter, v)
         if (num == 1L && den > 1) return "1/$den"
         var s = format("%.1f", num.toDouble() / den)
         if (s.endsWith(".0")) s = s.dropLast(2)

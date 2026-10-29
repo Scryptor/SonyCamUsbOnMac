@@ -239,9 +239,12 @@ class PresetsTest {
     }
 
     @Test fun windowGroupsHoldExactlyTheCatalog() {
+        // Creative Look в группах нет: «Все настройки» показывают строку группы и без свойства камеры, поэтому на место
+        // «Творческого стиля» его ставит SettingCatalog.resolved (OtherCamerasTest); остальное в каталоге — ровно по группам
+        val catalog = PresetCatalog.order.filter { it != SettingID.creativeLook }
         val grouped = PresetCatalog.groups.flatMap { it.second }
-        assertEquals(PresetCatalog.order.size, grouped.size)
-        assertEquals(PresetCatalog.order.toSet(), grouped.toSet())
+        assertEquals(catalog.size, grouped.size)
+        assertEquals(catalog.toSet(), grouped.toSet())
         assertEquals(listOf("Экспозиция", "Цвет и картинка", "Фокус"), PresetCatalog.groups.map { it.first })
         assertEquals(listOf(SettingID.shutter, SettingID.aperture, SettingID.iso, SettingID.exposureComp, SettingID.metering,
             SettingID.dro), PresetCatalog.groups[0].second)

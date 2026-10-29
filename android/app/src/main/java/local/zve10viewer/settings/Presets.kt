@@ -34,7 +34,7 @@ object PresetCatalog {
         SettingID.whiteBalance, SettingID.colorTemperature, SettingID.wbShiftAB, SettingID.wbShiftGM,
         SettingID.iso, SettingID.exposureComp, SettingID.shutter, SettingID.aperture,
         SettingID.metering, SettingID.dro, SettingID.focusMode, SettingID.focusArea,
-        SettingID.creativeStyle, SettingID.pictureProfile,
+        SettingID.creativeStyle, SettingID.creativeLook, SettingID.pictureProfile,
     )
 
     /** Настройка → от какой она зависит. */

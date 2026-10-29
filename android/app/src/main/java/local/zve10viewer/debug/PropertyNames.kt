@@ -1,17 +1,19 @@
 package local.zve10viewer.debug
 
 import local.zve10viewer.settings.SettingID
+import local.zve10viewer.sony.SonyReferenceTables
 
 /**
  * Имена свойств PTP и Sony для панели отладки. Свои настройки программа называет сама (`SettingID.title`), остальные —
- * по libgphoto2 (camlibs/ptp2/ptp.h), как в программе для Mac.
+ * по libgphoto2 (camlibs/ptp2/ptp.h), как в программе для Mac; кода, которого libgphoto2 не знает (свойства новых камер
+ * Sony), — имя из справочника Sony.
  */
 object PropertyNames {
-    /** Имя по libgphoto2; null — такого свойства там нет. */
-    fun name(code: Int): String? = names[code]
+    /** Имя по libgphoto2, а если там нет — по справочнику Sony; null — нигде нет. */
+    fun name(code: Int): String? = names[code] ?: SonyReferenceTables.propertyNames[code]
 
-    /** Как называть свойство на панели: как в программе, иначе по libgphoto2, иначе «—». */
-    fun title(code: Int): String = SettingID.entries.firstOrNull { it.code == code }?.title ?: names[code] ?: "—"
+    /** Как называть свойство на панели: как в программе, иначе по libgphoto2, иначе по справочнику Sony, иначе «—». */
+    fun title(code: Int): String = SettingID.entries.firstOrNull { it.code == code }?.title ?: name(code) ?: "—"
 
     private val names: Map<Int, String> = mapOf(
         0x5000 to "Undefined", 0x5001 to "BatteryLevel", 0x5002 to "FunctionalMode", 0x5003 to "ImageSize",
