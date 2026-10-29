@@ -10,7 +10,8 @@ public struct ColorLUT: Equatable, Sendable {
     /// синий (как в `.cube`). Выход — 0…1; что за ними, `apply` и `rgbaFloat32` обрезают.
     public let values: [Float]
     /// Вход, который куб растягивает на свои 0…`size − 1`: по числу на красный, зелёный и синий. У `.cube` это
-    /// `DOMAIN_MIN` и `DOMAIN_MAX`; по умолчанию 0…1.
+    /// `DOMAIN_MIN`/`DOMAIN_MAX` или `LUT_3D_INPUT_RANGE`; по умолчанию 0…1. `apply` его учитывает, а данные для Core Image
+    /// (`rgbaFloat32`) — нет.
     public let domainMin: [Float]
     public let domainMax: [Float]
 
@@ -65,6 +66,9 @@ public struct ColorLUT: Equatable, Sendable {
 
     /// Данные для `CIColorCube.cubeData`: `size³` ячеек по четыре `Float32` (красный, зелёный, синий, альфа 1) —
     /// красный быстрее всех, потом зелёный, потом синий, 16 байт на ячейку. Выход обрезан до 0…1.
+    ///
+    /// Домен (`domainMin`/`domainMax`) в эти данные НЕ заложен: `CIColorCube` всегда читает куб по входу 0…1. Если домен
+    /// не 0…1, тот, кто рисует, сначала приводит вход к нему по каналам: `(v − min)/(max − min)`, вне 0…1 обрезая.
     public func rgbaFloat32() -> Data {
         let cells = size * size * size
         var rgba = [Float](repeating: 1, count: cells * 4)

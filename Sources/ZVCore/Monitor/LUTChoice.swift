@@ -40,14 +40,19 @@ public enum LUTChoice {
     }
 
     /// «Авто» по профилю. Значения — из таблиц справочника Sony: `0xD0E1` (0x0302 S-Log2, 0x0303 S-Log3,
-    /// 0x0401…0x0404 HLG) и `0xD0E9` (0x0008 S-Gamut3.Cine, 0x0009 S-Gamut3).
+    /// 0x0401…0x0404 HLG) и `0xD0E9` (0x0008 S-Gamut3.Cine, 0x0009 S-Gamut3, 0x000C S-Gamut — у S-Gamut те же основные
+    /// цвета, что у S-Gamut3, поэтому и LUT тот же).
     private static func automatic(pictureProfile: Int64?, ppGamma: Int64?, colorMode: Int64?) -> BuiltinLUT? {
         // Камера сама называет гамму — тогда номер профиля не нужен: в нём гамму могли перенастроить
         if let gamma = ppGamma {
             switch gamma {
             case 0x0302: return .slog2
-            // S-Log3 с S-Gamut3 — свой LUT, с остальными охватами (и без охвата) — S-Gamut3.Cine
-            case 0x0303: return colorMode == 0x0009 ? .slog3 : .slog3cine
+            // S-Log3 с S-Gamut3 или S-Gamut — свой LUT, с остальными охватами (и без охвата) — S-Gamut3.Cine
+            case 0x0303:
+                switch colorMode {
+                case 0x0009, 0x000C: return .slog3
+                default: return .slog3cine
+                }
             case 0x0401...0x0404: return .hlg
             default: return nil
             }

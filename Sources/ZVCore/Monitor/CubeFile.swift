@@ -4,12 +4,16 @@ import Foundation
 ///
 /// Что понимает:
 /// - `LUT_3D_SIZE n`, `n` от 2 до 65;
-/// - `DOMAIN_MIN` и `DOMAIN_MAX` по три числа (по умолчанию 0 и 1);
+/// - `DOMAIN_MIN` и `DOMAIN_MAX` по три числа (по умолчанию 0 и 1); `LUT_3D_INPUT_RANGE min max` — то же одной парой
+///   на все три канала. Что позже, то и верно, по полям;
 /// - `TITLE "…"` — название пропускается целиком, с любыми кавычками, решётками и числами внутри;
 /// - комментарии `#` — с начала строки и после чисел; пустые строки;
 /// - CRLF, одинокий CR и BOM в начале;
 /// - данные — `n³` строк `r g b`, красный меняется быстрее всех;
 /// - чужие ключевые слова вроде `LUT_IN_VIDEO_RANGE` — пропускаются.
+///
+/// Размер должен стоять до первой строки данных: до них последний `LUT_3D_SIZE` заменяет прежний, а после них — ошибка
+/// на строке с размером.
 public enum CubeFile {
     public enum Failure: Error, Equatable {
         /// Не 3D-таблица `.cube`: `LUT_1D_SIZE`, нет `LUT_3D_SIZE`, а то и вовсе не `.cube`.
@@ -125,9 +129,18 @@ public enum CubeFile {
             case "LUT_3D_SIZE":
                 guard arguments.count == 1, let n = Int(arguments[0]) else { throw Failure.number(line: line) }
                 guard sizes.contains(n) else { throw Failure.badSize(n) }
+                // до первой строки данных последний размер заменяет прежний, после — размер менять поздно
+                guard rows == 0 else { throw Failure.number(line: line) }
                 size = n
                 expected = n * n * n
                 values.reserveCapacity(expected * 3)
+            case "LUT_3D_INPUT_RANGE":
+                // то же, что DOMAIN_MIN min min min и DOMAIN_MAX max max max
+                guard arguments.count == 2, let low = number(arguments[0]), let high = number(arguments[1]) else {
+                    throw Failure.number(line: line)
+                }
+                domainMin = [low, low, low]
+                domainMax = [high, high, high]
             case "DOMAIN_MIN", "DOMAIN_MAX":
                 var triple: [Float] = []
                 for argument in arguments {
@@ -145,6 +158,11 @@ public enum CubeFile {
 
         guard size > 0 else { throw Failure.notThreeD }
         guard rows == expected else { throw Failure.count(found: rows, expected: expected) }
+        // Страховка: куб собирается, только когда сохранено ровно size³ точек и домен целый. По построению так и есть, но
+        // нарушенное условие в ColorLUT.init остановило бы программу, а здесь оно покажется ошибкой
+        guard values.count == expected * 3, domainMin.count == 3, domainMax.count == 3 else {
+            throw Failure.count(found: values.count / 3, expected: expected)
+        }
         return ColorLUT(size: size, values: values, domainMin: domainMin, domainMax: domainMax)
     }
 

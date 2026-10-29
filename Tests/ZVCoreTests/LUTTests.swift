@@ -425,6 +425,13 @@ func builtinOutputStaysInsideZeroOne(_ lut: BuiltinLUT) {
     #expect(cells[7] == [1, 1, 1, 1])
 }
 
+@Test func rgbaDataDoesNotBakeTheDomainIn() {
+    // домен в данные для Core Image не входит: куб лежит как есть, а вход под него приводит тот, кто рисует
+    let identity = ColorLUT.identity(size: 3)
+    let wide = ColorLUT(size: 3, values: identity.values, domainMin: [-1, -1, -1], domainMax: [3, 3, 3])
+    #expect(wide.rgbaFloat32() == identity.rgbaFloat32())
+}
+
 @Test func rgbaDataCarriesTheCubeValues() {
     let cube = BuiltinLUT.hlg.make(size: 9)
     let floats = cube.rgbaFloat32().withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
@@ -514,10 +521,24 @@ func makeFollowsTheExactPathAlongTheGreyAxis(_ lut: BuiltinLUT) {
 }
 
 @Test func autoSLog3WithoutAKnownGamutFallsBackToCine() {
-    // «иначе S-Gamut3.Cine»: охват не пришёл или не из двух S-Gamut3
+    // «иначе S-Gamut3.Cine»: охват не пришёл или это не S-Gamut3 и не S-Gamut
     #expect(LUTChoice.resolve(.auto, pictureProfile: nil, ppGamma: 0x0303, colorMode: nil) == .slog3cine)
-    #expect(LUTChoice.resolve(.auto, pictureProfile: nil, ppGamma: 0x0303, colorMode: 0x0003) == .slog3cine)
-    #expect(LUTChoice.resolve(.auto, pictureProfile: nil, ppGamma: 0x0303, colorMode: 0x000C) == .slog3cine)
+    #expect(LUTChoice.resolve(.auto, pictureProfile: nil, ppGamma: 0x0303, colorMode: 0x0008) == .slog3cine)
+    for colour in [0x0001, 0x0002, 0x0003, 0x0004, 0x0005, 0x0006, 0x0007, 0x000A, 0x000B, 0x000D, 0x00FF] as [Int64] {
+        #expect(LUTChoice.resolve(.auto, pictureProfile: nil, ppGamma: 0x0303, colorMode: colour) == .slog3cine, "режим \(colour)")
+    }
+}
+
+@Test func autoSLog3WithSGamutTakesTheSGamut3LUT() {
+    // S-Gamut (0x000C) и S-Gamut3 (0x0009) — одни и те же основные цвета, так что и LUT один
+    #expect(LUTChoice.resolve(.auto, pictureProfile: nil, ppGamma: 0x0303, colorMode: 0x000C) == .slog3)
+    #expect(LUTChoice.resolve(.auto, pictureProfile: nil, ppGamma: 0x0303, colorMode: 0x0009) == .slog3)
+    // номер профиля при названной гамме не нужен
+    #expect(LUTChoice.resolve(.auto, pictureProfile: 8, ppGamma: 0x0303, colorMode: 0x000C) == .slog3)
+    // S-Log2 от охвата не зависит
+    #expect(LUTChoice.resolve(.auto, pictureProfile: nil, ppGamma: 0x0302, colorMode: 0x000C) == .slog2)
+    // а «камера сама приводит к 709» гасит и этот выбор
+    #expect(LUTChoice.resolve(.auto, pictureProfile: nil, ppGamma: 0x0303, colorMode: 0x000C, cameraConverts: true) == nil)
 }
 
 @Test func autoGammaOtherThanLogIsNoLUT() {

@@ -63,6 +63,32 @@ private func smallCube(header: [String] = ["LUT_3D_SIZE 2"], rows: [String]? = n
     #expect(lut.domainMax == [3, 3, 3])
 }
 
+@Test func inputRangeSetsTheDomainOfAllThreeChannels() throws {
+    let lut = try CubeFile.parse(smallCube(header: ["LUT_3D_SIZE 2", "LUT_3D_INPUT_RANGE 0.0 2.0 # на все каналы"]))
+    #expect(lut.domainMin == [0, 0, 0])
+    #expect(lut.domainMax == [2, 2, 2])
+    #expect(near(lut.apply(1, 1, 1), (0.5, 0.5, 0.5), 1e-6))
+    // тот же куб, что с DOMAIN_MIN 0 0 0 и DOMAIN_MAX 2 2 2
+    let domain = try CubeFile.parse(smallCube(header: ["LUT_3D_SIZE 2", "DOMAIN_MIN 0 0 0", "DOMAIN_MAX 2 2 2"]))
+    #expect(lut == domain)
+}
+
+@Test func inputRangeMayStartBelowZeroAndComeBeforeTheSize() throws {
+    let lut = try CubeFile.parse(smallCube(header: ["LUT_3D_INPUT_RANGE -1 3", "LUT_3D_SIZE 2"]))
+    #expect(lut.domainMin == [-1, -1, -1])
+    #expect(lut.domainMax == [3, 3, 3])
+}
+
+@Test func inputRangeAndDomainLinesOverwriteEachOtherFieldByField() throws {
+    // что позже, то и верно: диапазон ставит и нижнюю, и верхнюю границы, DOMAIN_* — свою
+    let rangeThenMax = try CubeFile.parse(smallCube(header: ["LUT_3D_SIZE 2", "LUT_3D_INPUT_RANGE 0 2", "DOMAIN_MAX 4 5 6"]))
+    #expect(rangeThenMax.domainMin == [0, 0, 0])
+    #expect(rangeThenMax.domainMax == [4, 5, 6])
+    let domainThenRange = try CubeFile.parse(smallCube(header: ["LUT_3D_SIZE 2", "DOMAIN_MIN 1 2 3", "DOMAIN_MAX 9 9 9", "LUT_3D_INPUT_RANGE 0 1"]))
+    #expect(domainThenRange.domainMin == [0, 0, 0])
+    #expect(domainThenRange.domainMax == [1, 1, 1])
+}
+
 @Test func crlfAndBomDoNotGetInTheWay() throws {
     let header = ["# сделано вручную", "TITLE \"x\"", "LUT_3D_SIZE 2"]
     let plain = try CubeFile.parse(smallCube(header: header))
@@ -124,7 +150,7 @@ private func smallCube(header: [String] = ["LUT_3D_SIZE 2"], rows: [String]? = n
 }
 
 @Test func otherKeywordsFromOtherProgramsAreSkipped() throws {
-    let header = ["LUT_IN_VIDEO_RANGE", "LUT_3D_INPUT_RANGE 0.0 1.0", "LUT_3D_SIZE 2", "LUT_OUT_VIDEO_RANGE"]
+    let header = ["LUT_IN_VIDEO_RANGE", "SOME_FUTURE_KEYWORD 1 2 3", "LUT_3D_SIZE 2", "LUT_OUT_VIDEO_RANGE"]
     #expect(try CubeFile.parse(smallCube(header: header)) == ColorLUT.identity(size: 2))
 }
 
@@ -214,6 +240,106 @@ func sizeOutsideTwoToSixtyFiveIsBad(_ size: Int) {
 func badDataRowIsReportedWithItsLine(_ row: String) {
     let text = lines(["LUT_3D_SIZE 2", "0 0 0", row] + Array(identityRows(size: 2).dropFirst(2)))
     #expect(throws: CubeFile.Failure.number(line: 3)) { try CubeFile.parse(text) }
+}
+
+@Test(arguments: [
+    "LUT_3D_INPUT_RANGE", "LUT_3D_INPUT_RANGE 0", "LUT_3D_INPUT_RANGE 0 1 2", "LUT_3D_INPUT_RANGE a b", "LUT_3D_INPUT_RANGE 0 nan",
+    "LUT_3D_INPUT_RANGE 0 1e999", "LUT_3D_INPUT_RANGE 0x0 1", "LUT_3D_INPUT_RANGE 0,0 1",
+])
+func brokenInputRangeLineIsReportedWithItsLine(_ line: String) {
+    #expect(throws: CubeFile.Failure.number(line: 2)) { try CubeFile.parse("LUT_3D_SIZE 2\n\(line)\n" + lines(identityRows(size: 2))) }
+}
+
+@Test func sizeLineAfterDataRowsIsAnErrorAtItsLine() {
+    // LUT_3D_SIZE 2, десять строк, LUT_3D_SIZE 3 и ещё семнадцать. Строк всего 27 = 3³, но по первому размеру сохранено
+    // было лишь 8, и куб из такого набора собрать нельзя: ошибка стоит на строке со вторым размером (12-й)
+    let rows = identityRows(size: 3)
+    let text = lines(["LUT_3D_SIZE 2"] + Array(rows[0..<10]) + ["LUT_3D_SIZE 3"] + Array(rows[10..<27]))
+    #expect(throws: CubeFile.Failure.number(line: 12)) { try CubeFile.parse(text) }
+}
+
+@Test func anySizeLineAfterDataRowsIsRejectedAtItsLine() throws {
+    // все сочетания: первый размер a, n строк данных, второй размер b и остаток до b³ строк
+    for a in 2...4 {
+        for b in 2...5 {
+            let rows = identityRows(size: b)
+            for n in 0...rows.count {
+                let text = lines(["LUT_3D_SIZE \(a)"] + Array(rows[0..<n]) + ["LUT_3D_SIZE \(b)"] + Array(rows[n...]))
+                if n == 0 {
+                    // данных ещё не было — действует последний размер
+                    let lut = try CubeFile.parse(text)
+                    #expect(lut.size == b, "\(a) → \(b)")
+                    #expect(lut.values.count == b * b * b * 3, "\(a) → \(b)")
+                } else {
+                    #expect(throws: CubeFile.Failure.number(line: n + 2), "\(a), \(n) строк, \(b)") { try CubeFile.parse(text) }
+                }
+            }
+        }
+    }
+}
+
+@Test func repeatedSizeBeforeAnyDataLastOneWins() throws {
+    let lut = try CubeFile.parse(lines(["LUT_3D_SIZE 3", "# передумали", "LUT_3D_SIZE 2"] + identityRows(size: 2)))
+    #expect(lut == ColorLUT.identity(size: 2))
+}
+
+/// Случайные числа без сюрпризов — «seed 1», как в `LUTTests`.
+private struct CubeRandom {
+    private var seed: UInt32 = 1
+
+    mutating func int(_ count: Int) -> Int {
+        seed = seed &* 1_664_525 &+ 1_013_904_223
+        return Int((Double(seed >> 8) / 16_777_216) * Double(count))
+    }
+
+    mutating func pick<T>(_ items: [T]) -> T { items[int(items.count)] }
+}
+
+/// Строки, из которых собираются случайные файлы: годные, битые и повторяющие заголовок.
+private let fuzzLines = [
+    "LUT_3D_SIZE 2", "LUT_3D_SIZE 3", "LUT_3D_SIZE 4", "LUT_3D_SIZE 66", "LUT_1D_SIZE 8", "DOMAIN_MIN 0 0 0", "DOMAIN_MAX 1 1 1",
+    "DOMAIN_MAX 2 2 2", "DOMAIN_MIN 1 1 1", "DOMAIN_MAX 0 0 0", "LUT_3D_INPUT_RANGE 0 1", "LUT_3D_INPUT_RANGE 1 0",
+    "TITLE \"x\"", "# комментарий", "", "   ", "LUT_IN_VIDEO_RANGE", "0 0 0", "1 1 1", "0.5 0.25 0.75", "0 0", "abc 0 0",
+    "0 0 0 0", "-1 2 3", "0 0 0", "1 0 1",
+]
+
+/// Случайный файл: либо из чего попало, либо почти настоящий — первый размер, около target³ строк и одна вставка посреди
+/// (чаще всего — второй размер target: строк как раз хватает на него).
+private func fuzzedCube(_ random: inout CubeRandom) -> String {
+    if random.int(2) == 0 {
+        return lines((0..<(1 + random.int(40))).map { _ in random.pick(fuzzLines) })
+    }
+    let first = 2 + random.int(3)
+    let target = 2 + random.int(3)
+    let rows = identityRows(size: target)
+    let count = rows.count - 1 + random.int(3)
+    var data = (0..<count).map { rows[$0 % rows.count] }
+    let twist = random.pick(["", "", "LUT_3D_SIZE \(target)", "LUT_3D_SIZE \(target)", "LUT_3D_SIZE \(first)", "DOMAIN_MAX 2 2 2",
+                             "LUT_3D_INPUT_RANGE 0 2", "# комментарий", "TITLE \"x\"", "0 0", "abc 0 0", "LUT_1D_SIZE 8"])
+    if !twist.isEmpty { data.insert(twist, at: random.int(count + 1)) }
+    return lines(["LUT_3D_SIZE \(first)"] + data)
+}
+
+@Test func parseNeverStopsTheProgramAndAlwaysReturnsAWholeCube() {
+    // ничто из файла не должно дойти до проверок в ColorLUT.init: разбор либо отказывает, либо отдаёт целый куб
+    var random = CubeRandom()
+    var parsed = 0, rejected = 0
+    for _ in 0..<4000 {
+        let text = fuzzedCube(&random)
+        do {
+            let lut = try CubeFile.parse(text)
+            parsed += 1
+            #expect(lut.values.count == lut.size * lut.size * lut.size * 3)
+            #expect(lut.domainMin.count == 3 && lut.domainMax.count == 3)
+        } catch is CubeFile.Failure {
+            rejected += 1
+        } catch {
+            Issue.record("Не та ошибка: \(error)")
+        }
+    }
+    // и успех, и отказ случаются не раз, иначе проверка ни о чём
+    #expect(parsed > 50)
+    #expect(rejected > 1000)
 }
 
 @Test func badNumberBeatsRowCount() {
