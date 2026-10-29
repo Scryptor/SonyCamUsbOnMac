@@ -114,6 +114,7 @@ import local.zve10viewer.settings.ValueFormatter
 import local.zve10viewer.settings.LumaStats
 import local.zve10viewer.sony.SonyProp
 import kotlin.math.sqrt
+import local.zve10viewer.monitor.FocusMarksHelpOffer
 import local.zve10viewer.monitor.MonitorAssist
 import local.zve10viewer.monitor.MonitorTool
 import local.zve10viewer.monitor.Waveform
@@ -214,9 +215,30 @@ class ScreenState {
     /** Подсказка «Фокус касанием»: при включении кнопки (пока не отмечено «Больше не показывать») и по долгому нажатию на неё. */
     var touchFocusHelpOpen by mutableStateOf(false)
 
+    /**
+     * Карточка «Метки фокуса»: сама открывается один раз за запуск, когда шкала с метками появилась на экране впервые (пока не
+     * отмечено «Больше не показывать»), и по долгому нажатию на кнопке времени — всегда.
+     */
+    var focusMarksHelpOpen by mutableStateOf(false)
+    private val focusMarksHelpOffer = FocusMarksHelpOffer()
+
     val overlayOpen: Boolean
         get() = fnOpen || assistOpen || allSettingsOpen || settingsOpen || pillInfo != null || presetMenuOpen || newPresetOpen ||
-            savePresetOpen || presetsOpen || touchFocusHelpOpen
+            savePresetOpen || presetsOpen || touchFocusHelpOpen || focusMarksHelpOpen
+
+    /** Шкала с метками на экране; [doNotShow] — «Больше не показывать» отмечено. Первый раз за запуск открывает карточку. */
+    fun offerFocusMarksHelp(doNotShow: Boolean) {
+        if (focusMarksHelpOffer.shouldOpen(doNotShow)) {
+            closeOverlays()
+            focusMarksHelpOpen = true
+        }
+    }
+
+    /** Открыть карточку «Метки фокуса» (долгое нажатие на кнопке времени): меню и другие подсказки закрываются. */
+    fun openFocusMarksHelp() {
+        closeOverlays()
+        focusMarksHelpOpen = true
+    }
 
     fun togglePillInfo(info: PillInfo) {
         val open = pillInfo != info
@@ -278,6 +300,7 @@ class ScreenState {
 
     fun closeOverlays() {
         touchFocusHelpOpen = false
+        focusMarksHelpOpen = false
         fnOpen = false
         assistOpen = false
         allSettingsOpen = false
@@ -444,7 +467,9 @@ private fun LiveScreen(controller: CameraController, screen: ScreenState) {
             val busy = screen.overlayOpen || controller.review != null || screen.galleryShot != null ||
                 controller.recordingRequest != null || controller.recordingNotice != null ||
                 // держат «T» или «W» — зум не должен оборваться вместе с кнопками
-                controller.zoomDirection != 0
+                controller.zoomDirection != 0 ||
+                // фокус едет к метке: кнопка метки — его стоп и доля пути; итог подписан на 3 с
+                controller.focusPullMark != null || controller.focusPull.caption != null
             if (busy || !controller.prefs.autoHide) {
                 screen.autoHidden = false
             } else if (!screen.autoHidden && System.currentTimeMillis() - screen.lastActivity > controller.prefs.autoHideSeconds * 1000L) {
@@ -785,7 +810,11 @@ private fun Controls(controller: CameraController, screen: ScreenState, feedback
                     // слежение от касания — снять, и когда кнопка «Фокус» уже выключена: камера следит дальше; ручной фокус —
                     // шкала фокуса над строкой значений
                     if (controller.touchCancelAvailable) CancelTouchChip(controller)
-                    if (controller.focusDriveAvailable) FocusScale(controller)
+                    if (controller.focusDriveAvailable) {
+                        // карточка «Метки фокуса» — прямо над шкалой, а не на высоте, подобранной под неё
+                        if (screen.focusMarksHelpOpen) FocusMarksHelpCard(controller, screen)
+                        FocusScale(controller, screen)
+                    }
                     InfoLine(controller) { screen.openFn(it) }
                 }
             }

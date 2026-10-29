@@ -109,7 +109,16 @@ import local.zve10viewer.monitor.Vectorscope
 import local.zve10viewer.monitor.Waveform
 import local.zve10viewer.monitor.FocusDrive
 import local.zve10viewer.monitor.FocusFrame
+import local.zve10viewer.monitor.FocusMarkBook
+import local.zve10viewer.monitor.FocusMarks
+import local.zve10viewer.monitor.FocusMarksText
+import local.zve10viewer.monitor.FocusMover
+import local.zve10viewer.monitor.FocusPosition
+import local.zve10viewer.monitor.FocusPull
+import local.zve10viewer.monitor.FocusPullView
+import local.zve10viewer.monitor.MarkExtras
 import local.zve10viewer.monitor.PowerZoom
+import local.zve10viewer.monitor.get
 import local.zve10viewer.monitor.TouchFocus
 import local.zve10viewer.sony.SonyControl
 import local.zve10viewer.view.ProbeLayout
@@ -387,11 +396,29 @@ class CameraController(private val context: Context, private val scope: Coroutin
     /** Фокус касанием: горит — касание кадра ставит туда фокус. Рамки фокуса камеры видны и без него. */
     var touchFocusOn by mutableStateOf(prefs.touchFocusOn)
         private set
-    /** Единиц Near/Far, которые ещё надо отправить: шкалу тянут быстрее, чем камера отвечает. */
-    private var focusUnits = 0
-    private var focusDriving = false
-    /** Растёт, когда сеанс уходит: цикл шагов фокуса прошлого сеанса останавливается и новому не мешает. */
-    private var focusGeneration = 0
+    /** Метки фокуса A и B всех камер: у каждой свои, до выхода из программы (в настройки не пишутся). */
+    var focusMarkBook by mutableStateOf(FocusMarkBook())
+        private set
+    /** Перевод фокуса к метке для экрана: к какой едет и сколько прошёл, чем кончился (подпись на 3 с), сколько раз кончался. */
+    var focusPull by mutableStateOf(FocusPullView())
+        private set
+    /**
+     * Ход фокуса: ручные шаги Near/Far и перевод к метке — одна очередь команд, одно поколение на сеанс (сеанс уходит — всё это
+     * кончается, [releaseLens]). Устроен в [FocusMover]; камеру и её свойства ему даёт сеанс главной камеры.
+     */
+    private val focusMover = FocusMover(scope, object : FocusMover.Port {
+        override val ready: Boolean get() = session != null && phase == Phase.ready && focusDriveAvailable
+
+        // свойства сеанса, а не копия контроллера: та на один переход позади
+        override val properties: Map<Int, SonyProperty> get() = session?.properties?.value ?: emptyMap()
+        override fun snapshotAgeMs(): Long = session?.snapshotAgeMs() ?: Long.MAX_VALUE
+        override suspend fun refresh() = (session ?: throw gone()).refresh()
+        override suspend fun nearFar(steps: Long): Int = (session ?: throw gone()).control(SonyControl.NEAR_FAR, steps, PtpType.INT16)
+        override suspend fun write(value: Int): Int =
+            (session ?: throw gone()).setQuietly(SonyProp.FOCUS_POSITION_SETTING, value.toLong(), PtpType.UINT16)
+
+        private fun gone() = TransportException("нет сеанса", disconnected = true)
+    }, journal = ::journal, onChange = { focusPull = it })
     /** Команды объектива — по одной и по порядку: «стоп» зума не обгонит «пуск» (Mutex отдаёт замок по очереди). */
     private val lensMutex = kotlinx.coroutines.sync.Mutex()
     /** Красная рамка во время записи — как её рисовать (настройка ⚙). */
@@ -1155,32 +1182,141 @@ class CameraController(private val context: Context, private val scope: Coroutin
             scope.launch { lensMutex.withLock { runCatching { session.control(SonyControl.ZOOM_OPERATION, 0, PtpType.INT8) } } }
         }
         zoomDirection = 0
-        focusUnits = 0
-        focusGeneration++
-        focusDriving = false
+        // шаги фокуса и перевод к метке — тоже команды этого сеанса; подпись прошлого перевода новой камере не принадлежит
+        focusMover.release()
         touchMark = null
     }
 
-    /** Перефокусировка на столько единиц Near/Far (отрицательное — ближе): по одной команде за раз, остальное копится. */
-    fun focusStep(units: Int) {
-        val session = session ?: return
-        if (units == 0 || phase != Phase.ready || !focusDriveAvailable) return
-        focusUnits += units
-        if (focusDriving) return
-        focusDriving = true
-        val generation = focusGeneration
-        scope.launch {
-            try {
-                while (focusUnits != 0 && focusGeneration == generation) {
-                    val next = FocusDrive.commands(focusUnits).firstOrNull() ?: break
-                    focusUnits -= next.toInt()
-                    runCatching { session.control(SonyControl.NEAR_FAR, next, PtpType.INT16) }
-                }
-            } finally {
-                // сеанс ушёл, пока шла команда, — флаг уже сброшен, и новый цикл мог начаться: его не трогаем
-                if (focusGeneration == generation) focusDriving = false
-            }
+    /**
+     * Перефокусировка на столько единиц Near/Far (отрицательное — ближе): по одной команде за раз, остальное копится. Идущий перевод
+     * к метке кончается; у абсолютного фокуса перед шагом камере велено встать там, где она стоит.
+     */
+    fun focusStep(units: Int) = focusMover.step(units)
+
+    // MARK: - Метки фокуса A и B
+
+    /**
+     * Как у этой камеры переводить фокус между метками: абсолютно (0xE042, положение 0xE043) или шагами Near/Far (положение 0xD24C).
+     * null — положения фокуса камера не отдаёт, и метку запомнить нечем.
+     */
+    val focusPullMode: FocusPull.Mode? get() = FocusPosition.mode(properties)
+
+    /** Где фокус сейчас — в единицах режима перевода (0…65535 или 0…100). */
+    val focusPosition: Double? get() = focusPullMode?.let { FocusPosition.current(properties, it) }
+
+    /** Метки есть: шкала фокуса на экране (ручной фокус) и камера отдаёт положение. */
+    val focusMarksAvailable: Boolean get() = focusDriveAvailable && focusPullMode != null
+
+    /** К какой метке («A» или «B») едет фокус; null — не едет. */
+    val focusPullMark: Char? get() = focusPull.mark
+
+    /** Метки и время перевода камеры на связи — в единицах её режима; пустые, пока камеры нет. */
+    val focusMarks: FocusMarks
+        get() {
+            val camera = currentCameraId ?: return FocusMarks()
+            val mode = focusPullMode ?: return FocusMarks(duration = focusMarkBook.duration(camera))
+            return focusMarkBook.marks(camera, mode)
         }
+
+    /** Где метка на линейке, доля 0…1; null — метка пуста. */
+    fun focusMarkFraction(mark: Char): Double? {
+        val mode = focusPullMode ?: return null
+        val position = focusMarks[mark] ?: return null
+        return FocusPosition.fraction(position, mode)
+    }
+
+    /** Касание кнопки метки: пуста — запомнить, где фокус сейчас; задана — перевести фокус к ней; фокус едет к ней — стоп. */
+    fun focusMarkTapped(mark: Char) {
+        if (!focusMarksAvailable) return
+        when (FocusMarkBook.tap(mark, focusMarks, focusPull.mark)) {
+            FocusMarkBook.Tap.save -> focusMarkSave(mark)
+            FocusMarkBook.Tap.go -> focusMarkGo(mark)
+            FocusMarkBook.Tap.stop -> focusPullStop()
+        }
+    }
+
+    /**
+     * «Запомнить здесь»: положение фокуса сейчас — в метку. Фокус едет к этой метке — перевод кончается: цель сменилась. false —
+     * запомнить нечего: камеры, ручного фокуса или положения нет (или связь восстанавливается, и свойства — прежние).
+     */
+    fun focusMarkSave(mark: Char): Boolean {
+        if (phase != Phase.ready || !focusMarksAvailable || mark !in FocusMarkBook.letters) return false
+        val camera = currentCameraId ?: return false
+        val mode = focusPullMode ?: return false
+        val position = focusPosition ?: return false
+        if (focusPull.mark == mark) focusPullStop()
+        focusMarkBook = focusMarkBook.save(mark, position, camera, mode)
+        journal("метки фокуса: $mark = ${FocusPull.roundHalfAway(position).toLong()}")
+        return true
+    }
+
+    /** «Стереть»; перевод к стёртой метке кончается. */
+    fun focusMarkClear(mark: Char) {
+        val camera = currentCameraId ?: return
+        val mode = focusPullMode ?: return
+        if (focusPull.mark == mark) focusPullStop()
+        focusMarkBook = focusMarkBook.clear(mark, camera, mode)
+    }
+
+    /** Время перевода по кругу: 0 → 1 → 2 → 4 → 8 → 0 секунд. Идущий перевод едет с прежним. */
+    fun focusPullCycleTime() {
+        val camera = currentCameraId ?: return
+        focusMarkBook = focusMarkBook.cycleDuration(camera)
+    }
+
+    /** Время перевода из списка (0, 1, 2, 4, 8); false — другое число или камеры нет. */
+    fun setFocusPullTime(seconds: Double): Boolean {
+        val camera = currentCameraId ?: return false
+        focusMarkBook = focusMarkBook.setDuration(seconds, camera) ?: return false
+        return true
+    }
+
+    /** Остановить идущий перевод; у абсолютного фокуса камере велено встать там, где фокус стоит. */
+    fun focusPullStop() = focusMover.stop()
+
+    /**
+     * Перевести фокус к метке за время `focusMarks.duration`. Идущий перевод (к другой метке) уступает новому. false — нельзя: не
+     * ручной фокус, связи нет, метка пуста или положения нет.
+     */
+    fun focusMarkGo(mark: Char): Boolean {
+        if (phase != Phase.ready || !focusMarksAvailable) return false
+        val mode = focusPullMode ?: return false
+        val start = focusPosition ?: return false
+        val marks = focusMarks
+        val target = marks[mark] ?: return false
+        focusMover.go(mark, mode, start, target, marks.duration)
+        return true
+    }
+
+    /** Камера сообщила о смене объектива (0xC21B): метки стёрты, перевод к ним кончился. */
+    private fun lensChanged() {
+        val camera = currentCameraId ?: return
+        focusMover.cancel()
+        focusMarkBook = focusMarkBook.lensChanged(camera)
+        journal("объектив сменился (0xC21B): метки фокуса стёрты")
+    }
+
+    /**
+     * Отладка (DEBUG_LENS, только debug-сборка): extras про метки — `pullTime` (время перевода), `mark` и `markOp` (см. [MarkExtras]);
+     * время ставится раньше метки. Что не понято или не вышло, называется в logcat; что стало — строкой ZVLens `метки: marks A=… B=…`
+     * сразу, не дожидаясь кадров.
+     */
+    fun applyMarkExtras(request: MarkExtras.Request) {
+        if (request.isEmpty) return
+        val parsed = MarkExtras.parse(request)
+        if (parsed.rejected.isNotEmpty()) Log.w("ZVLens", "DEBUG_LENS: не понято ${parsed.rejected.joinToString()} в $request")
+        parsed.pullTime?.let { if (!setFocusPullTime(it)) Log.w("ZVLens", "DEBUG_LENS: время перевода не поставлено — камеры нет") }
+        val mark = parsed.mark
+        val done = when (parsed.op) {
+            null -> true
+            MarkExtras.Op.stop -> true.also { focusPullStop() }
+            MarkExtras.Op.save -> mark != null && focusMarkSave(mark)
+            MarkExtras.Op.go -> mark != null && focusMarkGo(mark)
+            MarkExtras.Op.clear -> true.also { if (mark != null) focusMarkClear(mark) }
+            MarkExtras.Op.tap -> true.also { if (mark != null) focusMarkTapped(mark) }
+        }
+        if (!done) Log.w("ZVLens", "DEBUG_LENS: ${parsed.op} $mark не вышло — ручной фокус, метка или положение фокуса недоступны")
+        Log.i("ZVLens", "метки: " + FocusMarksText.report(focusMarks, focusPull.mark))
     }
 
     fun toggleWaveform() {
@@ -2980,6 +3116,10 @@ class CameraController(private val context: Context, private val scope: Coroutin
         jobs += scope.launch {
             session.properties.collect { apply(it) }
         }
+        // камера сообщила о смене объектива: метки фокуса прежнего ни к чему
+        jobs += scope.launch {
+            session.lensChanges.collect { lensChanged() }
+        }
         jobs += scope.launch {
             session.ended.await()
             onEnded()
@@ -3148,6 +3288,8 @@ class CameraController(private val context: Context, private val scope: Coroutin
 
     private fun apply(snapshot: Map<Int, SonyProperty>) {
         properties = snapshot
+        // вышли из ручного фокуса (Near/Far закрылся): перевод к метке кончился, фокусом занимается камера
+        if (focusMover.isPulling && !focusDriveAvailable) focusMover.cancel()
         assistVideo = mode != CaptureMode.photo
         // «Авто» в LUT идёт за профилем изображения главной камеры: со следующего кадра
         val profile = CameraProfile(snapshot[SonyProp.PICTURE_PROFILE]?.current?.intValue,
@@ -3212,7 +3354,9 @@ class CameraController(private val context: Context, private val scope: Coroutin
             // сами свойства: режим и зона фокуса, функция касания и можно ли касаться и снимать, Near/Far, зум
             listOf(SonyProp.FOCUS_MODE, SonyProp.FOCUS_AREA, SonyProp.TOUCH_FUNCTION, SonyProp.REMOTE_TOUCH_ENABLED,
                 SonyProp.REMOTE_TOUCH_CANCEL_ENABLED, SonyProp.NEAR_FAR_ENABLED, SonyProp.ZOOM_ENABLED, SonyProp.ZOOM_SCALE)
-                .joinToString(" ") { code -> "%X=%s".format(code, value(code)?.let { java.lang.Long.toHexString(it) } ?: "—") }
+                .joinToString(" ") { code -> "%X=%s".format(code, value(code)?.let { java.lang.Long.toHexString(it) } ?: "—") } +
+            // метки фокуса: положения в единицах режима, время перевода и к какой метке едет фокус
+            "; " + FocusMarksText.report(focusMarks, focusPull.mark)
         if (line != lensLogged) {
             lensLogged = line
             Log.i("ZVLens", line)
@@ -3554,7 +3698,6 @@ class CameraController(private val context: Context, private val scope: Coroutin
         focusFrames = emptyList()
         touchMark = null
         zoomDirection = 0
-        focusUnits = 0
         frameTimes.clear()
         frameGaps.clear()
         lastFrameAt = 0L

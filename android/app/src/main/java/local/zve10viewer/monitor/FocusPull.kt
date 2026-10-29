@@ -302,6 +302,13 @@ class FocusPull(
         private const val MIN_GAIN = 0.2
         private const val MAX_GAIN = 20.0
 
+        /**
+         * Допуск «фокус уже у цели» до начала перевода, в единицах режима: у абсолютного фокуса — те же 0,5 % шкалы, по которым
+         * [next] считает перевод готовым; у шагов — `max(1, k₀/2)` при начальном коэффициенте. Один на автомат и на тех, кто
+         * решает «ехать не нужно» (метка, у которой фокус уже стоит), — числа не разойдутся.
+         */
+        fun tolerance(mode: Mode): Double = if (mode == Mode.absolute) ABSOLUTE_TOLERANCE else max(1.0, DEFAULT_GAIN / 2)
+
         /** Кривая перевода 3t² − 2t³: медленно трогается и медленно подходит. t обрезается в 0…1, не-число — 0. */
         fun ease(t: Double): Double {
             val x = if (t.isNaN()) 0.0 else min(max(t, 0.0), 1.0)

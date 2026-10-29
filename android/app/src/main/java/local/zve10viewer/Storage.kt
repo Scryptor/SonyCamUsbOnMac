@@ -162,6 +162,14 @@ class Prefs(context: Context) {
         get() = prefs.getBoolean("touchFocusHelpHidden", false)
         set(value) = prefs.edit().putBoolean("touchFocusHelpHidden", value).apply()
 
+    /**
+     * «Больше не показывать» в карточке «Метки фокуса»: отмечено — сама она не открывается (по долгому нажатию на кнопке времени
+     * открывается всегда). Имя — как у программы для Mac; значение то же: true — галочка стоит.
+     */
+    var focusMarksHelpShown: Boolean
+        get() = prefs.getBoolean("focusMarksHelpShown", false)
+        set(value) = prefs.edit().putBoolean("focusMarksHelpShown", value).apply()
+
     var hapticsEnabled: Boolean
         get() = prefs.getBoolean("hapticsEnabled", true)
         set(value) = prefs.edit().putBoolean("hapticsEnabled", value).apply()

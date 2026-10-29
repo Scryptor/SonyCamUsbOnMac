@@ -1,8 +1,12 @@
 package local.zve10viewer.ui
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -14,6 +18,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -23,11 +28,15 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -35,10 +44,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
@@ -49,13 +62,19 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.delay
 import local.zve10viewer.CameraController
 import local.zve10viewer.monitor.FocusDrive
+import local.zve10viewer.monitor.FocusFlags
 import local.zve10viewer.monitor.FocusFrame
+import local.zve10viewer.monitor.FocusMarksText
 import local.zve10viewer.monitor.FrameOrientation
+import local.zve10viewer.monitor.get
 import local.zve10viewer.monitor.TouchFocus
 import local.zve10viewer.view.OrientedFrame
 
@@ -227,14 +246,24 @@ fun DrawScope.drawFocusFrames(frames: List<FocusFrame>, rect: Rect, mark: Offset
     }
 }
 
+/** Цвета меток: на линейке, в кнопках и в карточке одни и те же, как у программы для Mac. */
+private fun markColor(mark: Char): Color = if (mark == 'A') Color(0xFF59CCFF) else Color(0xFFFF9E33)
+
 /**
  * Шкала фокуса — ручной фокус с экрана (в MF): слева ближе, справа дальше. Кнопки — шаги 7, 3 и 1; перетаскивание по
- * шкале — как поворот кольца фокуса. Метка — где фокус, если камера его отдаёт.
+ * шкале — как поворот кольца фокуса. Метка — где фокус, если камера его отдаёт. Под линейкой — метки фокуса: `[A] [B] [⏱ 2 с]`;
+ * на самой линейке над ней — значки меток, посередине под ней — чем кончился перевод (3 с). Первый раз за запуск, когда шкала с
+ * метками появилась, открывается карточка «Метки фокуса» (над шкалой, её рисует экран).
  */
 @Composable
-fun FocusScale(controller: CameraController) {
+fun FocusScale(controller: CameraController, screen: ScreenState) {
     var width by remember { mutableFloatStateOf(1f) }
     var dragged by remember { mutableFloatStateOf(0f) }
+    val marks = controller.focusMarksAvailable
+    val measurer = rememberTextMeasurer()
+    LaunchedEffect(marks) { if (marks) screen.offerFocusMarksHelp(controller.prefs.focusMarksHelpShown) }
+    // шкала ушла (ручной фокус кончился, элементы спрятаны) — карточка над ней не остаётся открытой
+    DisposableEffect(Unit) { onDispose { screen.focusMarksHelpOpen = false } }
     Row(
         Modifier.background(Panel, RoundedCornerShape(16.dp)).padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -242,7 +271,7 @@ fun FocusScale(controller: CameraController) {
         for (step in listOf(FocusDrive.Step.large, FocusDrive.Step.medium, FocusDrive.Step.small)) FocusKey(controller, step, nearer = true)
         Column(Modifier.widthIn(min = 320.dp).width(360.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Canvas(
-                Modifier.fillMaxWidth().height(34.dp).onSizeChanged { width = it.width.toFloat().coerceAtLeast(1f) }
+                Modifier.fillMaxWidth().height(34.dp + (if (marks) FLAGS_HEIGHT else 0.dp)).onSizeChanged { width = it.width.toFloat().coerceAtLeast(1f) }
                     .semantics { contentDescription = "Шкала фокуса: тяните влево — ближе, вправо — дальше" }
                     .pointerInput(Unit) {
                         detectHorizontalDragGestures(onDragEnd = { dragged = 0f }, onDragCancel = { dragged = 0f }) { change, amount ->
@@ -255,28 +284,225 @@ fun FocusScale(controller: CameraController) {
                         }
                     },
             ) {
+                // над линейкой, пока метки есть, — полоса под значки меток
+                val flags = if (marks) FLAGS_HEIGHT.toPx() else 0f
+                val barHeight = size.height - flags
                 // деления — как на кольце фокуса; сдвигаются, пока шкалу тянут
                 val spacing = 14.dp.toPx()
                 var x = ((dragged % spacing) + spacing) % spacing
-                val mid = size.height / 2
+                val mid = flags + barHeight / 2
                 while (x < size.width) {
                     drawLine(Color.White.copy(alpha = 0.4f), Offset(x, mid - 6.dp.toPx()), Offset(x, mid + 6.dp.toPx()), 1.dp.toPx())
                     x += spacing
                 }
                 controller.focalPosition?.let { position ->
                     val px = size.width * position / 100f
-                    drawRoundRect(Color(0xFFFFD60A), Offset(px - 2.dp.toPx(), 3.dp.toPx()), Size(4.dp.toPx(), size.height - 6.dp.toPx()),
-                        androidx.compose.ui.geometry.CornerRadius(2.dp.toPx()))
+                    drawRoundRect(Color(0xFFFFD60A), Offset(px - 2.dp.toPx(), flags + 3.dp.toPx()), Size(4.dp.toPx(), barHeight - 6.dp.toPx()),
+                        CornerRadius(2.dp.toPx()))
                 }
+                if (marks) drawFlags(controller, measurer, flags)
             }
             Row {
                 Text("ближе", color = Color.White.copy(alpha = 0.75f), fontSize = 13.sp)
-                Text("шкала фокуса", color = Color.White.copy(alpha = 0.5f), fontSize = 13.sp, modifier = Modifier.weight(1f),
-                    textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                // посередине: чем кончился перевод к метке (3 с), иначе — что это за шкала
+                val caption = controller.focusPull.caption
+                Text(caption ?: FocusMarksText.CAPTION_IDLE, color = if (caption == null) Color.White.copy(alpha = 0.5f) else Color.White,
+                    fontSize = 13.sp, fontWeight = if (caption == null) FontWeight.Normal else FontWeight.SemiBold, maxLines = 1,
+                    softWrap = false, modifier = Modifier.weight(1f), textAlign = androidx.compose.ui.text.style.TextAlign.Center)
                 Text("дальше", color = Color.White.copy(alpha = 0.75f), fontSize = 13.sp)
             }
+            if (marks) MarksRow(controller, screen)
         }
         for (step in listOf(FocusDrive.Step.small, FocusDrive.Step.medium, FocusDrive.Step.large)) FocusKey(controller, step, nearer = false)
+    }
+}
+
+/** Высота полосы над линейкой под значки меток, когда метки есть. */
+private val FLAGS_HEIGHT = 18.dp
+
+/** Плашка значка метки на линейке: ширина и высота (над остриём). */
+private val FLAG_BADGE_WIDTH = 16.dp
+private val FLAG_BADGE_HEIGHT = 14.dp
+
+/**
+ * Значки меток на линейке: буква на цветной плашке и остриё к месту на линейке. Рядом друг с другом плашки расходятся, чтобы не
+ * закрывать буквы ([FocusFlags]); остриё остаётся там, где метка.
+ */
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawFlags(
+    controller: CameraController, measurer: androidx.compose.ui.text.TextMeasurer, strip: Float,
+) {
+    val marks = listOf('A', 'B').mapNotNull { mark -> controller.focusMarkFraction(mark)?.let { mark to it } }
+    val badgeWidth = FLAG_BADGE_WIDTH.toPx()
+    val badgeHeight = FLAG_BADGE_HEIGHT.toPx()
+    for (flag in FocusFlags.layout(marks, size.width, badgeWidth)) {
+        val color = markColor(flag.mark)
+        val half = 3.5.dp.toPx()
+        val pointer = Path().apply {
+            moveTo(flag.tip - half, badgeHeight - 1.dp.toPx())
+            lineTo(flag.tip + half, badgeHeight - 1.dp.toPx())
+            lineTo(flag.tip, strip)
+            close()
+        }
+        drawPath(pointer, color)
+        drawRoundRect(color, Offset(flag.center - badgeWidth / 2, 0f), Size(badgeWidth, badgeHeight), CornerRadius(3.dp.toPx()))
+        val letter = measurer.measure(flag.mark.toString(), TextStyle(color = Color.Black, fontSize = 10.sp, fontWeight = FontWeight.ExtraBold))
+        drawText(letter, topLeft = Offset(flag.center - letter.size.width / 2f, badgeHeight / 2 - letter.size.height / 2f))
+    }
+}
+
+/** Строка под линейкой: метки A и B, справа — время перевода. */
+@Composable
+private fun MarksRow(controller: CameraController, screen: ScreenState) {
+    Row(
+        Modifier.fillMaxWidth().padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        MarkButton(controller, screen, 'A', distance = null)
+        MarkButton(controller, screen, 'B', distance = null)
+        Spacer(Modifier.weight(1f))
+        TimeChip(controller, screen)
+    }
+}
+
+/**
+ * Кнопка метки. Пустая — «A+»: касание запоминает, где фокус. Заданная — «A»: касание переводит фокус к ней; рядом с буквой — место
+ * для короткой подписи расстояния, если камера дала данные объектива («A 1,2 м»). Пока фокус едет, кнопка заливается по доле пути
+ * и показывает значок «стоп» — касание её же останавливает; на конце мигает один раз. Долгое нажатие — меню «Запомнить здесь» /
+ * «Стереть».
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun MarkButton(controller: CameraController, screen: ScreenState, mark: Char, distance: String?) {
+    val marks = controller.focusMarks
+    val isSet = marks[mark] != null
+    val moving = controller.focusPullMark == mark
+    val color = markColor(mark)
+    val shape = RoundedCornerShape(10.dp)
+    var menu by remember { mutableStateOf(false) }
+    // конец перевода: вспышка один раз на каждый конец (а не при каждом появлении кнопки на экране)
+    val ends = controller.focusPull.ends[mark] ?: 0
+    var seenEnds by remember { mutableIntStateOf(ends) }
+    val flash = remember { Animatable(0f) }
+    LaunchedEffect(ends) {
+        if (ends != seenEnds) {
+            seenEnds = ends
+            flash.snapTo(0.7f)
+            flash.animateTo(0f, tween(400, easing = LinearEasing))
+        }
+    }
+    // меню открыто — элементы не прячутся вместе с ним
+    LaunchedEffect(menu) {
+        while (menu) {
+            screen.noteActivity()
+            delay(1000)
+        }
+    }
+    Box {
+        Row(
+            Modifier.width(if (distance == null) 64.dp else 84.dp).height(40.dp).clip(shape)
+                .background(if (isSet) color.copy(alpha = 0.22f) else Color.White.copy(alpha = 0.1f))
+                // доля пути — заливкой слева направо; читается при рисовании, перекомпоновки на каждый тик не нужно
+                .drawBehind {
+                    if (moving) drawRect(color.copy(alpha = 0.6f), size = Size(size.width * (controller.focusPull.progress ?: 0.0).toFloat(), size.height))
+                }
+                .then(if (isSet) Modifier.border(1.dp, color.copy(alpha = 0.85f), shape) else Modifier)
+                .drawWithContent {
+                    drawContent()
+                    if (flash.value > 0f) drawRect(Color.White.copy(alpha = flash.value))
+                }
+                .semantics {
+                    contentDescription = FocusMarksText.buttonDescription(mark, isSet, moving, marks.duration, distance)
+                }
+                .combinedClickable(onClick = { controller.focusMarkTapped(mark) }, onLongClick = { menu = true }),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center,
+        ) {
+            Text(FocusMarksText.buttonLabel(mark, isSet), color = Color.White.copy(alpha = if (isSet) 1f else 0.85f), fontSize = 16.sp,
+                fontWeight = FontWeight.Bold, maxLines = 1)
+            if (distance != null) {
+                Text(" $distance", color = Color.White.copy(alpha = 0.85f), fontSize = 12.sp, maxLines = 1)
+            }
+            // едет — значок «стоп»: касание остановит
+            if (moving) Box(Modifier.padding(start = 6.dp).size(9.dp).background(Color.White, RoundedCornerShape(2.dp)))
+        }
+        DropdownMenu(menu, onDismissRequest = { menu = false }) {
+            DropdownMenuItem(text = { Text(FocusMarksText.SAVE_HERE) }, onClick = {
+                menu = false
+                controller.focusMarkSave(mark)
+            })
+            DropdownMenuItem(text = { Text(FocusMarksText.ERASE) }, enabled = isSet, onClick = {
+                menu = false
+                controller.focusMarkClear(mark)
+            })
+        }
+    }
+}
+
+/** Время перевода по кругу: 0 → 1 → 2 → 4 → 8 с. Долгое нажатие — карточка «Метки фокуса». */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun TimeChip(controller: CameraController, screen: ScreenState) {
+    val seconds = controller.focusMarks.duration
+    Row(
+        Modifier.width(72.dp).height(40.dp).clip(RoundedCornerShape(10.dp)).background(Color.White.copy(alpha = 0.1f))
+            .semantics { contentDescription = FocusMarksText.timeDescription(seconds) }
+            .combinedClickable(onClick = { controller.focusPullCycleTime() }, onLongClick = { screen.openFocusMarksHelp() }),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center,
+    ) {
+        // секундомер: циферблат, стрелка и кнопка сверху
+        Canvas(Modifier.size(14.dp)) {
+            val unit = size.minDimension / 14f
+            val stroke = 1.6f * unit
+            drawCircle(Color.White.copy(alpha = 0.9f), 5f * unit, Offset(7f * unit, 8f * unit), style = Stroke(stroke))
+            drawLine(Color.White.copy(alpha = 0.9f), Offset(7f * unit, 8f * unit), Offset(7f * unit, 5f * unit), stroke, StrokeCap.Round)
+            drawLine(Color.White.copy(alpha = 0.9f), Offset(5.5f * unit, 1.5f * unit), Offset(8.5f * unit, 1.5f * unit), stroke, StrokeCap.Round)
+        }
+        Text(" " + FocusMarksText.time(seconds), color = Color.White.copy(alpha = 0.9f), fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
+            maxLines = 1, style = TextStyle(fontFeatureSettings = "tnum"))
+    }
+}
+
+/**
+ * Карточка «Метки фокуса»: что делают «A+» и «A», время перевода и долгое нажатие. Открывается сама, когда шкала с метками
+ * появилась впервые за запуск (пока не отмечено «Больше не показывать»), и по долгому нажатию на кнопке времени; закрывается
+ * «Понятно» или касанием мимо.
+ */
+@Composable
+fun FocusMarksHelpCard(controller: CameraController, screen: ScreenState) {
+    var hidden by remember { mutableStateOf(controller.prefs.focusMarksHelpShown) }
+    Column(
+        Modifier.width(440.dp).background(Color(0xF71C1C1E), RoundedCornerShape(14.dp))
+            // касания по карточке не уходят к кадру и кнопкам под ней
+            .pointerInput(Unit) { detectTapGestures { } }
+            .padding(18.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                for (mark in listOf('A', 'B')) {
+                    Text(mark.toString(), color = Color.Black, fontSize = 13.sp, fontWeight = FontWeight.ExtraBold,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                        modifier = Modifier.width(22.dp).background(markColor(mark), RoundedCornerShape(5.dp)).padding(vertical = 2.dp))
+                }
+            }
+            Text(FocusMarksText.HELP_TITLE, color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+        }
+        Text(FocusMarksText.HELP_MAIN, color = Color.White, fontSize = 15.sp, lineHeight = 20.sp)
+        Text(FocusMarksText.HELP_TIME, style = TextStyle(color = Secondary, fontSize = 14.sp, lineHeight = 19.sp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.weight(1f).clickable {
+                hidden = !hidden
+                controller.prefs.focusMarksHelpShown = hidden
+            }, verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(hidden, onCheckedChange = {
+                    hidden = it
+                    controller.prefs.focusMarksHelpShown = it
+                })
+                Text("Больше не показывать", color = Color.White, fontSize = 14.sp)
+            }
+            Text("Понятно", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Medium,
+                modifier = Modifier.background(Accent, RoundedCornerShape(9.dp)).clickable { screen.focusMarksHelpOpen = false }
+                    .padding(horizontal = 16.dp, vertical = 9.dp))
+        }
     }
 }
 

@@ -6,11 +6,15 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import local.zve10viewer.ptp.PtpReply
@@ -24,6 +28,7 @@ import local.zve10viewer.sony.DeviceInfo
 import local.zve10viewer.sony.LiveViewFrame
 import local.zve10viewer.sony.ObjectInfo
 import local.zve10viewer.sony.Sony
+import local.zve10viewer.sony.SonyEvent
 import local.zve10viewer.sony.SonyOp
 import local.zve10viewer.sony.SonyProp
 import local.zve10viewer.sony.SonyProperty
@@ -117,6 +122,25 @@ class CameraSession(private val transport: PtpTransport, private val timing: Ses
     /** Последнее чтение свойств камеры. */
     val properties: StateFlow<Map<Int, SonyProperty>> = _properties
 
+    /** Когда свойства перечитаны в последний раз (System.nanoTime); [Long.MIN_VALUE] — ни разу. */
+    @Volatile private var refreshedAt = Long.MIN_VALUE
+
+    /**
+     * Сколько миллисекунд назад свойства перечитаны (событием камеры или по запросу); [Long.MAX_VALUE] — ни разу. Одинаковое чтение
+     * не меняет [properties] (StateFlow не повторяет равное), поэтому возраст снимка — не по их выдаче, а по самому обмену.
+     */
+    fun snapshotAgeMs(): Long =
+        if (refreshedAt == Long.MIN_VALUE) Long.MAX_VALUE else maxOf(0L, (System.nanoTime() - refreshedAt) / 1_000_000)
+
+    private val lensChangeEvents = MutableSharedFlow<Unit>(extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+
+    /**
+     * Камера сообщила о смене объектива (событие 0xC21B, у новых камер Sony): по одному значению на событие каждому слушателю. Событие,
+     * пришедшее до подписки, не повторяется. Поток не кончается вместе с сеансом — слушатель живёт в корутине сеанса и уходит с ней.
+     * Нужен тем, кто хранит что-то по объективу, — например, метки фокуса.
+     */
+    val lensChanges: SharedFlow<Unit> = lensChangeEvents.asSharedFlow()
+
     /** Завершается, когда сеанс закрыт (камеру отключили или связь оборвалась). */
     val ended = CompletableDeferred<Unit>()
     private var eventJob: Job? = null
@@ -175,6 +199,7 @@ class CameraSession(private val transport: PtpTransport, private val timing: Ses
     suspend fun refresh() {
         val reply = call(SonyOp.GET_ALL_EXT_PROP_INFO)
         _properties.value = SonyPropertyParser.parse(reply.data)
+        refreshedAt = System.nanoTime()
     }
 
     /** Записывает значение и ждёт, пока камера подтвердит его чтением. */
@@ -349,10 +374,13 @@ class CameraSession(private val transport: PtpTransport, private val timing: Ses
                 android.util.Log.d("ZVFrames", "событие 0xC203 → свойства перечитаны за %.0f мс".format((System.nanoTime() - t0) / 1e6))
             }
             transport.events.collect { event ->
-                if (event.code == Sony.PROPERTY_CHANGED_EVENT) {
-                    refresher.request()
-                } else {
-                    android.util.Log.d("ZVFrames", "событие 0x%04X".format(event.code))
+                when (event.code) {
+                    Sony.PROPERTY_CHANGED_EVENT -> refresher.request()
+                    SonyEvent.LENS_INFO_CHANGED -> {
+                        lensChangeEvents.tryEmit(Unit)
+                        android.util.Log.d("ZVFrames", "событие 0x%04X".format(event.code))
+                    }
+                    else -> android.util.Log.d("ZVFrames", "событие 0x%04X".format(event.code))
                 }
             }
             // поток событий закончился — камера отключена
@@ -363,6 +391,13 @@ class CameraSession(private val transport: PtpTransport, private val timing: Ses
     /** Команда управления 0x9207 со значением своего типа (точка AF, зум, Near/Far); отдаёт код ответа камеры. */
     suspend fun control(code: Int, value: Long, type: Int): Int =
         raw(SonyOp.CONTROL_DEVICE, listOf(code.toLong()), PtpValue.encode(value, type)).code
+
+    /**
+     * Записать число в свойство без ожидания подтверждения и без проверок — для хода фокуса (0xE042, раз в 100 мс): значение своего
+     * типа; отдаёт код ответа камеры, а не бросает на отказе — отказ называет вызывающий. Обрыв связи закрывает сеанс, как везде.
+     */
+    suspend fun setQuietly(code: Int, value: Long, type: Int): Int =
+        raw(SonyOp.SET_EXT_PROP_VALUE, listOf(code.toLong()), PtpValue.encode(value, type)).code
 
     /** Кнопка 0x9207: нажать и отпустить (снять касание и т. п.); отдаёт код ответа на отпускание. */
     suspend fun pressButton(code: Int): Int {

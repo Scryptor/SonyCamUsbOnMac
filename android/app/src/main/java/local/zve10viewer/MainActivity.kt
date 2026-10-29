@@ -17,6 +17,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import local.zve10viewer.monitor.AssistExtras
+import local.zve10viewer.monitor.MarkExtras
 import local.zve10viewer.settings.WiFiAddress
 import local.zve10viewer.ui.App
 import local.zve10viewer.ui.FilePickers
@@ -120,8 +121,11 @@ class MainActivity : ComponentActivity() {
     /**
      * Фокус и зум с экрана: `… -a local.zve10viewer.DEBUG_LENS --ez touch true|false` — режим «фокус касанием»,
      * `--ef x 0.3 --ef y 0.4` — фокус в эту точку кадра — экранные доли, каким его видно (при зеркале точка AF камеры зеркальна:
-     * x 0,3 → 0,7), `--ez cancel true` — снять слежение, `--es zoom tele|wide|stop`, `--ei focus -7` — шкала фокуса. Что вышло —
-     * в logcat с тегом ZVLens: сразу строка «касание: экран … → камера …», потом рамки камеры в её долях.
+     * x 0,3 → 0,7), `--ez cancel true` — снять слежение, `--es zoom tele|wide|stop`, `--ei focus -7` — шкала фокуса. Метки фокуса —
+     * `--es mark A|B` с `--es markOp save|go|clear|tap|stop` (без `markOp` — `tap`, как касание кнопки метки; `stop` метки не
+     * требует) и `--ei pullTime 0|1|2|4|8` (время перевода, секунд; ставится раньше метки: `--ei pullTime 4 --es mark A --es markOp
+     * go`). Что вышло — в logcat с тегом ZVLens: сразу строка «касание: экран … → камера …», потом рамки камеры в её долях; метки —
+     * строка `метки: marks A=… B=… pull=… moving=…` сразу и в периодической строке, начало и конец перевода — в журнале (тег ZVLink).
      */
     private fun debugLens(intent: Intent) {
         if (intent.hasExtra("touch") && intent.getBooleanExtra("touch", false) != controller.touchFocusOn) controller.toggleTouchFocus()
@@ -135,6 +139,8 @@ class MainActivity : ComponentActivity() {
             "stop" -> controller.zoom(0)
         }
         if (intent.hasExtra("focus")) controller.focusStep(intent.getIntExtra("focus", 0))
+        controller.applyMarkExtras(MarkExtras.Request(mark = extra(intent, "mark"), markOp = extra(intent, "markOp"),
+            pullTime = extra(intent, "pullTime")))
     }
 
     override fun onNewIntent(intent: Intent) {
