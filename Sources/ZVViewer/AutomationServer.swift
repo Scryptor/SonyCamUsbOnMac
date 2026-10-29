@@ -562,6 +562,9 @@ final class AutomationServer {
                 return ["mode": trace.counts.mode.rawValue, "columns": trace.counts.columns, "white": trace.white,
                         "low": range?.low ?? NSNull(), "high": range?.high ?? NSNull()]
             } ?? NSNull(),
+            "picture": pictureState(),
+            "vectorscope": vectorscopeState(),
+            "probe": probeState(),
             "lens": [
                 "controls": controller.controlCodes.sorted().map { String(format: "0x%04X", $0) },
                 "touchFocus": controller.touchFocusMethod?.rawValue ?? NSNull(),
@@ -675,6 +678,39 @@ final class AutomationServer {
         ]
         if let frame = controller.frame { result["frameSize"] = [frame.width, frame.height] }
         return result
+    }
+
+    /// Картинка на экране: зеркало; LUT — что выбрано (`mode`), какой встроенный на самом деле (`resolved`: у «Авто» по профилю
+    /// камеры, у «Выкл» и «Свой» — null), выбранный свой файл и считается ли помощь по картинке с LUT (`scopes`); белый уровень
+    /// помощи (255 с LUT и `scopes`, иначе 234 в видео и 255 в фото) и средняя яркость кадра помощи 0…255.
+    private func pictureState() -> [String: Any] {
+        let assist = screen.assist
+        return [
+            "orientation": assist.orientation.rawValue,
+            "lut": ["mode": assist.lut.rawValue, "resolved": controller.resolvedLUT?.rawValue ?? NSNull(),
+                    "file": assist.lutFile ?? NSNull(), "scopes": assist.lutScopes] as [String: Any],
+            "whiteLevel": controller.whiteLevel ?? NSNull(),
+            "meanLuma": controller.meanLuma.map { ($0 * 10).rounded() / 10 } ?? NSNull(),
+        ]
+    }
+
+    /// Вектороскоп: включён ли, масштаб (1 или 2) и центр самой полной корзины в Cb и Cr (null — выключен или кадра нет).
+    private func vectorscopeState() -> [String: Any] {
+        let peak = controller.vectorscope?.peak
+        return ["on": screen.assist.vectorscope, "zoom": screen.assist.vectorscopeZoom,
+                "peakCb": peak.map { ($0.cb * 10000).rounded() / 10000 } ?? NSNull(),
+                "peakCr": peak.map { ($0.cr * 10000).rounded() / 10000 } ?? NSNull()]
+    }
+
+    /// Пипетка: включена ли, где стоит (доли кадра, каким он виден; по умолчанию центр) и что показала — яркость в процентах
+    /// белого превью, R, G, B 0…255 и зона false color (`crushed`, `shadows`, `middleGray`, `skin`, `nearWhite`, `clipped`;
+    /// между зонами и без показания — null).
+    private func probeState() -> [String: Any] {
+        let point = controller.assistInput.current.probePoint
+        let reading = controller.probeReading
+        return ["on": screen.assist.probe, "x": (point.x * 10000).rounded() / 10000, "y": (point.y * 10000).rounded() / 10000,
+                "percent": reading?.percent ?? NSNull(), "r": reading?.r ?? NSNull(), "g": reading?.g ?? NSNull(),
+                "b": reading?.b ?? NSNull(), "zone": reading?.zone?.rawValue ?? NSNull()]
     }
 
     /// Лента камер: главная и камеры в ленте по порядку; пусто — на связи одна камера.

@@ -57,7 +57,24 @@ public enum BuiltinLUT: String, CaseIterable, Sendable {
         return ColorLUT(size: size, values: values)
     }
 
+    /// Куб 33³ для экрана: строится при первом обращении и дальше берётся из памяти — один на каждый вид, на всю программу.
+    /// Тот же массив чисел каждый раз, так что сравнение кубов (`==`) и передача в кадровый цикл стоят почти ничего.
+    public var cube: ColorLUT {
+        Self.cubes.lock()
+        defer { Self.cubes.unlock() }
+        if let made = Self.made[self] { return made }
+        let made = make(size: Self.screenCubeSize)
+        Self.made[self] = made
+        return made
+    }
+
+    /// Точек на ребре куба для экрана: 33.
+    public static let screenCubeSize = 33
+
     // MARK: - Внутренности
+
+    private static let cubes = NSLock()
+    nonisolated(unsafe) private static var made: [BuiltinLUT: ColorLUT] = [:]
 
     private func linear(_ v: Double) -> Double {
         switch self {

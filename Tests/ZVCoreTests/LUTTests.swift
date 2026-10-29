@@ -601,3 +601,30 @@ func makeFollowsTheExactPathAlongTheGreyAxis(_ lut: BuiltinLUT) {
     #expect(LUTChoice.resolve(.hlg, pictureProfile: 8, ppGamma: nil, colorMode: nil, cameraConverts: true) == .hlg)
     #expect(LUTChoice.resolve(.auto, pictureProfile: 8, ppGamma: nil, colorMode: nil, cameraConverts: false) == .slog3cine)
 }
+
+// MARK: - Куб для экрана
+
+@Test func screenCubeIsMadeOncePerKindAndShared() {
+    for kind in BuiltinLUT.allCases {
+        let first = kind.cube, second = kind.cube
+        #expect(first.size == BuiltinLUT.screenCubeSize && first.size == 33)
+        #expect(first == kind.make(size: 33), "\(kind): куб как у make(size: 33)")
+        // один и тот же массив в памяти, а не копия на каждый вызов
+        let sameStorage = first.values.withUnsafeBufferPointer { a in second.values.withUnsafeBufferPointer { b in a.baseAddress == b.baseAddress } }
+        #expect(sameStorage, "\(kind): куб один на программу")
+    }
+}
+
+@Test func screenCubesOfDifferentKindsDiffer() {
+    #expect(BuiltinLUT.slog3cine.cube != BuiltinLUT.slog3.cube)
+    #expect(BuiltinLUT.slog2.cube != BuiltinLUT.hlg.cube)
+}
+
+@Test func screenCubeIsSafeToAskForFromManyThreads() async {
+    await withTaskGroup(of: Int.self) { group in
+        for _ in 0..<8 {
+            group.addTask { BuiltinLUT.allCases.reduce(0) { $0 + $1.cube.size } }
+        }
+        for await total in group { #expect(total == 4 * 33) }
+    }
+}

@@ -31,6 +31,18 @@ final class CameraController {
     @ObservationIgnored let assistInput = AssistInput()
     /// Волновая форма последнего кадра; nil — выключена.
     private(set) var waveform: WaveformTrace?
+    /// Вектороскоп последнего кадра; nil — выключен.
+    private(set) var vectorscope: VectorscopeTrace?
+    /// Что показала пипетка по последнему кадру; nil — выключена.
+    private(set) var probeReading: ColorProbe.Reading?
+    /// Белый уровень и средняя яркость (0…255) кадра, по которому считается помощь, — для API и отладки; кадра нет — nil.
+    @ObservationIgnored private(set) var whiteLevel: Int?
+    @ObservationIgnored private(set) var meanLuma: Double?
+    /// Зеркало, переворот и LUT картинки: один объект на программу, считает в потоке кадров.
+    @ObservationIgnored private let pictureTransform = PictureTransform()
+    /// Встроенный LUT, который сейчас на картинке: выбранный в «Мониторе» рукой, а у «Авто» — по профилю изображения главной
+    /// камеры (следует за ним с ближайшего кадра); nil — встроенного нет («Выкл», «Свой», «Авто» без профиля).
+    var resolvedLUT: BuiltinLUT? { assistInput.current.builtinLUT }
     /// Эталонный кадр для наложения: текущий кадр или снимок из галереи. Хранится в файле — переживает перезапуск.
     private(set) var reference: ReferenceFrame?
     /// Команды 0x9207, которые знает камера на связи: по ним видно, есть ли фокус касанием, зум, Near/Far.
@@ -2087,14 +2099,23 @@ final class CameraController {
             }
         })
         let assistInput = self.assistInput
+        let transform = pictureTransform
         tasks.append(Task.detached(priority: .userInitiated) { [weak self] in
             for await sample in frames {
-                guard let image = Self.decode(sample.jpeg) else { continue }
-                let levels = Self.histogramLevels(of: image)
+                guard let decoded = Self.decode(sample.jpeg) else { continue }
+                // одно состояние помощи на весь кадр: картинка, уровни, белый и помощь видят одни и те же настройки
+                let input = assistInput.current
+                let lut = input.lut
+                // зеркало и LUT — один раз, сразу после декодирования; ни того, ни другого — кадр остаётся как есть
+                let picture = transform.apply(decoded, orientation: input.assist.orientation, lut: lut,
+                                              needPlain: lut != nil && !input.assist.lutScopes)
+                // помощь — по картинке с LUT или, если она «без LUT», по сигналу камеры, только повёрнутому
+                let analysed = picture.plain ?? picture.display
+                let levels = Self.histogramLevels(of: analysed)
                 // помощь в кадре и волновая форма — по тому же кадру и вместе с ним: подсветка не отстаёт от картинки
-                let tools = FrameTools.analyze(image, levels: levels, input: assistInput.current)
+                let tools = FrameTools.analyze(analysed, levels: levels, input: input)
                 guard !Task.isCancelled else { break }
-                await self?.show(image, sample: sample, levels: levels, tools: tools)
+                await self?.show(picture.display, sample: sample, levels: levels, tools: tools)
             }
         })
     }
@@ -2103,6 +2124,10 @@ final class CameraController {
         properties = snapshot
         followPresetMode()
         assistInput.setVideo(mode != .photo)
+        // «Авто» в LUT идёт за профилем изображения главной камеры: со следующего кадра
+        assistInput.setCamera(pictureProfile: snapshot[SonyProp.pictureProfile]?.current.intValue,
+                              gamma: snapshot[SonyProp.ppGamma]?.current.intValue,
+                              colorMode: snapshot[SonyProp.ppColorMode]?.current.intValue)
         let recording = snapshot[SonyProp.movieRecordingState]?.current.intValue == 1
         if recording != (recordingStartedAt != nil) { note(recording ? "запись: камера пишет" : "запись: камера не пишет") }
         if recording, recordingStartedAt == nil { recordingStartedAt = Date() }
@@ -2119,6 +2144,13 @@ final class CameraController {
         if focusFrames != sample.focusFrames { focusFrames = sample.focusFrames }
         assistOverlay = tools.overlay
         waveform = tools.waveform
+        if let pixels = tools.vectorscope {
+            vectorscope = VectorscopeTrace(pixels: pixels, zoom: tools.vectorscopeZoom, peak: tools.vectorscopePeak)
+        } else if vectorscope != nil {
+            vectorscope = nil
+        }
+        if probeReading != tools.probe { probeReading = tools.probe }
+        meanLuma = tools.meanLuma
         if !hasFrame { hasFrame = true }
         lastJPEG = sample.jpeg
         let now = Date()
@@ -2132,8 +2164,10 @@ final class CameraController {
             if let short = sample.shortReplySeconds { qualityPolicy.noteRTT(short, at: now) }
             qualityPolicy.record(bytes: sample.bytes, seconds: sample.seconds, level: level, at: now)
         }
-        // в видео белое в live view — 234, в фото — 255: шкала гистограммы — до белого
-        let white = LumaStats.whiteLevel(levels: levels, video: mode != .photo)
+        // в видео белое в live view — 234, в фото — 255, у картинки с LUT — 255: шкала гистограммы — до белого, того же, что у
+        // помощи (его определил поток кадров)
+        let white = tools.white
+        whiteLevel = white
         histogram = levels.isEmpty ? [] : LumaHistogram.bins(levels: levels, whiteLevel: white)
         histogramStats = LumaStats(levels: levels, whiteLevel: white)
         if let lastFrameAt { frameGaps.append((now, now.timeIntervalSince(lastFrameAt))) }
@@ -2292,6 +2326,10 @@ final class CameraController {
         histogramStats = nil
         assistOverlay = nil
         waveform = nil
+        vectorscope = nil
+        probeReading = nil
+        whiteLevel = nil
+        meanLuma = nil
         controlCodes = []
         focusFrames = []
         touchMark = nil
@@ -2302,6 +2340,8 @@ final class CameraController {
         frameGapMs = 0
         isFrameStale = false
         properties = [:]
+        // камеры нет — «Авто» не по чему выбирать
+        assistInput.setCamera(pictureProfile: nil, gamma: nil, colorMode: nil)
         deviceInfo = nil
         isRecording = false
         recordingStartedAt = nil

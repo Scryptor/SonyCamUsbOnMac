@@ -3,8 +3,8 @@ import os
 import SwiftUI
 import ZVCore
 
-/// Что считать для помощи в кадре — его читает поток кадров, а меняют экран (инструменты, увеличение) и камера (фото
-/// или видео: от этого белый уровень превью).
+/// Что считать для помощи в кадре и как преобразовать картинку — его читает поток кадров, а меняют экран (инструменты,
+/// увеличение, пипетка) и камера (фото или видео: от этого белый уровень превью; профиль изображения: от него «Авто» в LUT).
 final class AssistInput: Sendable {
     struct State: Sendable {
         var assist = MonitorAssist()
@@ -16,9 +16,32 @@ final class AssistInput: Sendable {
         var video = true
         /// Волновая форма: какая; nil — выключена.
         var waveform: Waveform.Mode?
+        /// Свойства главной камеры, по которым «Авто» выбирает LUT: профиль изображения 0xD23F, гамма профиля 0xD0E1 и его
+        /// цвет 0xD0E9. nil — камеры нет или такого свойства у неё нет (у ZV-E10 гаммы и цвета нет).
+        var pictureProfile: Int64?
+        var ppGamma: Int64?
+        var colorMode: Int64?
+        /// Куб своего LUT (режим «Свой»): кладёт тот, кто умеет читать файлы (хранилище LUT), по выбранному `assist.lutFile`.
+        /// Пока файла нет или он не читается — nil, и «Свой» не меняет картинку.
+        var fileLUT: ColorLUT?
+        /// Пипетка: точка в долях кадра, каким он виден (с зеркалом — уже повёрнутого); nil — не ставили, тогда центр.
+        var probe: CGPoint?
 
-        /// Нужны ли точки кадра: для растра или волновой формы.
-        var needsPixels: Bool { assist.needsRaster || waveform != nil }
+        /// Нужны ли точки кадра: для растра, вектороскопа, пипетки или волновой формы.
+        var needsPixels: Bool { assist.needsPixels || waveform != nil }
+
+        /// Какой встроенный LUT на экране: выбранный рукой, а у «Авто» — по профилю главной камеры; nil — встроенного нет
+        /// («Выкл», «Свой» и «Авто», которому не по чему выбрать).
+        var builtinLUT: BuiltinLUT? {
+            LUTChoice.resolve(assist.lut, pictureProfile: pictureProfile, ppGamma: ppGamma, colorMode: colorMode)
+        }
+
+        /// Куб, который ложится на картинку: встроенный (один на вид на всю программу) или свой файл; nil — LUT нет. Решает
+        /// он, а не `assist.transformsPicture`: «Авто» без профиля картинку не меняет.
+        var lut: ColorLUT? { assist.lut == .file ? fileLUT : builtinLUT?.cube }
+
+        /// Точка пипетки в долях кадра: поставленная или центр.
+        var probePoint: CGPoint { probe ?? CGPoint(x: 0.5, y: 0.5) }
     }
 
     private let state = OSAllocatedUnfairLock(initialState: State())
@@ -37,17 +60,67 @@ final class AssistInput: Sendable {
     func setVideo(_ video: Bool) { state.withLock { $0.video = video } }
 
     func setWaveform(_ mode: Waveform.Mode?) { state.withLock { $0.waveform = mode } }
+
+    /// Профиль изображения главной камеры — при каждом снимке её свойств и nil, когда камеры нет: «Авто» следует за ним с
+    /// ближайшего кадра.
+    func setCamera(pictureProfile: Int64?, gamma: Int64?, colorMode: Int64?) {
+        state.withLock {
+            $0.pictureProfile = pictureProfile
+            $0.ppGamma = gamma
+            $0.colorMode = colorMode
+        }
+    }
+
+    /// Куб выбранного своего LUT (nil — файла нет). Сюда его кладёт хранилище LUT: при выборе файла, добавлении и удалении.
+    func setFileLUT(_ lut: ColorLUT?) { state.withLock { $0.fileLUT = lut } }
+
+    /// Пипетка: точка в долях кадра, каким он виден; nil — снова в центре.
+    func setProbe(_ point: CGPoint?) { state.withLock { $0.probe = point } }
 }
 
-/// Что считается по точкам кадра в потоке кадров: растр помощи и волновая форма. Кадр раскладывается в точки один раз.
+/// Что считается по точкам кадра в потоке кадров: растр помощи, волновая форма, вектороскоп и пипетка. Кадр раскладывается в
+/// точки один раз.
 enum FrameTools {
     struct Result {
         var overlay: AssistOverlay?
         var waveform: WaveformTrace?
+        /// Белый уровень, по которому считались гистограмма и помощь: 255 при помощи по картинке с LUT, иначе по кадру
+        /// (234 в видео, 255 в фото).
+        var white = 255
+        /// Средняя яркость кадра помощи, 0…255 (Rec. 709, как у гистограммы): по той же картинке, по которой считается
+        /// помощь — с LUT или без.
+        var meanLuma = 0.0
+        /// Картинка вектороскопа 128×128 RGBA и середина самой полной корзины (Cb, Cr); nil — вектороскоп выключен.
+        var vectorscope: [UInt8]?
+        var vectorscopePeak: (cb: Double, cr: Double)?
+        /// С каким масштабом (1 или 2) посчитан вектороскоп.
+        var vectorscopeZoom = 1
+        /// Что показала пипетка; nil — выключена.
+        var probe: ColorProbe.Reading?
     }
 
+    /// Белый уровень шкалы помощи: 255, если помощь считается по картинке с LUT и LUT есть (после LUT чёрный и белый — снова
+    /// 0 и 255), иначе по кадру. Одно правило для гистограммы, зебры, false color, волновой формы и пипетки.
+    nonisolated static func whiteLevel(levels: [Int], input: AssistInput.State) -> Int {
+        input.assist.lutScopes && input.lut != nil ? 255 : LumaStats.whiteLevel(levels: levels, video: input.video)
+    }
+
+    /// Средняя яркость по уровням кадра, 0…255; 0 — кадр пуст.
+    nonisolated static func meanLuma(levels: [Int]) -> Double {
+        var total = 0, weighted = 0
+        for (level, points) in levels.enumerated() {
+            total += points
+            weighted += level * points
+        }
+        return total > 0 ? Double(weighted) / Double(total) : 0
+    }
+
+    /// frame — кадр помощи: тот, на котором считаются уровни, — картинка с LUT или сигнал камеры, уже повёрнутые.
     nonisolated static func analyze(_ frame: CGImage, levels: [Int], input: AssistInput.State) -> Result {
-        guard input.needsPixels else { return Result() }
+        // шкала — как у гистограммы: от чёрного до белого превью
+        let white = whiteLevel(levels: levels, input: input)
+        var result = Result(white: white, meanLuma: meanLuma(levels: levels))
+        guard input.needsPixels else { return result }
         let width = frame.width, height = frame.height, bytesPerRow = width * 4
         var rgba = [UInt8](repeating: 0, count: bytesPerRow * height)
         let drawn = rgba.withUnsafeMutableBytes { buffer -> Bool in
@@ -58,16 +131,26 @@ enum FrameTools {
             context.draw(frame, in: CGRect(x: 0, y: 0, width: width, height: height))
             return true
         }
-        guard drawn else { return Result() }
-        // шкала — как у гистограммы: от чёрного до белого превью
-        let white = LumaStats.whiteLevel(levels: levels, video: input.video)
-        var result = Result()
+        guard drawn else { return result }
         if input.assist.needsRaster {
             result.overlay = AssistOverlay.render(rgba: rgba, width: width, height: height, white: white, input: input)
         }
         if let mode = input.waveform {
             result.waveform = WaveformTrace(Waveform.counts(rgba: rgba, width: width, height: height, bytesPerRow: bytesPerRow,
                                                             mode: mode), white: white)
+        }
+        if input.assist.vectorscope {
+            let zoom = input.assist.vectorscopeZoom
+            let counts = Vectorscope.counts(rgba: rgba, width: width, height: height, bytesPerRow: bytesPerRow, zoom: zoom)
+            result.vectorscope = Vectorscope.image(counts: counts)
+            result.vectorscopePeak = Vectorscope.peak(counts: counts, zoom: zoom)
+            result.vectorscopeZoom = zoom
+        }
+        if input.assist.probe {
+            // метка в долях кадра, каким он виден, — а кадр помощи уже повёрнутый, так что доли те же; пипетке нужны точки
+            let point = input.probePoint
+            result.probe = ColorProbe.read(rgba: rgba, width: width, height: height, bytesPerRow: bytesPerRow,
+                                           at: CGPoint(x: point.x * Double(width), y: point.y * Double(height)), white: white)
         }
         return result
     }
@@ -78,6 +161,21 @@ enum FrameTools {
                        space: CGColorSpaceCreateDeviceRGB(),
                        bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
                        provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent)
+    }
+}
+
+/// Вектороскоп кадра: картинка точек 128×128 (плоскость Cb, Cr) и где у неё самая полная корзина.
+struct VectorscopeTrace {
+    let image: CGImage?
+    /// Масштаб, с которым посчитан: 1 или 2.
+    let zoom: Int
+    /// Середина самой полной корзины в единицах Cb и Cr (при ×2 — с поправкой на масштаб); nil — кадр пуст.
+    let peak: (cb: Double, cr: Double)?
+
+    init(pixels: [UInt8], zoom: Int, peak: (cb: Double, cr: Double)?) {
+        image = FrameTools.image(rgba: pixels, width: Vectorscope.bins, height: Vectorscope.bins)
+        self.zoom = zoom
+        self.peak = peak
     }
 }
 
