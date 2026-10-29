@@ -1,7 +1,5 @@
 package local.zve10viewer.ui
 
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -39,17 +37,13 @@ import androidx.compose.ui.unit.sp
 import local.zve10viewer.CameraController
 import local.zve10viewer.monitor.MonitorTool
 
-/** «Из файла…»: системный выбор картинки (галерея, «Загрузки», облако); выбрали — она эталон, наложение видно. */
+/**
+ * «Из файла…»: системный выбор картинки (галерея, «Загрузки», облако); выбрали — она эталон, наложение видно. Выбор запускает
+ * `MainActivity` и она же принимает результат (`FilePickers`): панель наложения за это время могла уйти с экрана вместе с
+ * живым видео — в фоне через минуту сеанс закрывается, — а запрос панели ушёл бы с ней.
+ */
 @Composable
-fun rememberReferencePicker(controller: CameraController): () -> Unit {
-    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) {
-            controller.takeReference(uri)
-            controller.showOverlay()
-        }
-    }
-    return { launcher.launch(arrayOf("image/*")) }
-}
+fun rememberReferencePicker(): () -> Unit = LocalFilePickers.current.reference
 
 /**
  * Панель наложения — пока наложение включено и эталон есть, как у программы для Mac. Миниатюра эталона — кнопка
@@ -60,7 +54,7 @@ fun rememberReferencePicker(controller: CameraController): () -> Unit {
 fun OverlayPanel(controller: CameraController, reference: CameraController.Reference) {
     val hidden = controller.overlayHidden
     val percent = controller.assist.overlay.percent ?: 50
-    val pick = rememberReferencePicker(controller)
+    val pick = rememberReferencePicker()
     Column(
         Modifier.background(Color(0x73000000), RoundedCornerShape(10.dp)).padding(10.dp).width(320.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),

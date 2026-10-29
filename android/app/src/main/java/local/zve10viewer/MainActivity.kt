@@ -10,6 +10,8 @@ import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -17,9 +19,32 @@ import androidx.lifecycle.lifecycleScope
 import local.zve10viewer.monitor.AssistExtras
 import local.zve10viewer.settings.WiFiAddress
 import local.zve10viewer.ui.App
+import local.zve10viewer.ui.FilePickers
+import local.zve10viewer.ui.LocalFilePickers
 
 class MainActivity : ComponentActivity() {
     private lateinit var controller: CameraController
+
+    /**
+     * Системный выбор файла: «Добавить LUT…» в меню «Монитор» и «Из файла…» у наложения. Запросы регистрируются здесь, на
+     * Activity, а не в меню: пока открыт выбор файла, программа в фоне, через минуту сеанс закрывается, экран живого видео
+     * сменяется экраном ожидания, и меню с его запросом уходит из композиции — результат пришёл бы по ключу, который уже никто
+     * не слушает (так же при гибели процесса). Запрос Activity живёт, пока жива она сама, и Android отдаёт отложенный результат
+     * и после её пересоздания. Камера не нужна: LUT пишется в `filesDir/luts`.
+     */
+    private val lutPicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null && ::controller.isInitialized) controller.importLut(uri)
+    }
+    private val referencePicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null && ::controller.isInitialized) {
+            controller.takeReference(uri)
+            controller.showOverlay()
+        }
+    }
+    private val pickers = FilePickers(
+        lut = { lutPicker.launch(arrayOf("*/*")) },
+        reference = { referencePicker.launch(arrayOf("image/*")) },
+    )
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -43,7 +68,7 @@ class MainActivity : ComponentActivity() {
                 addAction(ACTION_DEBUG_LENS)
             }, ContextCompat.RECEIVER_EXPORTED)
         }
-        setContent { App(controller) }
+        setContent { CompositionLocalProvider(LocalFilePickers provides pickers) { App(controller) } }
     }
 
     /**

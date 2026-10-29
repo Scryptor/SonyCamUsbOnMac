@@ -63,6 +63,10 @@ class LutStore(
         data class Refused(val failure: Failure) : Outcome()
     }
 
+    init {
+        sweepLeftovers()
+    }
+
     /** Папка своих LUT; её может не быть. */
     val folder: File get() = cache.folder
 
@@ -106,7 +110,7 @@ class LutStore(
         val folder = cache.folder
         val destination = File(folder, "$name.cube")
         // сначала новое — во временный скрытый файл: не записалось — прежнее не тронуто
-        val temporary = File(folder, ".import-${UUID.randomUUID()}.tmp")
+        val temporary = File(folder, "$TEMP_PREFIX${UUID.randomUUID()}$TEMP_SUFFIX")
         try {
             if (!folder.isDirectory && !folder.mkdirs() && !folder.isDirectory) throw IOException("нет папки $folder")
             write(data, temporary)
@@ -140,6 +144,17 @@ class LutStore(
     }
 
     // папка
+
+    /**
+     * Убрать временные файлы `.import-*.tmp`, которые оставила оборванная запись (процесс убили между записью и
+     * переименованием): никто их не ждёт, а до 16 МБ каждый лежали бы в папке программы вечно. Вызывается, когда
+     * хранилище создано, — в это время ни одно добавление ещё не идёт. Чужое не трогает: настоящие файлы, скрытые файлы с
+     * другими именами и папки остаются.
+     */
+    private fun sweepLeftovers() {
+        cache.folder.listFiles { file -> file.isFile && file.name.startsWith(TEMP_PREFIX) && file.name.endsWith(TEMP_SUFFIX) }
+            ?.forEach { it.delete() }
+    }
 
     /** Файлы `.cube` папки (обычные, не скрытые), по алфавиту. */
     private fun entries(): List<String> {
@@ -185,6 +200,10 @@ class LutStore(
 
         private const val EXTENSION = ".cube"
         private const val BUFFER = 64 * 1024
+
+        /** Временный файл записи: `.import-<случайное>.tmp`, скрытый, чтобы список его не видел. */
+        private const val TEMP_PREFIX = ".import-"
+        private const val TEMP_SUFFIX = ".tmp"
 
         /**
          * Имя нового файла: последняя часть имени от выбора файла (с путём его не пускают за папку) без расширения, без ведущих

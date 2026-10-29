@@ -9,7 +9,6 @@ import local.zve10viewer.monitor.MonitorAssist
 import local.zve10viewer.monitor.MonitorAssist.LutMode
 import local.zve10viewer.monitor.MonitorTool
 import local.zve10viewer.ui.assistTileRows
-import local.zve10viewer.ui.fitFontSize
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -103,28 +102,6 @@ class MonitorMenuTest {
             assertTrue(word, LutTexts.SCOPES_HELP.contains(word))
         }
         assertTrue(LutTexts.FILES_HELP.contains("12"))
-    }
-
-    // умещение значения на плитке
-
-    @Test fun fontKeepsItsSizeWhenTheTextFits() {
-        assertEquals(19f, fitFontSize(natural = 80f, available = 120f, base = 19f, floor = 12f), 0f)
-        assertEquals(19f, fitFontSize(natural = 120f, available = 120f, base = 19f, floor = 12f), 0f)
-        assertEquals(19f, fitFontSize(natural = 0f, available = 120f, base = 19f, floor = 12f), 0f)
-    }
-
-    @Test fun fontShrinksInProportionToTheOverflow() {
-        assertEquals(15f, fitFontSize(natural = 152f, available = 120f, base = 19f, floor = 12f), 0.01f)
-        assertEquals(19f * 120f / 160f, fitFontSize(natural = 160f, available = 120f, base = 19f, floor = 12f), 0.001f)
-    }
-
-    @Test fun fontNeverGoesBelowTheFloorOrAboveTheBase() {
-        assertEquals(12f, fitFontSize(natural = 600f, available = 120f, base = 19f, floor = 12f), 0f)
-        assertEquals(12f, fitFontSize(natural = 100f, available = 0f, base = 19f, floor = 12f), 0f)
-        assertEquals(12f, fitFontSize(natural = 100f, available = -5f, base = 19f, floor = 12f), 0f)
-        assertEquals(19f, fitFontSize(natural = 1f, available = 1000f, base = 19f, floor = 12f), 0f)
-        // и не-число не ломает размер
-        assertEquals(19f, fitFontSize(natural = Float.NaN, available = 120f, base = 19f, floor = 12f), 0f)
     }
 
     // отладочные extras DEBUG_ASSIST

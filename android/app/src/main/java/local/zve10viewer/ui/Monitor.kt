@@ -1,17 +1,15 @@
 package local.zve10viewer.ui
 
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Switch
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextMeasurer
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.drawscope.clipRect
@@ -76,17 +74,15 @@ private const val TILE_COLUMNS = 7
 /** Плитки меню по рядам: тринадцать инструментов в порядке `MonitorTool` и «Всё — выключить» (null) последней. */
 internal fun assistTileRows(): List<List<MonitorTool?>> = (MonitorTool.entries + listOf(null)).chunked(TILE_COLUMNS)
 
-/**
- * Размер шрифта значения на плитке: [base], если текст шириной [natural] (при размере [base]) умещается в [available]; иначе
- * меньше во столько же раз, но не меньше [floor]. Что и тогда не умещается, обрезается многоточием.
- */
-internal fun fitFontSize(natural: Float, available: Float, base: Float, floor: Float): Float {
-    if (!(natural > available)) return base
-    return (base * available / natural).coerceIn(floor, base)
-}
-
+/** Значение на плитке — 19 sp, в узкой плитке сжимается до 12; заголовок — 14 sp, сжимается до 10 (см. `FittedText`). */
 private const val TILE_VALUE_SP = 19f
 private const val TILE_VALUE_MIN_SP = 12f
+private const val TILE_TITLE_SP = 14f
+private const val TILE_TITLE_MIN_SP = 10f
+
+/** Плашка с именем своего LUT: ширина и поля, dp. */
+private val ChipWidth = 112.dp
+private val ChipPadding = 8.dp
 
 @Composable
 fun AssistMenu(controller: CameraController, screen: ScreenState) {
@@ -121,7 +117,7 @@ fun AssistMenu(controller: CameraController, screen: ScreenState) {
                                 controller.showOverlay()
                             }
                             .padding(horizontal = 14.dp, vertical = 8.dp))
-                    val pick = rememberReferencePicker(controller)
+                    val pick = rememberReferencePicker()
                     Text("Из файла…", color = Color.White, fontSize = 16.sp,
                         modifier = Modifier.background(PanelLight, RoundedCornerShape(9.dp)).clickable { pick() }
                             .padding(horizontal = 14.dp, vertical = 8.dp))
@@ -174,25 +170,11 @@ private fun AssistTile(title: String, value: String, on: Boolean, selected: Bool
             .padding(vertical = 10.dp),
         horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center,
     ) {
-        Text(title, color = if (selected) Color.White else Secondary, fontSize = 14.sp, maxLines = 1)
-        TileValue(value, if (on || selected) Color.White else Color.White.copy(alpha = 0.45f), measurer)
-    }
-}
-
-/**
- * Значение на плитке: семь плиток в ряду — по ≈126 dp, и «Авто: S-Log3» или имя файла при 19 sp не умещаются. Размер подбирается
- * по ширине плитки (и по масштабу шрифта системы: меряется настоящий текст), до 12 sp; что и тогда длиннее — многоточие.
- */
-@Composable
-private fun TileValue(text: String, color: Color, measurer: TextMeasurer) {
-    BoxWithConstraints(Modifier.fillMaxWidth().padding(horizontal = 6.dp), contentAlignment = Alignment.Center) {
-        val available = constraints.maxWidth.toFloat()
-        val natural = remember(text, measurer) {
-            measurer.measure(text, TextStyle(fontSize = TILE_VALUE_SP.sp, fontWeight = FontWeight.SemiBold), softWrap = false, maxLines = 1)
-                .size.width.toFloat()
-        }
-        Text(text, color = color, fontSize = fitFontSize(natural, available, TILE_VALUE_SP, TILE_VALUE_MIN_SP).sp,
-            fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+        // семь плиток в ряду — по ≈126 dp (в портрете ≈84): «Цвет пикинга», «Авто: S-Log3 Cine» или имя файла не умещаются, и их
+        // размер подбирается по ширине плитки и замеру настоящего текста (`FittedText`), а не обрезается
+        FittedText(title, if (selected) Color.White else Secondary, TILE_TITLE_SP, TILE_TITLE_MIN_SP, measurer)
+        FittedText(value, if (on || selected) Color.White else Color.White.copy(alpha = 0.45f), TILE_VALUE_SP, TILE_VALUE_MIN_SP, measurer,
+            FontWeight.SemiBold)
     }
 }
 
@@ -206,7 +188,8 @@ private fun LutStrip(controller: CameraController, assist: MonitorAssist) {
     // выбранный файл, если он лежит в папке: пропавший из папки не считается выбранным
     val chosen = assist.lutFile?.takeIf { it in names }
     val own = assist.lut == MonitorAssist.LutMode.file
-    val pick = rememberLutPicker(controller)
+    val pick = rememberLutPicker()
+    val measurer = rememberTextMeasurer()
     // папку могли тронуть руками: список читается заново, когда полоса открывается
     LaunchedEffect(Unit) { controller.refreshLuts() }
     Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -217,15 +200,7 @@ private fun LutStrip(controller: CameraController, assist: MonitorAssist) {
                 // не больше шести имён в ряду: ряд стоит посередине, как строки над ним и под ним
                 names.chunked(6).forEach { row ->
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        for (name in row) {
-                            val current = name == chosen
-                            Text(name, color = if (current) Color.Black else Color.White, fontSize = 16.sp, maxLines = 1,
-                                overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center,
-                                fontWeight = if (current) FontWeight.Bold else FontWeight.Normal,
-                                modifier = Modifier.width(112.dp).background(if (current) Color.White else PanelLight, RoundedCornerShape(9.dp))
-                                    .semantics { contentDescription = "LUT $name" + if (current) ", выбран" else "" }
-                                    .clickable { controller.selectLutFile(name) }.padding(horizontal = 8.dp, vertical = 8.dp))
-                        }
+                        for (name in row) LutChip(name, name == chosen, measurer) { controller.selectLutFile(name) }
                     }
                 }
             }
@@ -256,12 +231,26 @@ private fun LutStrip(controller: CameraController, assist: MonitorAssist) {
 
 /**
  * «Добавить LUT…»: системный выбор файла — любого (у `.cube` в системе часто нет своего типа, и фильтр по типу скрыл бы его);
- * выбрали — файл проверяется разбором, копируется в папку программы и выбирается.
+ * выбрали — файл проверяется разбором, копируется в папку программы и выбирается. Выбор запускает `MainActivity` и она же
+ * принимает результат (`FilePickers`): меню на это время может уйти с экрана — в фоне через минуту сеанс закрывается и экран
+ * живого видео сменяется экраном ожидания, — а запрос меню ушёл бы вместе с ним.
  */
 @Composable
-private fun rememberLutPicker(controller: CameraController): () -> Unit {
-    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> if (uri != null) controller.importLut(uri) }
-    return { launcher.launch(arrayOf("*/*")) }
+private fun rememberLutPicker(): () -> Unit = LocalFilePickers.current.lut
+
+/** Плашка с именем своего LUT; в узкой плашке длинное имя теряет середину, а не конец: `look_v1` и `look_v2` не сливаются. */
+@Composable
+private fun LutChip(name: String, current: Boolean, measurer: TextMeasurer, onClick: () -> Unit) {
+    val style = LocalTextStyle.current.merge(TextStyle(fontSize = 16.sp, fontWeight = if (current) FontWeight.Bold else FontWeight.Normal))
+    val room = with(LocalDensity.current) { (ChipWidth - ChipPadding * 2).toPx() }
+    val shown = remember(name, style, room, measurer) {
+        middleEllipsis(name) { measurer.measure(it, style, softWrap = false, maxLines = 1).size.width <= room }
+    }
+    Text(shown, color = if (current) Color.Black else Color.White, fontSize = 16.sp, maxLines = 1, softWrap = false,
+        textAlign = TextAlign.Center, fontWeight = if (current) FontWeight.Bold else FontWeight.Normal,
+        modifier = Modifier.width(ChipWidth).background(if (current) Color.White else PanelLight, RoundedCornerShape(9.dp))
+            .semantics { contentDescription = "LUT $name" + if (current) ", выбран" else "" }
+            .clickable(onClick = onClick).padding(horizontal = ChipPadding, vertical = 8.dp))
 }
 
 /** Легенда false color — что значит каждый цвет. Видна, пока false color включён. */

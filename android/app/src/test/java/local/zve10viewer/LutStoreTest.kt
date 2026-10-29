@@ -433,6 +433,46 @@ class LutStoreTest {
         assertTrue(notes.toString(), notes.any { "junk" in it })
     }
 
+    // временные файлы от оборванной записи
+
+    @Test fun leftoversOfAKilledWriteAreSweptWhenTheStoreIsCreated() {
+        // процесс убили между записью во временный файл и переименованием: `.import-*.tmp` остался навсегда
+        folder.mkdirs()
+        File(folder, ".import-6f1c2d3e-aaaa-bbbb-cccc-0123456789ab.tmp").writeBytes(ByteArray(5000))
+        File(folder, ".import-halfwritten.tmp").writeText("LUT_3D_SIZE 2\n0 0 0\n")
+        File(folder, "keep.cube").writeText(cube())
+        val store = LutStore(cache())
+        assertEquals(listOf("keep.cube"), stored())
+        assertEquals(listOf("keep"), store.names)
+    }
+
+    @Test fun onlyImportLeftoversAreSwept() {
+        // чужое не трогаем: скрытый .cube, другие .tmp, папка с таким именем, файл с другим суффиксом
+        folder.mkdirs()
+        File(folder, ".import-1.tmp").writeText("x")
+        File(folder, ".hidden.cube").writeText(cube())
+        File(folder, "notes.tmp").writeText("x")
+        File(folder, ".import-2.txt").writeText("x")
+        File(folder, ".other-3.tmp").writeText("x")
+        File(folder, ".import-dir.tmp").mkdirs()
+        File(folder, "look.cube").writeText(cube())
+        LutStore(cache())
+        assertEquals(listOf(".hidden.cube", ".import-2.txt", ".import-dir.tmp", ".other-3.tmp", "look.cube", "notes.tmp"), stored())
+    }
+
+    @Test fun creatingTheStoreDoesNotMakeTheFolder() {
+        LutStore(cache())
+        assertFalse(folder.exists())
+    }
+
+    @Test fun theStoreStillWorksRightAfterASweep() {
+        folder.mkdirs()
+        File(folder, ".import-old.tmp").writeText("half")
+        val store = LutStore(cache())
+        assertEquals("fresh", store.add("fresh.cube", cube()))
+        assertEquals(listOf("fresh.cube"), stored())
+    }
+
     // порядок записи: прежний файл цел, пока новый не лёг на место
 
     @Test fun failedWriteLeavesTheOldFileAlone() {
