@@ -4,6 +4,7 @@ import local.zve10viewer.ptp.PtpType
 import local.zve10viewer.ptp.PtpValue
 import local.zve10viewer.settings.SettingID
 import local.zve10viewer.settings.ValueFormatter
+import local.zve10viewer.sony.DisplayStrings
 import local.zve10viewer.sony.SonyProp
 import local.zve10viewer.sony.SonyProperty
 import java.util.Locale
@@ -66,13 +67,14 @@ object DebugFormat {
 
     /**
      * Строка свойства для вкладки «Свойства»: «0xD21E · ISO» — значение (число и подпись программы, если она его знает),
-     * можно ли менять, допустимые значения. Текст свойств, кроме даты и времени, не показываем: мало ли что в нём.
+     * можно ли менять, допустимые значения. Текст свойств, кроме даты и времени, не показываем: мало ли что в нём. [strings] —
+     * подписи от самой камеры: Creative Look называется здесь так же, как на экране.
      */
-    fun propertyRow(property: SonyProperty): DebugRow {
+    fun propertyRow(property: SonyProperty, strings: DisplayStrings = DisplayStrings()): DebugRow {
         val id = SettingID.entries.firstOrNull { it.code == property.code }
         val parts = ArrayList<String>()
         parts += rawValue(property)
-        if (id != null) parts += ValueFormatter.label(id, property)
+        if (id != null) parts += ValueFormatter.label(id, property, strings.names(id))
         parts += when {
             property.enabled == 0 -> "недоступно"
             property.isWritable -> "можно менять"

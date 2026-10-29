@@ -59,6 +59,7 @@ import local.zve10viewer.debug.DebugRow
 import local.zve10viewer.debug.DebugTab
 import local.zve10viewer.debug.FrameWindow
 import local.zve10viewer.debug.LinkJournal
+import local.zve10viewer.debug.OtherCamerasReport
 import local.zve10viewer.debug.RttWindow
 import local.zve10viewer.debug.clockTime
 import local.zve10viewer.ptp.PtpIp
@@ -70,6 +71,7 @@ import local.zve10viewer.ptp.PtpType
 import local.zve10viewer.ptp.PtpValue
 import local.zve10viewer.ptp.Ssdp
 import local.zve10viewer.ptp.TransportException
+import local.zve10viewer.session.CameraEvent
 import local.zve10viewer.session.CameraSession
 import local.zve10viewer.session.CapturePhase
 import local.zve10viewer.session.LiveViewQuality
@@ -119,6 +121,7 @@ import local.zve10viewer.monitor.FocusPullView
 import local.zve10viewer.monitor.MarkExtras
 import local.zve10viewer.monitor.PowerZoom
 import local.zve10viewer.monitor.get
+import local.zve10viewer.monitor.labelAtFraction
 import local.zve10viewer.monitor.TouchFocus
 import local.zve10viewer.sony.SonyControl
 import local.zve10viewer.view.ProbeLayout
@@ -133,6 +136,7 @@ import local.zve10viewer.settings.RecordingStep
 import local.zve10viewer.settings.SettingOption
 import local.zve10viewer.settings.ShootingMode
 import local.zve10viewer.settings.SlowQuick
+import local.zve10viewer.settings.SettingCatalog
 import local.zve10viewer.settings.SettingID
 import local.zve10viewer.settings.SettingOptions
 import local.zve10viewer.settings.ValueFormatter
@@ -142,10 +146,12 @@ import local.zve10viewer.settings.WriteCoalescer
 import local.zve10viewer.settings.apply
 import local.zve10viewer.settings.restore
 import local.zve10viewer.sony.DeviceInfo
+import local.zve10viewer.sony.LensInformation
 import local.zve10viewer.sony.Sony
 import local.zve10viewer.sony.SonyOp
 import local.zve10viewer.sony.SonyProp
 import local.zve10viewer.sony.SonyProperty
+import local.zve10viewer.sony.SonyReferenceTables
 import local.zve10viewer.usb.UsbPtpTransport
 import local.zve10viewer.view.FloatingPlacement
 import local.zve10viewer.view.KeyAction
@@ -396,6 +402,18 @@ class CameraController(private val context: Context, private val scope: Coroutin
         private set
     /** Фокус касанием: горит — касание кадра ставит туда фокус. Рамки фокуса камеры видны и без него. */
     var touchFocusOn by mutableStateOf(prefs.touchFocusOn)
+        private set
+    /**
+     * Что камера сообщает о себе сверх свойств: подписи списков, версия кода, данные объектива (0x9215, 0x9216, 0x9223) — только
+     * новые камеры Sony. Экраны видят это через [names], [focusDistance] и другие рядом с метками фокуса.
+     */
+    val info = CameraInfo(scope, ::journal)
+    /**
+     * Какая настройка стоит у камеры на связи на месте «Творческого стиля»: Creative Style (ZV-E10) или Creative Look (новые
+     * камеры). Меняется с первым снимком свойств новой камеры; по нему экран переносит выбор в Fn и открытую строку («Все
+     * настройки») вслед за камерой ([ScreenState.followSlots]), а не по каждому снимку свойств.
+     */
+    var creativeSlot by mutableStateOf(SettingID.creativeStyle)
         private set
     /** Метки фокуса A и B всех камер: у каждой свои, до выхода из программы (в настройки не пишутся). */
     var focusMarkBook by mutableStateOf(FocusMarkBook())
@@ -716,7 +734,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
             SettingID.colorTemperature -> WhiteBalanceTemperature.caption(WhiteBalanceTemperature.reading(whiteBalance, kelvin))
             SettingID.movieRecordingSetting -> RecordingModes.label(property(SettingID.movieFileFormat)?.current?.intValue,
                 property(SettingID.movieRecordingSetting)?.current?.intValue, allowedRecordingSettings)
-            else -> ValueFormatter.label(id, property(id))
+            else -> ValueFormatter.label(id, property(id), names(id))
         }
     }
 
@@ -739,7 +757,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
             val modes = recordingModes
             if (modes.isNotEmpty()) return modes.map { SettingOption(it.code, it.label) }
         }
-        return property(id)?.let { SettingOptions.options(id, it) } ?: emptyList()
+        return property(id)?.let { SettingOptions.options(id, it, names(id)) } ?: emptyList()
     }
 
     /** Текущее значение в ленте — в той же кодировке, что `stripOptions`. */
@@ -1230,6 +1248,38 @@ class CameraController(private val context: Context, private val scope: Coroutin
      */
     fun focusStep(units: Int) = focusMover.step(units)
 
+    // MARK: - Другие камеры Sony (спека §7): названия от камеры, Creative Look вместо Creative Style, расстояния на шкале
+
+    /**
+     * Какая настройка на самом деле стоит на месте [id] у камеры на связи: у новой камеры Sony на месте «Творческого стиля» —
+     * Creative Look. У ZV-E10 — та же настройка, что и была. Без камеры (свойств нет) тоже та же.
+     */
+    fun resolved(id: SettingID): SettingID = SettingCatalog.resolved(id, properties.keys)
+
+    /** Названия значений настройки от самой камеры; null — своих названий у камеры для неё нет, подписывают таблицы. */
+    fun names(id: SettingID): Map<Long, String>? = info.strings.names(id)
+
+    /**
+     * Данные объектива, по которым на шкале есть расстояния: одна таблица. Таблиц больше одной (у зумов — на каждое фокусное
+     * расстояние) — расстояний нет, а сами таблицы видны в отладке.
+     */
+    val focusLens: LensInformation?
+        get() = info.lens?.takeIf { it.tableCount == 1 && it.pairs.isNotEmpty() }
+
+    /** Где фокус на шкале, доля 0…1: по 0xE043 (0…65535), если камера его отдаёт, иначе по 0xD24C (0…100). */
+    val focusFraction: Double? get() = FocusPosition.fraction(properties)
+
+    /** Расстояние до предмета подписью («1,2 м», «∞»); null — расстояний нет или положения фокуса нет. */
+    val focusDistance: String?
+        get() = focusFraction?.let { fraction -> focusLens?.labelAtFraction(fraction) }
+
+    /** Расстояние, на которое поставлена метка A или B; null — метка пуста или расстояний нет. */
+    fun focusMarkDistance(mark: Char): String? {
+        val lens = focusLens ?: return null
+        val fraction = focusMarkFraction(mark) ?: return null
+        return lens.labelAtFraction(fraction)
+    }
+
     // MARK: - Метки фокуса A и B
 
     /**
@@ -1331,6 +1381,12 @@ class CameraController(private val context: Context, private val scope: Coroutin
         focusMover.cancel()
         focusMarkBook = focusMarkBook.lensChanged(camera)
         journal("объектив сменился (0xC21B): метки фокуса стёрты")
+    }
+
+    /** Событие новых камер Sony: смена объектива стирает метки фокуса; подписи и данные объектива перечитываются. */
+    private fun handle(event: CameraEvent, session: CameraSession) {
+        if (event == CameraEvent.LensChanged) lensChanged()
+        info.handle(event, session)
     }
 
     /**
@@ -1801,7 +1857,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
         get() {
             if (phase != Phase.ready) return emptyList()
             val preset = currentPresetIndex?.let(presets::getOrNull) ?: return emptyList()
-            return PresetCatalog.changes(preset, properties)
+            return PresetCatalog.changes(preset, properties, info.strings)
         }
 
     /** Текущий пресет изменён: на камере поменяли то, что он ставит, — есть что сохранить в него. */
@@ -1855,7 +1911,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
         linkedSides.forEach { side ->
             scope.launch {
                 side.apply(preset)?.skipped?.forEach { id ->
-                    groupFailed(side, values[id]?.let { GroupFailures.label(id, it) } ?: id.shortTitle)
+                    groupFailed(side, values[id]?.let { GroupFailures.label(id, it, names(id)) } ?: id.shortTitle)
                 }
             }
         }
@@ -2128,7 +2184,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
             journal("«${lost.name}» в ленте — нет связи")
             sideTried[lost.id] = System.currentTimeMillis()
         }
-        side.onWriteFailed = { failed, setting, value -> groupFailed(failed, GroupFailures.label(setting, value)) }
+        side.onWriteFailed = { failed, setting, value -> groupFailed(failed, GroupFailures.label(setting, value, names(setting))) }
         sideCameras = sideCameras + side
         return side
     }
@@ -2363,6 +2419,8 @@ class CameraController(private val context: Context, private val scope: Coroutin
     // MARK: - Подключение
 
     fun start() {
+        // справочник Sony (137 КБ JSON) разбирается при первой подписи значения, которой нет в наших таблицах; не на главном потоке
+        scope.launch(Dispatchers.Default) { runCatching { SonyReferenceTables.warmUp() } }
         ContextCompat.registerReceiver(context, receiver, IntentFilter().apply {
             addAction(ACTION_USB_PERMISSION)
             addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
@@ -2636,6 +2694,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
         recordingStartedAt = open.recordingSince
         coalescer = writer(session)
         noteCameraConnected(session.deviceInfo)
+        info.identify(currentCameraId)
         startStreams(session) { if (this.transport === transport) wifiSessionStopped(null) }
         phase = Phase.ready
         failures = 0
@@ -2643,6 +2702,8 @@ class CameraController(private val context: Context, private val scope: Coroutin
         wifiPolicy.sessionReady()
         startQuality(session)
         journal("«$cameraName» из ленты — главная, без переподключения (${open.address})")
+        // подписи и данные объектива новых камер — после того, как сеанс готов, и не задерживая его
+        info.begin(session, currentCameraId, session.properties.value)
     }
 
     /** Сеанс одинаков для USB и Wi-Fi: различаются транспорт и что делать при обрыве. */
@@ -2673,6 +2734,8 @@ class CameraController(private val context: Context, private val scope: Coroutin
                 session.start(owned)
                 deviceInfo = session.deviceInfo
                 noteCameraConnected(session.deviceInfo)
+                // прежние подписи и таблица принадлежат другой камере (по Wi-Fi Direct у всех один адрес) — стереть сразу, не к опросу
+                info.identify(currentCameraId)
                 phase = Phase.settling
                 journal("рукопожатие прошло: ${session.deviceInfo?.model ?: "камера"}, прошивка ${session.deviceInfo?.firmware ?: "?"} — " +
                     "пошёл live view")
@@ -2680,6 +2743,8 @@ class CameraController(private val context: Context, private val scope: Coroutin
                 session.waitUntilReady()
                 phase = Phase.ready
                 journal("сеанс готов: настройки принимаются")
+                // подписи и данные объектива новых камер — после того, как сеанс готов, и не задерживая его
+                info.begin(session, currentCameraId, session.properties.value)
                 failures = 0
                 if (kind == TransportKind.wifi) {
                     wifiPolicy.sessionReady()
@@ -3153,9 +3218,9 @@ class CameraController(private val context: Context, private val scope: Coroutin
         jobs += scope.launch {
             session.properties.collect { apply(it) }
         }
-        // камера сообщила о смене объектива: метки фокуса прежнего ни к чему
+        // события новых камер: смена объектива (метки фокуса прежнего ни к чему), список подписей изменился, фокус у цели
         jobs += scope.launch {
-            session.lensChanges.collect { lensChanged() }
+            session.events.collect { handle(it, session) }
         }
         jobs += scope.launch {
             session.ended.await()
@@ -3325,6 +3390,11 @@ class CameraController(private val context: Context, private val scope: Coroutin
 
     private fun apply(snapshot: Map<Int, SonyProperty>) {
         properties = snapshot
+        // 0xE086 стал 1 (или перестал быть 1) — данные объектива появились (или пропали)
+        session?.let { info.propertiesChanged(snapshot, it) }
+        // на месте «Творческого стиля» у этой камеры — Creative Style или Creative Look
+        val slot = SettingCatalog.resolved(SettingID.creativeStyle, snapshot.keys)
+        if (slot != creativeSlot) creativeSlot = slot
         // вышли из ручного фокуса (Near/Far закрылся): перевод к метке кончился, фокусом занимается камера
         if (focusMover.isPulling && !focusDriveAvailable) focusMover.cancel()
         assistVideo = mode != CaptureMode.photo
@@ -3393,7 +3463,10 @@ class CameraController(private val context: Context, private val scope: Coroutin
                 SonyProp.REMOTE_TOUCH_CANCEL_ENABLED, SonyProp.NEAR_FAR_ENABLED, SonyProp.ZOOM_ENABLED, SonyProp.ZOOM_SCALE)
                 .joinToString(" ") { code -> "%X=%s".format(code, value(code)?.let { java.lang.Long.toHexString(it) } ?: "—") } +
             // метки фокуса: положения в единицах режима, время перевода и к какой метке едет фокус
-            "; " + FocusMarksText.report(focusMarks, focusPull.mark)
+            "; " + FocusMarksText.report(focusMarks, focusPull.mark) +
+            // что дала новая камера: подписи, версия кода, таблицы объектива, расстояние у метки положения
+            "; " + OtherCamerasReport.line(info.strings, info.vendorCodeVersion, info.lens, focusDistance,
+                absolute = focusPullMode == FocusPull.Mode.absolute)
         if (line != lensLogged) {
             lensLogged = line
             Log.i("ZVLens", line)
@@ -3672,6 +3745,8 @@ class CameraController(private val context: Context, private val scope: Coroutin
      */
     private fun stopSession(abort: Boolean, keepOpen: Boolean = false) {
         releaseLens()
+        // сеанс уходит, камеру, может быть, ждём обратно: известное о ней остаётся на экране, а запросы прежнего сеанса отменяются
+        info.pause()
         jobs.forEach { it.cancel() }
         jobs.clear()
         qualityJob?.cancel()
@@ -3711,6 +3786,9 @@ class CameraController(private val context: Context, private val scope: Coroutin
         reconnect = null
         isReconnecting = false
         stopSession(abort = false, keepOpen = keepOpen)
+        // камеры больше нет: подписи, версия кода и таблица объектива ей не принадлежат, место Creative Style — снова за стилем
+        info.reset()
+        creativeSlot = SettingID.creativeStyle
         sessionStartedAt = null
         holdWifiLock(false)
         transportKind = null
@@ -3779,7 +3857,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
         DebugTab.link to debugLink(),
         DebugTab.preview to debugPreview(),
         DebugTab.camera to debugCamera(),
-        DebugTab.properties to properties.keys.sorted().mapNotNull { properties[it]?.let(DebugFormat::propertyRow) },
+        DebugTab.properties to properties.keys.sorted().mapNotNull { code -> properties[code]?.let { DebugFormat.propertyRow(it, info.strings) } },
         DebugTab.log to LinkJournal.events.newestFirst().map { DebugRow(clockTime(it.at), it.text) },
     ))
 
@@ -3873,9 +3951,9 @@ class CameraController(private val context: Context, private val scope: Coroutin
             Phase.notPcRemote -> "камера не в режиме PC Remote"
         }))
         // серийный номер камеры не показываем
-        val info = deviceInfo ?: return rows
-        rows += DebugRow("Модель", info.model)
-        rows += DebugRow("Прошивка", info.firmware)
+        val device = deviceInfo ?: return rows
+        rows += DebugRow("Модель", device.model)
+        rows += DebugRow("Прошивка", device.firmware)
         if (properties.isEmpty()) return rows
         rows += DebugRow("Режим съёмки", ValueFormatter.label(SettingID.exposureProgram, property(SettingID.exposureProgram)))
         rows += DebugRow("Запись", recordingStartedAt?.let { "идёт " + DebugFormat.clock(System.currentTimeMillis() - it) } ?: "нет")
@@ -3902,7 +3980,8 @@ class CameraController(private val context: Context, private val scope: Coroutin
             }
         } ?: "—")
         rows += DebugRow("Свойств", "${properties.size}")
-        return rows
+        // что новая камера Sony дала сверх свойств — для отчётов с других камер; у ZV-E10 этих операций нет, и строк тоже
+        return rows + OtherCamerasReport.rows(device, info.strings, info.vendorCodeVersion, info.lens, value(SonyProp.LENS_INFO_ENABLED))
     }
 
     /**

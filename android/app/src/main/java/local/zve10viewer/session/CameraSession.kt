@@ -25,6 +25,8 @@ import local.zve10viewer.ptp.PtpValue
 import local.zve10viewer.ptp.TransportException
 import local.zve10viewer.settings.SettingOptions
 import local.zve10viewer.sony.DeviceInfo
+import local.zve10viewer.sony.DisplayStrings
+import local.zve10viewer.sony.LensInformation
 import local.zve10viewer.sony.LiveViewFrame
 import local.zve10viewer.sony.ObjectInfo
 import local.zve10viewer.sony.Sony
@@ -33,6 +35,7 @@ import local.zve10viewer.sony.SonyOp
 import local.zve10viewer.sony.SonyProp
 import local.zve10viewer.sony.SonyProperty
 import local.zve10viewer.sony.SonyPropertyParser
+import kotlin.coroutines.cancellation.CancellationException
 import kotlin.coroutines.coroutineContext
 
 sealed class SessionException(message: String) : Exception(message) {
@@ -137,14 +140,16 @@ class CameraSession(
     fun snapshotAgeMs(): Long =
         if (refreshedAt == Long.MIN_VALUE) Long.MAX_VALUE else maxOf(0L, (clock() - refreshedAt) / 1_000_000)
 
-    private val lensChangeEvents = MutableSharedFlow<Unit>(extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+    private val cameraEvents = MutableSharedFlow<CameraEvent>(extraBufferCapacity = EVENT_BUFFER, onBufferOverflow = BufferOverflow.DROP_OLDEST)
 
     /**
-     * Камера сообщила о смене объектива (событие 0xC21B, у новых камер Sony): по одному значению на событие каждому слушателю. Событие,
-     * пришедшее до подписки, не повторяется. Поток не кончается вместе с сеансом — слушатель живёт в корутине сеанса и уходит с ней.
-     * Нужен тем, кто хранит что-то по объективу, — например, метки фокуса.
+     * События новых камер Sony — список подписей изменился (0xC20F, с типом списка), объектив сменили (0xC21B), фокус дошёл до
+     * цели (0xC218) — приходят тем же путём, что изменение свойств (0xC203), но слушателям, а не в [properties]: по одному значению
+     * на событие каждому. Событие, пришедшее до подписки, не повторяется. Буфер большой, чтобы не потерять тип списка у 0xC20F,
+     * пока слушатель занят; поток не кончается вместе с сеансом — слушатель живёт в корутине сеанса и уходит с ней. Нужен тем,
+     * кто хранит что-то по объективу и подписям, — например, метки фокуса и названия Creative Look.
      */
-    val lensChanges: SharedFlow<Unit> = lensChangeEvents.asSharedFlow()
+    val events: SharedFlow<CameraEvent> = cameraEvents.asSharedFlow()
 
     /** Завершается, когда сеанс закрыт (камеру отключили или связь оборвалась). */
     val ended = CompletableDeferred<Unit>()
@@ -205,6 +210,71 @@ class CameraSession(
         val reply = call(SonyOp.GET_ALL_EXT_PROP_INFO)
         _properties.value = SonyPropertyParser.parse(reply.data)
         refreshedAt = clock()
+    }
+
+    // MARK: - Другие камеры Sony: подписи, версия кода, данные объектива
+
+    /**
+     * Назвала ли камера операцию в GetDeviceInfo. Новые операции Sony (0x9215, 0x9216, 0x9223) зовём только если да: у ZV-E10 их
+     * нет, и она на них отвечает отказом. Сами вызовы ниже спрашивают об этом сами; снаружи это нужно тому, кто не хочет и
+     * заводить запрос ради пустого ответа ([CameraInfo]).
+     */
+    fun supports(operation: Int): Boolean = deviceInfo?.supports(operation) == true
+
+    /**
+     * Подписи значений от самой камеры (0x9215): список типа [type], 0 — все списки. Камера, которая 0x9215 не называет, не
+     * спрашивается совсем — ответ пуст. Ответ, который не разобрался, — ошибка: лучше без подписей, чем с половиной.
+     */
+    suspend fun displayStrings(type: Long): DisplayStrings {
+        if (!supports(SonyOp.GET_DISPLAY_STRING_LIST)) return DisplayStrings()
+        return DisplayStrings.parse(call(SonyOp.GET_DISPLAY_STRING_LIST, listOf(type)).data)
+    }
+
+    /**
+     * Подписи при подключении: сначала все списки (тип 0). Один список с неизвестным типом данных PTP обрывает разбор всего
+     * набора — тогда просим один Creative Look (0x13), единственное, что программа показывает; не вышло и это — подписей нет, и
+     * названия берутся из таблиц Sony. Ошибки не бросаются, а возвращаются: подписи не должны мешать подключению. Исключение —
+     * обрыв связи, отмена и тайм-аут: после них пробовать другой тип незачем. Тайм-аут значит, что камера не отвечает: второй
+     * запрос ушёл бы в ту же тишину, а слежение за связью («камера не отвечает» через 15 с без ответа на операцию) закрыло бы на
+     * нём сеанс. Звать ли подписи снова в следующем сеансе, решает вызывающий ([SilentCameras]).
+     */
+    suspend fun loadDisplayStrings(): DisplayStringsLoad {
+        if (!supports(SonyOp.GET_DISPLAY_STRING_LIST)) return DisplayStringsLoad()
+        val failures = ArrayList<DisplayStringsLoad.Failure>()
+        for (type in listOf(0L, DisplayStrings.CREATIVE_LOOK_TYPE)) {
+            try {
+                return DisplayStringsLoad(displayStrings(type), failures)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (cameraIsGone(e)) throw e
+                failures += DisplayStringsLoad.Failure(type, e)
+            }
+        }
+        return DisplayStringsLoad(failures = failures)
+    }
+
+    /** Связи с камерой нет или камера не отвечает: пробовать то же или другое дальше бессмысленно. */
+    private fun cameraIsGone(error: Exception): Boolean = error is TransportException && (error.disconnected || error.timeout)
+
+    /**
+     * Версия кода производителя (0x9216), ×100: 310 — «3.10». Камера отдаёт её в параметре ответа. null — камера операцию не
+     * называет или версии в ответе нет.
+     */
+    suspend fun vendorCodeVersion(): Int? {
+        if (!supports(SonyOp.GET_VENDOR_CODE_VERSION)) return null
+        return call(SonyOp.GET_VENDOR_CODE_VERSION).params.firstOrNull()?.toInt()
+    }
+
+    /**
+     * Данные объектива (0x9223) в метрах. Спрашиваем, только если камера называет операцию и 0xE086 = 1 (данные объектива
+     * готовы): без объектива с электроникой их нет. null — условий нет. Поэтому звать надо после того, как свойства перечитаны:
+     * 0xE086 берётся из последнего чтения.
+     */
+    suspend fun lensInformation(): LensInformation? {
+        if (!supports(SonyOp.GET_LENS_INFORMATION)) return null
+        if (_properties.value[SonyProp.LENS_INFO_ENABLED]?.current?.intValue != 1L) return null
+        return LensInformation.parse(call(SonyOp.GET_LENS_INFORMATION, listOf(METERS_PARAMETER)).data)
     }
 
     /** Записывает значение и ждёт, пока камера подтвердит его чтением. */
@@ -381,10 +451,17 @@ class CameraSession(
             transport.events.collect { event ->
                 when (event.code) {
                     Sony.PROPERTY_CHANGED_EVENT -> refresher.request()
-                    SonyEvent.LENS_INFO_CHANGED -> {
-                        lensChangeEvents.tryEmit(Unit)
+                    SonyEvent.DISPLAY_LIST_CHANGED -> {
+                        cameraEvents.tryEmit(CameraEvent.DisplayListChanged(event.params.firstOrNull() ?: 0L))
                         android.util.Log.d("ZVFrames", "событие 0x%04X".format(event.code))
                     }
+                    SonyEvent.LENS_INFO_CHANGED -> {
+                        cameraEvents.tryEmit(CameraEvent.LensChanged)
+                        android.util.Log.d("ZVFrames", "событие 0x%04X".format(event.code))
+                    }
+                    // приходит с каждой записью цели во время перевода, раз в 100 мс: в logcat его не пишем (в журнал программы —
+                    // раз за исход, это делает CameraInfo)
+                    SonyEvent.FOCUS_POSITION_RESULT -> cameraEvents.tryEmit(CameraEvent.FocusPositionResult(event.params.firstOrNull() == 1L))
                     else -> android.util.Log.d("ZVFrames", "событие 0x%04X".format(event.code))
                 }
             }
@@ -430,5 +507,20 @@ class CameraSession(
     private companion object {
         val PRESS = PtpValue.encode(2, PtpType.UINT16)
         val RELEASE = PtpValue.encode(1, PtpType.UINT16)
+        /** Параметр 0x9223: 1 — футы, 2 — метры. Показываем метры. */
+        const val METERS_PARAMETER = 2L
+        /** Сколько событий камеры ждёт медленного слушателя; потерять тип списка у 0xC20F хуже, чем занять память. */
+        const val EVENT_BUFFER = 256
     }
+}
+
+/** Чем кончился запрос подписей при подключении ([CameraSession.loadDisplayStrings]). */
+class DisplayStringsLoad(
+    /** Что удалось получить. */
+    val strings: DisplayStrings = DisplayStrings(),
+    /** Что не вышло, по порядку попыток — для журнала. */
+    val failures: List<Failure> = emptyList(),
+) {
+    /** Какой тип списка просили и что ответила камера. */
+    class Failure(val type: Long, val error: Exception)
 }

@@ -162,7 +162,7 @@ class UsbPtpTransport(
         var empty = 0
         while (true) {
             n = connection.bulkTransfer(bulkIn, chunk, chunk.size, timeoutMs)
-            if (n < 0) fail("камера не ответила")
+            if (n < 0) fail("камера не ответила", timeout = true)
             // пакет нулевой длины завершает данные, кратные размеру пакета, — пропускаем
             if (n == 0) {
                 if (++empty > 4) fail("камера присылает пустые пакеты")
@@ -221,8 +221,8 @@ class UsbPtpTransport(
         }
     }
 
-    private fun fail(message: String): Nothing {
-        throw TransportException(message, disconnected = closed)
+    private fun fail(message: String, timeout: Boolean = false): Nothing {
+        throw TransportException(message, disconnected = closed, timeout = timeout && !closed)
     }
 
     companion object {

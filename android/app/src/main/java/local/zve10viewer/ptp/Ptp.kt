@@ -165,7 +165,12 @@ object PtpContainer {
         }
 }
 
-class TransportException(message: String, val disconnected: Boolean = false) : Exception(message)
+/**
+ * Ошибка обмена с камерой. disconnected — связи больше нет (сеанс закрывается); timeout — камера не ответила за время ожидания,
+ * а связь жива: сеанс остаётся, но то же самое ей второй раз лучше не слать (необязательные операции новых камер Sony, см.
+ * [local.zve10viewer.session.SilentCameras]).
+ */
+class TransportException(message: String, val disconnected: Boolean = false, val timeout: Boolean = false) : Exception(message)
 
 /**
  * Сколько байт пришло в идущей сейчас фазе данных и сколько ожидается — для доли загрузки снимка на кнопке спуска.

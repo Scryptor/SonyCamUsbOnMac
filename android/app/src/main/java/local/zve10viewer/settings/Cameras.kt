@@ -491,12 +491,15 @@ data class GroupFailures(val items: List<Pair<String, String>> = emptyList()) {
         /** Запись не началась или не остановилась. */
         const val RECORDING = "запись"
 
-        /** Что не дошло: «ISO 51200», «1/50», «f/2.8», «AWB», «Видео M», «Фокус AF-C». */
-        fun label(id: SettingID, value: Long): String = when (id) {
+        /**
+         * Что не дошло: «ISO 51200», «1/50», «f/2.8», «AWB», «Видео M», «Фокус AF-C», «Look FL». [names] — названия значений от
+         * самой главной камеры (`DisplayStrings.names`): значение выбрано по её списку.
+         */
+        fun label(id: SettingID, value: Long, names: Map<Long, String>? = null): String = when (id) {
             SettingID.shutter, SettingID.aperture, SettingID.colorTemperature, SettingID.whiteBalance, SettingID.exposureProgram,
             SettingID.movieRecordingSetting -> ValueFormatter.label(id, value)
             SettingID.iso -> "ISO " + ValueFormatter.label(id, value)
-            else -> id.shortTitle + " " + ValueFormatter.label(id, value)
+            else -> id.shortTitle + " " + ValueFormatter.label(id, value, names)
         }
     }
 }

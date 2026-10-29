@@ -61,6 +61,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
@@ -69,6 +70,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import local.zve10viewer.CameraController
+import local.zve10viewer.monitor.FocusDistanceScale
 import local.zve10viewer.monitor.FocusDrive
 import local.zve10viewer.monitor.FocusFlags
 import local.zve10viewer.monitor.FocusFrame
@@ -76,6 +78,8 @@ import local.zve10viewer.monitor.FocusMarksText
 import local.zve10viewer.monitor.FrameOrientation
 import local.zve10viewer.monitor.get
 import local.zve10viewer.monitor.TouchFocus
+import local.zve10viewer.monitor.labelAtFraction
+import local.zve10viewer.sony.LensInformation
 import local.zve10viewer.view.OrientedFrame
 
 /*
@@ -251,16 +255,19 @@ private fun markColor(mark: Char): Color = if (mark == 'A') Color(0xFF59CCFF) el
 
 /**
  * Шкала фокуса — ручной фокус с экрана (в MF): слева ближе, справа дальше. Кнопки — шаги 7, 3 и 1; перетаскивание по
- * шкале — как поворот кольца фокуса. Метка — где фокус, если камера его отдаёт. Под линейкой — метки фокуса: `[A] [B] [⏱ 2 с]`;
- * на самой линейке над ней — значки меток, посередине под ней — чем кончился перевод (3 с). Первый раз за запуск, когда шкала с
- * метками появилась, открывается карточка «Метки фокуса» (над шкалой, её рисует экран).
+ * шкале — как поворот кольца фокуса. Метка — где фокус, если камера его отдаёт: по 0xE043, а если его нет, — по 0xD24C. Если
+ * камера дала данные объектива (одну таблицу), под линейкой подписаны расстояния — на делениях и у метки положения. Под линейкой —
+ * метки фокуса: `[A] [B] [⏱ 2 с]`; на самой линейке над ней — значки меток, посередине под ней — чем кончился перевод (3 с). Первый
+ * раз за запуск, когда шкала с метками появилась, открывается карточка «Метки фокуса» (над шкалой, её рисует экран).
  */
 @Composable
 fun FocusScale(controller: CameraController, screen: ScreenState) {
     var width by remember { mutableFloatStateOf(1f) }
     var dragged by remember { mutableFloatStateOf(0f) }
     val marks = controller.focusMarksAvailable
-    val measurer = rememberTextMeasurer()
+    // данные объектива есть — под линейкой полоса подписей расстояний; нет (ZV-E10) — шкала как была
+    val lens = controller.focusLens
+    val measurer = rememberTextMeasurer(cacheSize = 32)
     LaunchedEffect(marks) { if (marks) screen.offerFocusMarksHelp(controller.prefs.focusMarksHelpShown) }
     // шкала ушла (ручной фокус кончился, элементы спрятаны) — карточка над ней не остаётся открытой
     DisposableEffect(Unit) { onDispose { screen.focusMarksHelpOpen = false } }
@@ -271,7 +278,8 @@ fun FocusScale(controller: CameraController, screen: ScreenState) {
         for (step in listOf(FocusDrive.Step.large, FocusDrive.Step.medium, FocusDrive.Step.small)) FocusKey(controller, step, nearer = true)
         Column(Modifier.widthIn(min = 320.dp).width(360.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Canvas(
-                Modifier.fillMaxWidth().height(34.dp + (if (marks) FLAGS_HEIGHT else 0.dp)).onSizeChanged { width = it.width.toFloat().coerceAtLeast(1f) }
+                Modifier.fillMaxWidth().height(34.dp + (if (marks) FLAGS_HEIGHT else 0.dp) + (if (lens != null) DISTANCES_HEIGHT else 0.dp))
+                    .onSizeChanged { width = it.width.toFloat().coerceAtLeast(1f) }
                     .semantics { contentDescription = "Шкала фокуса: тяните влево — ближе, вправо — дальше" }
                     .pointerInput(Unit) {
                         detectHorizontalDragGestures(onDragEnd = { dragged = 0f }, onDragCancel = { dragged = 0f }) { change, amount ->
@@ -284,9 +292,10 @@ fun FocusScale(controller: CameraController, screen: ScreenState) {
                         }
                     },
             ) {
-                // над линейкой, пока метки есть, — полоса под значки меток
+                // над линейкой, пока метки есть, — полоса под значки меток; под ней, пока есть расстояния, — под подписи
                 val flags = if (marks) FLAGS_HEIGHT.toPx() else 0f
-                val barHeight = size.height - flags
+                val labels = if (lens != null) DISTANCES_HEIGHT.toPx() else 0f
+                val barHeight = size.height - flags - labels
                 // деления — как на кольце фокуса; сдвигаются, пока шкалу тянут
                 val spacing = 14.dp.toPx()
                 var x = ((dragged % spacing) + spacing) % spacing
@@ -295,11 +304,14 @@ fun FocusScale(controller: CameraController, screen: ScreenState) {
                     drawLine(Color.White.copy(alpha = 0.4f), Offset(x, mid - 6.dp.toPx()), Offset(x, mid + 6.dp.toPx()), 1.dp.toPx())
                     x += spacing
                 }
-                controller.focalPosition?.let { position ->
-                    val px = size.width * position / 100f
+                // где фокус: по 0xE043, если камера его отдаёт (точнее, чем сотые доли 0xD24C), иначе по 0xD24C
+                val fraction = controller.focusFraction
+                if (fraction != null) {
+                    val px = size.width * fraction.toFloat()
                     drawRoundRect(Color(0xFFFFD60A), Offset(px - 2.dp.toPx(), flags + 3.dp.toPx()), Size(4.dp.toPx(), barHeight - 6.dp.toPx()),
                         CornerRadius(2.dp.toPx()))
                 }
+                if (lens != null) drawDistances(lens, fraction, measurer, flags + barHeight)
                 if (marks) drawFlags(controller, measurer, flags)
             }
             Row {
@@ -319,6 +331,40 @@ fun FocusScale(controller: CameraController, screen: ScreenState) {
 
 /** Высота полосы над линейкой под значки меток, когда метки есть. */
 private val FLAGS_HEIGHT = 18.dp
+
+/** Высота полосы под линейкой под подписи расстояний (деление и строка 10 sp), когда данные объектива есть. */
+private val DISTANCES_HEIGHT = 16.dp
+
+/** Подписи расстояний: на делениях — белым вполсилы, у метки положения — жёлтым, плотнее. */
+private val DISTANCE_TICK_STYLE = TextStyle(color = Color.White.copy(alpha = 0.7f), fontSize = 10.sp)
+private val DISTANCE_NOW_STYLE = TextStyle(color = Color(0xFFFFD60A), fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+
+/**
+ * Подписи расстояний под линейкой, от высоты [top]: на делениях — круглые расстояния и оба края таблицы, сколько помещается
+ * ([FocusDistanceScale.ticks]), а у метки положения — текущее расстояние жёлтым (деления рядом с ним не подписываются, чтобы подписи
+ * не налезали друг на друга). [fraction] — где метка положения, доля 0…1; null — положения нет, подписаны одни деления.
+ */
+private fun DrawScope.drawDistances(lens: LensInformation, fraction: Double?, measurer: TextMeasurer, top: Float) {
+    val ruler = size.width.toDouble()
+    val text = top + 3.dp.toPx()
+    val reserved = ArrayList<ClosedFloatingPointRange<Double>>(1)
+    val current = fraction?.let { f -> lens.labelAtFraction(f)?.let { f to it } }
+    if (current != null) {
+        val layout = measurer.measure(current.second, DISTANCE_NOW_STYLE)
+        val span = FocusDistanceScale.span(current.first, layout.size.width.toDouble(), ruler)
+        reserved += span
+        drawText(layout, topLeft = Offset(span.start.toFloat(), text))
+    }
+    val ticks = FocusDistanceScale.ticks(lens, ruler, spacing = 12.dp.toPx().toDouble(), reserved = reserved) { label ->
+        measurer.measure(label, DISTANCE_TICK_STYLE).size.width.toDouble()
+    }
+    for (tick in ticks) {
+        val layout = measurer.measure(tick.label, DISTANCE_TICK_STYLE)
+        val x = size.width * tick.fraction.toFloat()
+        drawLine(Color.White.copy(alpha = 0.4f), Offset(x, top), Offset(x, top + 3.dp.toPx()), 1.dp.toPx())
+        drawText(layout, topLeft = Offset(FocusDistanceScale.span(tick.fraction, layout.size.width.toDouble(), ruler).start.toFloat(), text))
+    }
+}
 
 /** Плашка значка метки на линейке: ширина и высота (над остриём). */
 private val FLAG_BADGE_WIDTH = 16.dp
@@ -357,24 +403,25 @@ private fun MarksRow(controller: CameraController, screen: ScreenState) {
         Modifier.fillMaxWidth().padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        MarkButton(controller, screen, 'A', distance = null)
-        MarkButton(controller, screen, 'B', distance = null)
+        MarkButton(controller, screen, 'A')
+        MarkButton(controller, screen, 'B')
         Spacer(Modifier.weight(1f))
         TimeChip(controller, screen)
     }
 }
 
 /**
- * Кнопка метки. Пустая — «A+»: касание запоминает, где фокус. Заданная — «A»: касание переводит фокус к ней; рядом с буквой — место
- * для короткой подписи расстояния, если камера дала данные объектива («A 1,2 м»). Пока фокус едет, кнопка заливается по доле пути
- * и показывает значок «стоп» — касание её же останавливает; на конце мигает один раз. Долгое нажатие — меню «Запомнить здесь» /
+ * Кнопка метки. Пустая — «A+»: касание запоминает, где фокус. Заданная — «A»: касание переводит фокус к ней; если камера дала
+ * данные объектива — «A 1,2 м», расстояние, на которое метка поставлена. Пока фокус едет, кнопка заливается по доле пути и
+ * показывает значок «стоп» — касание её же останавливает; на конце мигает один раз. Долгое нажатие — меню «Запомнить здесь» /
  * «Стереть».
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun MarkButton(controller: CameraController, screen: ScreenState, mark: Char, distance: String?) {
+private fun MarkButton(controller: CameraController, screen: ScreenState, mark: Char) {
     val marks = controller.focusMarks
     val isSet = marks[mark] != null
+    val distance = if (isSet) controller.focusMarkDistance(mark) else null
     val moving = controller.focusPullMark == mark
     val color = markColor(mark)
     val shape = RoundedCornerShape(10.dp)
@@ -399,7 +446,8 @@ private fun MarkButton(controller: CameraController, screen: ScreenState, mark: 
     }
     Box {
         Row(
-            Modifier.width(if (distance == null) 64.dp else 84.dp).height(40.dp).clip(shape)
+            // с данными объектива обе кнопки шире, пустая тоже: строка не прыгает, когда метку ставят и стирают; без них (ZV-E10) — как была
+            Modifier.width(if (controller.focusLens == null) 64.dp else 84.dp).height(40.dp).clip(shape)
                 .background(if (isSet) color.copy(alpha = 0.22f) else Color.White.copy(alpha = 0.1f))
                 // доля пути — заливкой слева направо; читается при рисовании, перекомпоновки на каждый тик не нужно
                 .drawBehind {

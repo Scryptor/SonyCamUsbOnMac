@@ -14,6 +14,7 @@ import local.zve10viewer.ptp.PtpResponseCode
 import local.zve10viewer.ptp.PtpTransport
 import local.zve10viewer.ptp.PtpType
 import local.zve10viewer.ptp.PtpValue
+import local.zve10viewer.ptp.TransportException
 import local.zve10viewer.session.CameraSession
 import local.zve10viewer.session.CapturePhase
 import local.zve10viewer.session.LiveViewQuality
@@ -397,6 +398,33 @@ class SessionTest {
         assertEquals(1, bins.first())
         assertEquals(2, bins.last())
     }
+
+    // MARK: - Подписи камеры при подключении (0x9215)
+
+    @Test fun aCameraWithoutTheDisplayStringOperationIsNeverAskedForIt() = runTest {
+        // ZV-E10: в списке операций нет ни 0x9215, ни 0x9216, ни 0x9223. Эта камера на них ответила бы (ловушка), — но сеанс смотрит
+        // в список операций из GetDeviceInfo
+        val camera = FakeCamera()
+        for (operation in NEW_OPERATIONS) camera.answers[operation] = { PtpReply(PtpResponseCode.OK, listOf(0x0136L), ByteArray(64)) }
+        val session = ready(camera, this)
+        val info = CameraInfo(this) { }
+        info.begin(session, "zv-e10", session.properties.value).join()
+        assertTrue("${camera.sent.map { it.first.toString(16) }}", camera.sent.none { it.first in NEW_OPERATIONS })
+        session.close()
+    }
+
+    @Test fun aCameraThatListsTheOperationIsAskedForAllListsAfterConnect() = runTest {
+        val camera = newerCamera()
+        val session = ready(camera, this)
+        // до того, как программа спросит, камеру о подписях не просили
+        assertTrue(camera.sent.none { it.first == SonyOp.GET_DISPLAY_STRING_LIST })
+        val info = CameraInfo(this) { }
+        info.begin(session, "ilce", session.properties.value).join()
+        // один раз, тип 0 — «все списки»
+        assertEquals(listOf(listOf(0L)), camera.sent.filter { it.first == SonyOp.GET_DISPLAY_STRING_LIST }.map { it.second })
+        assertEquals(setOf(0x13L, 0x15L), info.strings.lists.keys)
+        session.close()
+    }
 }
 
 /** Поддельная камера: хранит свойства, применяет записи, «снимает» заданные файлы. */
@@ -413,6 +441,17 @@ class FakeCamera : PtpTransport {
         Prop(SonyProp.OBJECT_IN_MEMORY, PtpType.UINT16, 0, getSet = 0),
     )
     val sent = mutableListOf<Triple<Int, List<Long>, ByteArray?>>()
+    /** Операции в GetDeviceInfo; null — те, что в фикстуре ZV-E10 (0x9215, 0x9216 и 0x9223 среди них нет). */
+    var operations: List<Int>? = null
+    /**
+     * Ответы на операции, которых у ZV-E10 нет (0x9215, 0x9216, 0x9223): по параметрам запроса. Ответ строится в потоке обмена, под
+     * замком камеры: тест может держать его на защёлке, но обращаться из него к самой камере нельзя. Нет ответа — OK без данных.
+     */
+    val answers = mutableMapOf<Int, (List<Long>) -> PtpReply>()
+    /** На эти операции камера не отвечает: транспорт ждёт своего тайм-аута и бросает его. Запрос записывается в [sent], как всякий. */
+    val timeoutOn = mutableSetOf<Int>()
+    /** Следующий такой запрос обрывает связь: транспорт бросает «связь закрыта». */
+    var disconnectOnNext: Int? = null
     var applyWrites = true
     val ignored = mutableSetOf<Int>()
     var busyOnNextPress: Int? = null
@@ -438,11 +477,19 @@ class FakeCamera : PtpTransport {
         syncMemory()
     }
 
+    // один обмен за раз, как у настоящего транспорта: запросы сеанса и другого слушателя идут из разных потоков
+    @Synchronized
     override fun send(operation: Int, params: List<Long>, outData: ByteArray?, timeoutMs: Int?): PtpReply {
         sent += Triple(operation, params, outData)
+        if (disconnectOnNext == operation) {
+            disconnectOnNext = null
+            throw TransportException("связь закрыта", disconnected = true)
+        }
+        if (operation in timeoutOn) throw TransportException("камера не ответила вовремя", timeout = true)
         val ok = PtpResponseCode.OK
         return when (operation) {
-            SonyOp.GET_DEVICE_INFO -> PtpReply(ok, data = javaClass.getResource("/fixtures/deviceinfo.bin")!!.readBytes())
+            SonyOp.GET_DEVICE_INFO -> PtpReply(ok, data = operations?.let(CameraBytes::deviceInfo)
+                ?: javaClass.getResource("/fixtures/deviceinfo.bin")!!.readBytes())
             SonyOp.GET_EXT_DEVICE_INFO -> PtpReply(ok, data = javaClass.getResource("/fixtures/sony_extdeviceinfo.bin")!!.readBytes())
             SonyOp.SET_EXT_PROP_VALUE -> {
                 val p = prop(params[0].toInt())
@@ -481,7 +528,7 @@ class FakeCamera : PtpTransport {
                 syncMemory()
                 PtpReply(ok, data = file.second)
             } ?: PtpReply(PtpResponseCode.INVALID_OBJECT_HANDLE)
-            else -> PtpReply(ok)
+            else -> answers[operation]?.invoke(params) ?: PtpReply(ok)
         }
     }
 

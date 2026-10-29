@@ -3,6 +3,7 @@ package local.zve10viewer.sony
 import local.zve10viewer.ptp.ByteReader
 import local.zve10viewer.ptp.PtpParseException
 import local.zve10viewer.ptp.PtpValue
+import local.zve10viewer.settings.SettingID
 
 /**
  * Подписи значений от самой камеры — ответ Sony 0x9215 (GetDisplayStringList). Камера составляет такие списки сама:
@@ -19,6 +20,22 @@ data class DisplayStrings(
      * здесь набор лежит в состоянии контроллера, и изменяемый объект там не заметили бы).
      */
     fun merge(other: DisplayStrings): DisplayStrings = DisplayStrings(lists + other.lists)
+
+    /**
+     * Камера сообщила, что список типа [type] изменился, и прислала его заново ([fresh]). Тип 0 — «все списки»: набор заменяется
+     * целиком. Иначе заменяется список этого типа; если камера его больше не отдаёт (в ответе его нет), он стирается — старые
+     * названия не должны жить дальше нового списка. Списки других типов остаются. Набор — значение, как и у [merge]: возвращается
+     * новый.
+     */
+    fun replace(type: Long, fresh: DisplayStrings): DisplayStrings =
+        if (type == 0L) fresh else DisplayStrings((lists - type) + fresh.lists)
+
+    /**
+     * Названия значений настройки от самой камеры ([local.zve10viewer.settings.ValueFormatter.label] с `names`). Из списков
+     * камеры программа показывает только Creative Look (тип 0x13); у остальных настроек списков камеры нет, их подписывают наши
+     * таблицы и справочник Sony. null — названий от камеры нет.
+     */
+    fun names(id: SettingID): Map<Long, String>? = if (id == SettingID.creativeLook) lists[CREATIVE_LOOK_TYPE] else null
 
     companion object {
         /** Тип списка с названиями Creative Look. */

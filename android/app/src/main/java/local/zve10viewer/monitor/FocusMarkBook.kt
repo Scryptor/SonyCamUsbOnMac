@@ -143,6 +143,15 @@ object FocusPosition {
     }
 
     /**
+     * Где фокус на шкале, доля 0…1: по 0xE043 (0…65535), если камера его отдаёт (он точнее сотых долей 0xD24C), иначе по 0xD24C
+     * (0…100). Положения нет — null.
+     */
+    fun fraction(properties: Map<Int, SonyProperty>): Double? {
+        current(properties, FocusPull.Mode.absolute)?.let { return fraction(it, FocusPull.Mode.absolute) }
+        return current(properties, FocusPull.Mode.steps)?.let { fraction(it, FocusPull.Mode.steps) }
+    }
+
+    /**
      * Насколько близко фокус уже «у метки» и ехать не нужно: 0,5 % шкалы у абсолютного, `max(1, k/2)` при k₀ = 3,5 у шагов —
      * столько же, сколько допускает сам [FocusPull] ([FocusPull.tolerance]).
      */

@@ -9,9 +9,10 @@ import kotlin.math.abs
 object ValueFormatter {
     private const val MINUS = "−"
 
-    fun label(id: SettingID, property: SonyProperty?): String {
+    /** Подпись текущего значения свойства; [names] — названия значений от самой камеры (`DisplayStrings.names`), они важнее наших таблиц. */
+    fun label(id: SettingID, property: SonyProperty?, names: Map<Long, String>? = null): String {
         val value = property?.current?.intValue ?: return "—"
-        return label(id, value)
+        return label(id, value, names)
     }
 
     /** Баланс белого в строке значений: в режиме «Цвет. темп.» — сама температура, как на экране камеры. */

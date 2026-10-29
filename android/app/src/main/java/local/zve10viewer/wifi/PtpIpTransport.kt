@@ -201,7 +201,7 @@ class PtpIpTransport private constructor(
                         // тайм-аут — на тишину: большой RAW по Wi-Fi идёт дольше, но непрерывно. Пока связи нет, он
                         // не идёт, а сам по себе сеанс не закрывает — это решает слежение за связью
                         synchronized(supervisor) { supervisor.expired(t, progressAt, timeoutMs) } ->
-                            throw TransportException("камера не ответила вовремя")
+                            throw TransportException("камера не ответила вовремя", timeout = true)
                     }
                     continue
                 }

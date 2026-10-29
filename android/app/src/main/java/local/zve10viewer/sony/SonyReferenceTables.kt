@@ -18,6 +18,13 @@ object SonyReferenceTables {
     /** Подпись значения свойства; null, если справочник такого значения не знает. */
     fun valueName(code: Int, value: Long): String? = tables.values[code]?.get(value)
 
+    /**
+     * Разобрать справочник сейчас; отдаёт, сколько свойств он называет. Первое обращение разбирает 137 КБ JSON (на JVM ~26 мс, на
+     * планшете больше), и если оно придёт с экрана — кадр дрогнет. Программа зовёт это в фоне при запуске; пока идёт разбор,
+     * другое обращение ждёт его конца, а не начинает второй (`lazy` синхронизирован).
+     */
+    fun warmUp(): Int = tables.names.size
+
     private class Tables(val names: Map<Int, String>, val values: Map<Int, Map<Long, String>>)
 
     private val tables: Tables by lazy { parse(resource()) }

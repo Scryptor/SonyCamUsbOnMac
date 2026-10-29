@@ -292,6 +292,16 @@ class ScreenState {
         if (autoHidden) autoHidden = false
     }
 
+    /**
+     * Камера на связи другая (или её нет): на месте «Творческого стиля» у неё стоит Creative Style или Creative Look. Выбор в Fn и
+     * открытая строка во «Всех настройках» переезжают на то, что стоит на их месте теперь, — иначе лента сказала бы «камера
+     * сейчас не даёт менять…», а плитка не горела бы. [available] — коды свойств камеры.
+     */
+    fun followSlots(available: Set<Int>) {
+        selected = SettingCatalog.slot(selected, available)
+        editing = editing?.let { SettingCatalog.slot(it, available) }
+    }
+
     fun openFn(id: SettingID?) {
         if (id != null) selected = id
         assistOpen = false
@@ -334,6 +344,9 @@ class ScreenState {
 @Composable
 fun App(controller: CameraController) {
     val screen = remember { ScreenState() }
+    // у камеры на связи на месте «Творческого стиля» — Creative Style (ZV-E10) или Creative Look (новые камеры): выбор в Fn и
+    // открытая строка переезжают вместе с камерой, в какую бы сторону она ни сменилась. Ключ — само место, а не каждый снимок свойств
+    LaunchedEffect(controller.creativeSlot) { screen.followSlots(controller.properties.keys) }
     // отладка (debug-сборка): увеличение и галерея по adb-broadcast
     LaunchedEffect(Unit) {
         controller.debugCommands.collect { command ->

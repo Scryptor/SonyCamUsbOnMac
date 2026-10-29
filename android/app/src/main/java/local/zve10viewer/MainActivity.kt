@@ -128,6 +128,8 @@ class MainActivity : ComponentActivity() {
      * требует) и `--ei pullTime 0|1|2|4|8` (время перевода, секунд; ставится раньше метки: `--ei pullTime 4 --es mark A --es markOp
      * go`). Что вышло — в logcat с тегом ZVLens: сразу строка «касание: экран … → камера …», потом рамки камеры в её долях; метки —
      * строка `метки: marks A=… B=… pull=… moving=…` сразу и в периодической строке, начало и конец перевода — в журнале (тег ZVLink).
+     * Что дала новая камера Sony (подписи, версия кода, таблицы объектива, расстояние у метки положения) — в конце периодической строки:
+     * `камера: подписи {0x13=18 0x15=2}, версия 310, таблиц [12], расстояние 1 м, абсолютный фокус да`.
      */
     private fun debugLens(intent: Intent) {
         if (intent.hasExtra("touch") && intent.getBooleanExtra("touch", false) != controller.touchFocusOn) controller.toggleTouchFocus()

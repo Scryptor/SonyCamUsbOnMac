@@ -513,7 +513,8 @@ private fun ColumnScope.SettingsGroup(controller: CameraController, index: Int, 
         // подпись над переключателями
         Text("менять", color = Secondary, fontSize = 13.sp)
     }
-    group.second.forEach { id ->
+    // у новой камеры Sony на месте «Творческого стиля» — Creative Look (со своим значением в пресете)
+    group.second.map(controller::resolved).forEach { id ->
         PresetSettingRow(controller, index, preset, id, online)
         HorizontalDivider(color = PanelLight)
     }
@@ -529,7 +530,9 @@ private fun ColumnScope.SettingsGroup(controller: CameraController, index: Int, 
 private fun PresetSettingRow(controller: CameraController, index: Int, preset: Preset, id: SettingID, online: Boolean) {
     val value = preset.values[id]
     val included = PresetCatalog.includes(preset, id)
-    val options = if (online) PresetCatalog.options(id, controller.property(id), preset) else emptyList()
+    // названия значений Creative Look — от самой камеры, как в меню Fn
+    val names = controller.names(id)
+    val options = if (online) PresetCatalog.options(id, controller.property(id), preset, names) else emptyList()
     // температура действует только в «Цвет. темп.»: при другом балансе белого в пресете строка неактивна
     val whiteBalance = preset.values[SettingID.whiteBalance]?.takeIf { PresetCatalog.includes(preset, SettingID.whiteBalance) }
     val onlyManual = id == SettingID.colorTemperature && whiteBalance != null && whiteBalance != WhiteBalanceTemperature.MANUAL_MODE
@@ -548,7 +551,7 @@ private fun PresetSettingRow(controller: CameraController, index: Int, preset: P
             Text(id.title, color = if (included && !onlyManual) Color.White else Secondary, fontSize = 16.sp, maxLines = 2)
             note?.let { Text(it, color = Secondary, fontSize = 12.sp, lineHeight = 15.sp) }
         }
-        ValueChooser(id, value, options, canChoose) { controller.setPresetValue(index, id, it) }
+        ValueChooser(id, value, options, canChoose, names) { controller.setPresetValue(index, id, it) }
         Switch(included, { controller.setPresetIncluded(index, id, it) }, enabled = canSwitch,
             modifier = Modifier.semantics { contentDescription = "менять «${id.title}»" })
     }
@@ -556,7 +559,8 @@ private fun PresetSettingRow(controller: CameraController, index: Int, preset: P
 
 /** Значение настройки пресета: касание — варианты камеры с подписями меню Fn, сразу на текущем; выбранное отмечено. */
 @Composable
-private fun ValueChooser(id: SettingID, value: Long?, options: List<SettingOption>, enabled: Boolean, onChoose: (Long) -> Unit) {
+private fun ValueChooser(id: SettingID, value: Long?, options: List<SettingOption>, enabled: Boolean, names: Map<Long, String>?,
+                         onChoose: (Long) -> Unit) {
     var open by remember { mutableStateOf(false) }
     val scroll = rememberScrollState()
     val density = LocalDensity.current
@@ -566,7 +570,7 @@ private fun ValueChooser(id: SettingID, value: Long?, options: List<SettingOptio
                 .clickable(enabled = enabled) { open = true }.alpha(if (enabled) 1f else 0.45f).padding(horizontal = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(value?.let { ValueFormatter.label(id, it) } ?: "—", color = Color.White, fontSize = 16.sp,
+            Text(value?.let { ValueFormatter.label(id, it, names) } ?: "—", color = Color.White, fontSize = 16.sp,
                 fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
             if (enabled) Text("▾", color = Color.White, fontSize = 15.sp)
         }

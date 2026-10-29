@@ -1,16 +1,23 @@
 package local.zve10viewer
 
+import local.zve10viewer.debug.DebugFormat
+import local.zve10viewer.debug.OtherCamerasReport
 import local.zve10viewer.debug.PropertyNames
 import local.zve10viewer.ptp.PtpParseException
 import local.zve10viewer.ptp.PtpType
 import local.zve10viewer.ptp.PtpValue
+import local.zve10viewer.ptp.TransportException
+import local.zve10viewer.session.SessionException
+import local.zve10viewer.session.SilentCameras
 import local.zve10viewer.settings.CaptureMode
 import local.zve10viewer.settings.FnSlot
+import local.zve10viewer.settings.GroupFailures
 import local.zve10viewer.settings.Preset
 import local.zve10viewer.settings.PresetCatalog
 import local.zve10viewer.settings.SettingCatalog
 import local.zve10viewer.settings.SettingGroup
 import local.zve10viewer.settings.SettingID
+import local.zve10viewer.settings.SettingOptions
 import local.zve10viewer.settings.ValueFormatter
 import local.zve10viewer.sony.DeviceInfo
 import local.zve10viewer.sony.DisplayStrings
@@ -21,6 +28,7 @@ import local.zve10viewer.sony.SonyProp
 import local.zve10viewer.sony.SonyProperty
 import local.zve10viewer.sony.SonyPropertyParser
 import local.zve10viewer.sony.SonyReferenceTables
+import local.zve10viewer.ui.ScreenState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -622,6 +630,275 @@ class OtherCamerasTest {
             }
         }
         assertTrue("проверено $checked значений", checked > 150)
+    }
+
+    // MARK: - Названия от камеры в настройках
+
+    private fun creativeLook(current: Long, values: List<Long> = listOf(1L, 6L, 0x101L)) =
+        SonyProperty(SonyProp.CREATIVE_LOOK, PtpType.UINT16, 1, 1, PtpValue.Num(current), null, values, values)
+
+    @Test fun refreshedListReplacesOnlyItsOwnTypeAndDropsWhatTheCameraNoLongerGives() {
+        var strings = DisplayStrings(mapOf(0x13L to mapOf(1L to "ST", 2L to "PT"), 0x15L to mapOf(1L to "Человек")))
+        // пришёл заново список 0x13: он заменяется целиком, 0x15 на месте
+        strings = strings.replace(0x13, DisplayStrings(mapOf(0x13L to mapOf(1L to "ST", 3L to "NT"))))
+        assertEquals(mapOf(0x13L to mapOf(1L to "ST", 3L to "NT"), 0x15L to mapOf(1L to "Человек")), strings.lists)
+        // камера на тип 0x15 ответила пустым набором (списка у неё больше нет): старые названия стираются
+        strings = strings.replace(0x15, DisplayStrings())
+        assertEquals(mapOf(0x13L to mapOf(1L to "ST", 3L to "NT")), strings.lists)
+        // тип 0 — все списки: набор заменяется целиком
+        strings = strings.replace(0, DisplayStrings(mapOf(0x17L to mapOf(5L to "x"))))
+        assertEquals(mapOf(0x17L to mapOf(5L to "x")), strings.lists)
+        strings = strings.replace(0, DisplayStrings())
+        assertEquals(DisplayStrings(), strings)
+        // набор — значение: тот, у кого заменяют, прежним и остаётся
+        val before = DisplayStrings(mapOf(0x13L to mapOf(1L to "ST")))
+        before.replace(0x13, DisplayStrings())
+        assertEquals(mapOf(0x13L to mapOf(1L to "ST")), before.lists)
+    }
+
+    @Test fun onlyCreativeLookHasNamesFromTheCamera() {
+        val strings = DisplayStrings.parse(fixture("display_strings"))
+        assertEquals("FL", strings.names(SettingID.creativeLook)?.get(6L))
+        assertEquals(18, strings.names(SettingID.creativeLook)?.size)
+        // остальные списки камеры (тип 0x15 и прочие) к настройкам программы не относятся
+        for (id in SettingID.entries) if (id != SettingID.creativeLook) assertNull("$id", strings.names(id))
+        // списка Creative Look нет — названия берутся из таблиц
+        assertNull(DisplayStrings().names(SettingID.creativeLook))
+        assertNull(DisplayStrings(mapOf(0x15L to mapOf(1L to "x"))).names(SettingID.creativeLook))
+    }
+
+    @Test fun propertyLabelUsesTheCameraNamesToo() {
+        val look = creativeLook(current = 6)
+        assertEquals("FL", ValueFormatter.label(SettingID.creativeLook, look, mapOf(6L to "FL")))
+        assertEquals("FL(Film)", ValueFormatter.label(SettingID.creativeLook, look))
+        assertEquals("FL(Film)", ValueFormatter.label(SettingID.creativeLook, look, mapOf(1L to "ST")))
+        assertEquals("—", ValueFormatter.label(SettingID.creativeLook, null, mapOf(6L to "FL")))
+    }
+
+    @Test fun valueStripOptionsUseTheCameraNames() {
+        val look = creativeLook(current = 1)
+        val named = SettingOptions.options(SettingID.creativeLook, look, mapOf(1L to "ST", 6L to "FL", 0x101L to "Custom Look 1"))
+        assertEquals(listOf("ST", "FL", "Custom Look 1"), named.map { it.label })
+        assertEquals(listOf(1L, 6L, 0x101L), named.map { it.value })
+        // без списка камеры — таблицы Sony, как было; значения те же
+        val plain = SettingOptions.options(SettingID.creativeLook, look)
+        assertEquals(listOf(1L, 6L, 0x101L), plain.map { it.value })
+        assertEquals(listOf(1L, 6L, 0x101L).map { ValueFormatter.label(SettingID.creativeLook, it) }, plain.map { it.label })
+        assertEquals("FL(Film)", plain[1].label)
+        // в списке камеры нет одного значения — для него таблица, а не номер
+        val partial = SettingOptions.options(SettingID.creativeLook, look, mapOf(1L to "ST"))
+        assertEquals(listOf("ST", "FL(Film)", plain[2].label), partial.map { it.label })
+    }
+
+    @Test fun presetWindowOptionsAndChangesUseTheCameraNames() {
+        val look = creativeLook(current = 6)
+        val preset = Preset("Look", mapOf(SettingID.creativeLook to 1L))
+        val names = mapOf(1L to "ST", 6L to "FL", 0x101L to "Custom Look 1")
+        // выбор значения в окне пресетов
+        assertEquals(listOf("ST", "FL", "Custom Look 1"), PresetCatalog.options(SettingID.creativeLook, look, preset, names).map { it.label })
+        assertEquals("FL(Film)", PresetCatalog.options(SettingID.creativeLook, look, preset).map { it.label }[1])
+        // значения пресета нет среди разрешённых — его подпись тоже от камеры
+        val outside = Preset("Look", mapOf(SettingID.creativeLook to 7L))
+        assertEquals("IN", PresetCatalog.options(SettingID.creativeLook, look, outside, mapOf(7L to "IN")).first().label)
+        // «На камере изменено»
+        val strings = DisplayStrings(mapOf(DisplayStrings.CREATIVE_LOOK_TYPE to names))
+        assertEquals(listOf("Look ST → FL"), PresetCatalog.changes(preset, mapOf(SonyProp.CREATIVE_LOOK to look), strings).map { it.label })
+        val plain = PresetCatalog.changes(preset, mapOf(SonyProp.CREATIVE_LOOK to look)).map { it.label }
+        assertEquals(listOf("Look ${ValueFormatter.label(SettingID.creativeLook, 1)} → FL(Film)"), plain)
+        // названия камеры не задевают подписи других настроек
+        val iso = SonyProperty(SonyProp.ISO, PtpType.UINT32, 1, 1, PtpValue.Num(400), null, listOf(100L, 400L), listOf(100L, 400L))
+        val isoPreset = Preset("ISO", mapOf(SettingID.iso to 100L))
+        assertEquals(listOf("ISO 100 → 400"), PresetCatalog.changes(isoPreset, mapOf(SonyProp.ISO to iso), strings).map { it.label })
+    }
+
+    @Test fun groupFailureNamesCreativeLookLikeTheMainCamera() {
+        // значение выбрано по списку главной камеры — в «Не удалось на «B»: …» оно называется так же
+        assertEquals("Look FL", GroupFailures.label(SettingID.creativeLook, 6, mapOf(6L to "FL")))
+        assertEquals("Look FL(Film)", GroupFailures.label(SettingID.creativeLook, 6))
+        // другие подписи — как были
+        assertEquals("ISO 51200", GroupFailures.label(SettingID.iso, 51200, mapOf(51200L to "x")))
+        assertEquals("Фокус AF-C", GroupFailures.label(SettingID.focusMode, 0x8004))
+    }
+
+    // MARK: - Выбор в Fn переезжает вместе с камерой
+
+    @Test fun creativeSelectionFollowsTheSlotWhenTheCameraChanges() {
+        val zv = setOf(SonyProp.CREATIVE_STYLE)
+        val newer = setOf(SonyProp.CREATIVE_LOOK, SonyProp.PP_GAMMA)
+        // выбрали «Творческий стиль» на ZV-E10, подключили новую камеру — выбран Creative Look; и обратно
+        assertEquals(SettingID.creativeLook, SettingCatalog.slot(SettingID.creativeStyle, newer))
+        assertEquals(SettingID.creativeStyle, SettingCatalog.slot(SettingID.creativeLook, zv))
+        // своё место у камеры остаётся как есть
+        assertEquals(SettingID.creativeLook, SettingCatalog.slot(SettingID.creativeLook, newer))
+        assertEquals(SettingID.creativeStyle, SettingCatalog.slot(SettingID.creativeStyle, zv))
+        // есть оба свойства — место за стилем (как в `resolved`); свойств нет (камеры нет) — тоже
+        assertEquals(SettingID.creativeStyle, SettingCatalog.slot(SettingID.creativeLook, setOf(SonyProp.CREATIVE_STYLE, SonyProp.CREATIVE_LOOK)))
+        assertEquals(SettingID.creativeStyle, SettingCatalog.slot(SettingID.creativeStyle, emptySet()))
+        assertEquals(SettingID.creativeStyle, SettingCatalog.slot(SettingID.creativeLook, emptySet()))
+        // остальные настройки — как есть
+        for (id in SettingID.entries) {
+            if (id == SettingID.creativeStyle || id == SettingID.creativeLook) continue
+            assertEquals("$id", id, SettingCatalog.slot(id, newer))
+            assertEquals("$id", id, SettingCatalog.slot(id, zv))
+            assertEquals("$id", id, SettingCatalog.slot(id, emptySet()))
+        }
+    }
+
+    @Test fun theFnSelectionAndTheOpenRowFollowTheCameraInBothDirections() {
+        val zv = setOf(SonyProp.CREATIVE_STYLE)
+        val newer = setOf(SonyProp.CREATIVE_LOOK)
+        val screen = ScreenState()
+        screen.selected = SettingID.creativeStyle
+        screen.editing = SettingID.creativeStyle
+        // подключили новую камеру: плитка и открытая строка — Creative Look
+        screen.followSlots(newer)
+        assertEquals(SettingID.creativeLook, screen.selected)
+        assertEquals(SettingID.creativeLook, screen.editing)
+        // и снова ZV-E10
+        screen.followSlots(zv)
+        assertEquals(SettingID.creativeStyle, screen.selected)
+        assertEquals(SettingID.creativeStyle, screen.editing)
+        // чужие выборы не трогаются, закрытая строка остаётся закрытой
+        screen.selected = SettingID.iso
+        screen.editing = null
+        screen.followSlots(newer)
+        assertEquals(SettingID.iso, screen.selected)
+        assertNull(screen.editing)
+    }
+
+    // MARK: - Камера, которая не отвечает: помним её до перезапуска
+
+    @Test fun aCameraThatDoesNotAnswerAnOptionalOperationIsNotAskedAgain() {
+        val silent = SilentCameras()
+        assertFalse(silent.skips("cam-1"))
+        val timeout = TransportException("камера не ответила вовремя", timeout = true)
+        // тайм-аут — камера записана; впервые — true: в журнал строка одна
+        assertTrue(silent.note(timeout, "cam-1"))
+        assertTrue(silent.skips("cam-1"))
+        assertFalse(silent.note(timeout, "cam-1"))
+        // другая камера не затронута и записывается своим чередом
+        assertFalse(silent.skips("cam-2"))
+        assertTrue(silent.note(timeout, "cam-2"))
+        assertTrue(silent.skips("cam-2"))
+    }
+
+    @Test fun onlyATimeoutMakesACameraSilent() {
+        val silent = SilentCameras()
+        val errors = listOf<Throwable>(TransportException("связь закрыта", disconnected = true), TransportException("запись в камеру не прошла"),
+            PtpParseException("truncated at 3"), SessionException.OperationFailed(SonyOp.GET_DISPLAY_STRING_LIST, 0x2006),
+            kotlin.coroutines.cancellation.CancellationException("отмена"))
+        for (error in errors) assertFalse("$error", silent.note(error, "cam"))
+        assertFalse(silent.skips("cam"))
+    }
+
+    @Test fun aCameraWithoutAnIdCannotBeRemembered() {
+        // id нет — запомнить некого: в следующем сеансе спросим снова
+        val silent = SilentCameras()
+        assertFalse(silent.note(TransportException("камера не ответила вовремя", timeout = true), null))
+        assertFalse(silent.skips(null))
+    }
+
+    // MARK: - Панель отладки: что новая камера сообщает сверх свойств
+
+    private val nbsp = "\u00A0"
+
+    @Test fun debugReportHasNoRowsForACameraThatListsNoNewOperation() {
+        val zv = DeviceInfo.parse(fixture("deviceinfo"))
+        val strings = DisplayStrings.parse(fixture("display_strings"))
+        val lens = LensInformation.parse(fixture("lens_information"))
+        // даже если какие-то данные есть (откуда им взяться у ZV-E10?), строк у неё не будет
+        assertTrue(OtherCamerasReport.rows(zv, strings, 310, lens, 1L).isEmpty())
+    }
+
+    @Test fun debugReportShowsVersionListsAndTheLensTable() {
+        val newer = DeviceInfo.parse(deviceInfo(listOf(0x9201, 0x9209, 0x9215, 0x9216, 0x9223)))
+        val strings = DisplayStrings.parse(fixture("display_strings"))
+        val lens = LensInformation.parse(fixture("lens_information"))
+        val rows = OtherCamerasReport.rows(newer, strings, 310, lens, 1L)
+        val byLabel = rows.associate { it.label to it.value }
+        assertEquals("3.10 (310)", byLabel["Версия кода (0x9216)"])
+        // каждый список — своей строкой; пары «код название» не рвутся при переносе (неразрывный пробел)
+        val looks = byLabel["Подписи 0x13"]!!
+        assertTrue(looks, looks.startsWith("Creative Look, 18 шт.: 0x0001${nbsp}ST · 0x0002${nbsp}PT · "))
+        assertTrue(looks, "0x0006${nbsp}FL" in looks && looks.endsWith("0x0106${nbsp}Custom Look 6"))
+        assertEquals("2 шт.: 0x0001${nbsp}Человек · 0x0002${nbsp}Животное", byLabel["Подписи 0x15"])
+        // таблица с догадкой о шкале и сырыми парами: положение → метры
+        val table = byLabel["Объектив (0x9223)"]!!
+        assertTrue(table, table.startsWith("12 пар, шкала 0…65535 (догадка по наибольшему положению)\n0${nbsp}→${nbsp}0,25${nbsp}м · 5958${nbsp}→${nbsp}0,3${nbsp}м · "))
+        assertTrue(table, table.endsWith("65535${nbsp}→${nbsp}1000000${nbsp}м"))
+        assertEquals(setOf("Версия кода (0x9216)", "Подписи 0x13", "Подписи 0x15", "Объектив (0x9223)"), byLabel.keys)
+    }
+
+    @Test fun debugReportSaysWhyThereIsNoData() {
+        val newer = DeviceInfo.parse(deviceInfo(listOf(0x9201, 0x9209, 0x9215, 0x9216, 0x9223)))
+        // камера операции называет, а данных нет: версия «нет», списков нет, таблицы нет — и 0xE086 как есть
+        val none = OtherCamerasReport.rows(newer, DisplayStrings(), null, null, 0L).associate { it.label to it.value }
+        assertEquals("нет", none["Версия кода (0x9216)"])
+        assertEquals("списков нет", none["Подписи (0x9215)"])
+        assertEquals("данных нет, 0xE086 = 0", none["Объектив (0x9223)"])
+        assertEquals("данных нет, 0xE086 = нет свойства",
+            OtherCamerasReport.rows(newer, DisplayStrings(), null, null, null).first { it.label == "Объектив (0x9223)" }.value)
+        // операции по отдельности: названа одна — строки только про неё
+        val onlyLens = DeviceInfo.parse(deviceInfo(listOf(0x9201, 0x9209, 0x9223)))
+        assertEquals(listOf("Объектив (0x9223)"), OtherCamerasReport.rows(onlyLens, DisplayStrings(), 310, null, 1L).map { it.label })
+    }
+
+    @Test fun debugReportShowsEveryTableWhenThereAreSeveralAndSaysWhyNoDistances() {
+        val newer = DeviceInfo.parse(deviceInfo(listOf(0x9201, 0x9209, 0x9223)))
+        val two = LensInformation(listOf(
+            listOf(LensInformation.Point(0.0, 0.25), LensInformation.Point(65535.0, 100_000.0)),
+            listOf(LensInformation.Point(0.0, 0.3), LensInformation.Point(100.0, 50_000.0))))
+        val rows = OtherCamerasReport.rows(newer, DisplayStrings(), null, two, 1L)
+        assertEquals(listOf("Объектив: таблица 1 из 2", "Объектив: таблица 2 из 2", "Расстояния на шкале"), rows.map { it.label })
+        assertTrue(rows[0].value, rows[0].value.startsWith("2 пар, шкала 0…65535"))
+        assertTrue(rows[1].value, rows[1].value.startsWith("2 пар, шкала 0…65535"))
+        assertEquals("нет: таблиц 2, какая верна, справочник не говорит", rows[2].value)
+        // таблица в шкале 0xD24C: так и написано
+        val steps = LensInformation(listOf(listOf(LensInformation.Point(0.0, 0.3), LensInformation.Point(100.0, 1_000_000.0))))
+        assertTrue(OtherCamerasReport.rows(newer, DisplayStrings(), null, steps, 1L)[0].value.startsWith("2 пар, шкала 0…100 "))
+    }
+
+    @Test fun theDebugPropertyRowNamesCreativeLookLikeTheScreenDoes() {
+        val look = creativeLook(current = 6)
+        val strings = DisplayStrings(mapOf(DisplayStrings.CREATIVE_LOOK_TYPE to mapOf(6L to "FL")))
+        val named = DebugFormat.propertyRow(look, strings)
+        assertTrue(named.value, named.value.startsWith("6 · FL · "))
+        // без списка камеры — подпись из таблиц Sony, как и на экране
+        assertTrue(DebugFormat.propertyRow(look).value, DebugFormat.propertyRow(look).value.startsWith("6 · FL(Film) · "))
+        // свойство, которого у камеры нет в настройках программы, строкой остаётся как было
+        val iso = SonyProperty(SonyProp.ISO, PtpType.UINT32, 1, 1, PtpValue.Num(400), null, listOf(100L, 400L), listOf(100L, 400L))
+        assertEquals(DebugFormat.propertyRow(iso), DebugFormat.propertyRow(iso, strings))
+    }
+
+    @Test fun logcatLineSaysWhatTheCameraGaveAndWhereTheMarkerIs() {
+        val strings = DisplayStrings.parse(fixture("display_strings"))
+        val lens = LensInformation.parse(fixture("lens_information"))
+        assertEquals("камера: подписи {0x13=18 0x15=2}, версия 310, таблиц [12], расстояние 1 м, абсолютный фокус да",
+            OtherCamerasReport.line(strings, 310, lens, "1 м", absolute = true))
+        // ZV-E10: ничего нового
+        assertEquals("камера: подписи —, версия —, таблиц —, расстояние —, абсолютный фокус нет",
+            OtherCamerasReport.line(DisplayStrings(), null, null, null, absolute = false))
+        // две таблицы — обе названы, расстояния нет
+        val two = LensInformation(listOf(listOf(LensInformation.Point(0.0, 0.25)), listOf(LensInformation.Point(0.0, 0.3), LensInformation.Point(1.0, 2.0))))
+        assertTrue(OtherCamerasReport.line(DisplayStrings(), null, two, null, absolute = false).contains("таблиц [1 2], расстояние —"))
+    }
+
+    // MARK: - Справочник Sony разогревается заранее
+
+    @Test fun referenceTablesCanBeWarmedUpOnAnotherThreadAndGiveTheSameAnswers() {
+        // первое обращение разбирает 137 КБ JSON: на планшете это заметно, и приложение делает его в фоне при запуске
+        var known = 0
+        val warm = Thread { known = SonyReferenceTables.warmUp() }
+        warm.start()
+        warm.join(30_000)
+        assertFalse("разогрев не кончился за 30 с", warm.isAlive)
+        // справочник называет сотни свойств (737 на день написания): разогрев и правда разобрал его
+        assertTrue("свойств в справочнике: $known", known > 700)
+        assertEquals("FL(Film)", SonyReferenceTables.valueName(0xD0FA, 6))
+        assertEquals("Creative Look", SonyReferenceTables.propertyNames[0xD0FA])
+        // повторный разогрев ничего не меняет
+        assertEquals(known, SonyReferenceTables.warmUp())
+        assertEquals("FL(Film)", SonyReferenceTables.valueName(0xD0FA, 6))
     }
 
     // MARK: - Имена свойств

@@ -99,6 +99,15 @@ object SettingCatalog {
             id
         }
 
+    /**
+     * Какая настройка стоит у этой камеры на месте [id] в Fn и во «Всех настройках», когда [id] — Creative Style или Creative
+     * Look: у них одно место на двоих, и выбор, сделанный на камере с другим из них (в ленте значений, в открытой строке),
+     * переезжает вместе с камерой — иначе лента сказала бы «камера сейчас не даёт менять…», а плитка не горела бы. Камеры нет
+     * (свойств нет) — место за Creative Style, как в [resolved]. Остальные настройки — как есть.
+     */
+    fun slot(id: SettingID, available: Set<Int>): SettingID =
+        if (id == SettingID.creativeStyle || id == SettingID.creativeLook) resolved(SettingID.creativeStyle, available) else id
+
     private val infoLine = listOf(SettingID.shutter, SettingID.aperture, SettingID.iso, SettingID.whiteBalance,
         SettingID.exposureComp, SettingID.focusMode)
 
@@ -110,9 +119,12 @@ object SettingCatalog {
 data class SettingOption(val value: Long, val label: String)
 
 object SettingOptions {
-    /** Значения, которые можно выбрать сейчас. Берутся только из переданного свойства. */
-    fun options(id: SettingID, property: SonyProperty): List<SettingOption> =
-        values(property).map { SettingOption(it, ValueFormatter.label(id, it)) }
+    /**
+     * Значения, которые можно выбрать сейчас. Берутся только из переданного свойства. [names] — названия значений от самой камеры
+     * (`DisplayStrings.names`): они важнее наших таблиц.
+     */
+    fun options(id: SettingID, property: SonyProperty, names: Map<Long, String>? = null): List<SettingOption> =
+        values(property).map { SettingOption(it, ValueFormatter.label(id, it, names)) }
 
     /** Соседнее разрешённое значение; null, если сдвинуться некуда. `from` — точка отсчёта вместо текущего значения. */
     fun neighbour(property: SonyProperty, offset: Int, from: Long? = null): Long? {

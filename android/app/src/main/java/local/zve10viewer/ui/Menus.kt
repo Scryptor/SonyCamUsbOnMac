@@ -127,7 +127,8 @@ fun FnMenu(controller: CameraController, screen: ScreenState) {
 private fun Tile(controller: CameraController, screen: ScreenState, slot: FnSlot, modifier: Modifier) {
     when (slot) {
         is FnSlot.Setting -> {
-            val id = slot.id
+            // у новой камеры Sony на месте «Творческого стиля» — Creative Look
+            val id = controller.resolved(slot.id)
             val enabled = controller.isWritable(id)
             val selected = id == screen.selected
             Column(
@@ -322,7 +323,9 @@ fun AllSettingsPanel(controller: CameraController, screen: ScreenState, modifier
         }
         Box(Modifier.width(1.dp).fillMaxSize().background(PanelLight))
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(16.dp)) {
-            screen.group.settings.forEach { id ->
+            screen.group.settings.forEach { setting ->
+                // у новой камеры Sony на месте «Творческого стиля» — Creative Look
+                val id = controller.resolved(setting)
                 val writable = controller.isWritable(id)
                 Row(
                     Modifier.fillMaxWidth().clickable(enabled = writable) {

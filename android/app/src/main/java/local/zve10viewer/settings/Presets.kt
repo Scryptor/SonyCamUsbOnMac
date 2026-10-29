@@ -5,6 +5,7 @@ import kotlinx.coroutines.launch
 import local.zve10viewer.ptp.TransportException
 import local.zve10viewer.session.CameraSession
 import local.zve10viewer.session.SetResult
+import local.zve10viewer.sony.DisplayStrings
 import local.zve10viewer.sony.SonyProperty
 import org.json.JSONArray
 import org.json.JSONObject
@@ -108,16 +109,18 @@ object PresetCatalog {
 
     /**
      * Что из применяемого пресетом (effective) на камере сейчас другое. Только то, что камера сейчас даёт менять: выдержку
-     * в режиме A пресет поставить не может — это не изменение, его не сохранить в пресет и не вернуть.
+     * в режиме A пресет поставить не может — это не изменение, его не сохранить в пресет и не вернуть. [strings] — подписи от
+     * самой камеры: значения Creative Look называются в списке так, как их называет камера.
      */
-    fun changes(preset: Preset, properties: Map<Int, SonyProperty>): List<PresetChange> {
+    fun changes(preset: Preset, properties: Map<Int, SonyProperty>, strings: DisplayStrings = DisplayStrings()): List<PresetChange> {
         val values = effective(preset)
         val cameraKelvin = properties[SettingID.colorTemperature.code]?.current?.intValue
         return changeOrder.mapNotNull { id ->
             val value = values[id] ?: return@mapNotNull null
             val property = properties[id.code]?.takeIf { it.isWritable } ?: return@mapNotNull null
             val current = property.current.intValue?.takeIf { it != value } ?: return@mapNotNull null
-            PresetChange(id, value, current, changeLabel(id, value, current, values[SettingID.colorTemperature], cameraKelvin))
+            PresetChange(id, value, current,
+                changeLabel(id, value, current, values[SettingID.colorTemperature], cameraKelvin, strings.names(id)))
         }
     }
 
@@ -125,13 +128,14 @@ object PresetCatalog {
      * «1/50 → 1/100», «f/2.8 → f/4», «3200 K → 5600 K» — значения говорят сами за себя; «ISO 800 → 1600»; баланс белого —
      * как в summary, с температурой пресета и камеры; остальное — с коротким названием: «Фокус AF-S → AF-C».
      */
-    fun changeLabel(id: SettingID, from: Long, to: Long, presetKelvin: Long?, cameraKelvin: Long?): String = when (id) {
+    fun changeLabel(id: SettingID, from: Long, to: Long, presetKelvin: Long?, cameraKelvin: Long?,
+                    names: Map<Long, String>? = null): String = when (id) {
         SettingID.shutter, SettingID.aperture, SettingID.colorTemperature ->
             ValueFormatter.label(id, from) + " → " + ValueFormatter.label(id, to)
         SettingID.iso -> "ISO " + ValueFormatter.label(id, from) + " → " + ValueFormatter.label(id, to)
         SettingID.whiteBalance ->
             ValueFormatter.whiteBalanceLabel(from, presetKelvin) + " → " + ValueFormatter.whiteBalanceLabel(to, cameraKelvin)
-        else -> id.shortTitle + " " + ValueFormatter.label(id, from) + " → " + ValueFormatter.label(id, to)
+        else -> id.shortTitle + " " + ValueFormatter.label(id, from, names) + " → " + ValueFormatter.label(id, to, names)
     }
 
     /**
@@ -159,18 +163,19 @@ object PresetCatalog {
     /**
      * Из чего выбирать значение в окне пресетов: что камера даёт выбрать сейчас, с подписями меню Fn. Температура,
      * которую камера сейчас выбрать не даёт (не тот режим баланса белого), — из запасного диапазона. Свойства нет
-     * (камера не на связи) — выбирать не из чего. Значения пресета нет среди вариантов — оно первым, со своей подписью.
+     * (камера не на связи) — выбирать не из чего. Значения пресета нет среди вариантов — оно первым, со своей подписью. [names] —
+     * названия значений от самой камеры, как в меню Fn.
      */
-    fun options(id: SettingID, property: SonyProperty?, preset: Preset): List<SettingOption> {
+    fun options(id: SettingID, property: SonyProperty?, preset: Preset, names: Map<Long, String>? = null): List<SettingOption> {
         property ?: return emptyList()
-        var list = SettingOptions.options(id, property)
+        var list = SettingOptions.options(id, property, names)
         if (list.isEmpty() && id == SettingID.colorTemperature) {
             val range = WhiteBalanceTemperature.fallbackRange
             list = (range.min..range.max step range.step).map { SettingOption(it, ValueFormatter.label(id, it)) }
         }
         val value = preset.values[id]
         if (list.isEmpty() || value == null || list.any { it.value == value }) return list
-        return listOf(SettingOption(value, ValueFormatter.label(id, value))) + list
+        return listOf(SettingOption(value, ValueFormatter.label(id, value, names))) + list
     }
 
     /**
