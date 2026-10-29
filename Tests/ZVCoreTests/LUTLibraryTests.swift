@@ -211,10 +211,60 @@ private func with<T>(_ body: (Sandbox) throws -> T) throws -> T {
 @Test func hugeFileIsRefusedBeforeItIsRead() throws {
     try with { sandbox in
         let library = sandbox.library()
-        // куб 65³ — около десяти мегабайт; тридцать три — это уже не LUT
+        // куб 65³ текстом — от семи до двенадцати мегабайт; семнадцать — это уже не LUT
         let big = try sandbox.write("big.cube", Data(count: LUTLibrary.maxFileBytes + 1))
         #expect(throws: LUTLibrary.Failure.cube(.notThreeD)) { try library.importFile(big) }
         #expect(library.names.isEmpty)
+    }
+}
+
+@Test func fileSizeLimitIsTheSameAsOnAndroid() {
+    // 16 МБ на обеих платформах: на планшете больший куб не помещается в память, и Mac не обещает того, чего нет у Android
+    #expect(LUTLibrary.maxFileBytes == 16 << 20)
+}
+
+/// Правильный куб 2³, добитый строкой-комментарием до ровно `bytes` байт: размер — единственное, чем он отличается от обычного.
+private func paddedCube(bytes: Int) -> Data {
+    let body = Data(cube().utf8)
+    precondition(bytes > body.count + 3)
+    var data = Data("# ".utf8)
+    data.append(Data(repeating: UInt8(ascii: "x"), count: bytes - body.count - 3))
+    data.append(UInt8(ascii: "\n"))
+    data.append(body)
+    precondition(data.count == bytes)
+    return data
+}
+
+@Test func fileExactlyAtTheLimitIsStillAccepted() throws {
+    try with { sandbox in
+        let library = sandbox.library()
+        let name = try library.importFile(try sandbox.write("edge.cube", paddedCube(bytes: LUTLibrary.maxFileBytes)))
+        #expect(name == "edge")
+        #expect(library.names == ["edge"])
+    }
+}
+
+@Test func fileOneByteOverTheLimitIsRefusedWithTheTextOfAForeignFile() throws {
+    try with { sandbox in
+        let library = sandbox.library()
+        // тот же правильный куб, что в прошлом тесте, но на байт тяжелее: отказ только за размер, текст — как у чужого файла
+        let over = try sandbox.write("over.cube", paddedCube(bytes: LUTLibrary.maxFileBytes + 1))
+        #expect(throws: LUTLibrary.Failure.cube(.notThreeD)) { try library.importFile(over) }
+        #expect(LUTLibrary.message(.cube(.notThreeD)) == "Нужен 3D LUT в формате .cube")
+        // ничего не скопировано, и папка не создана ради отказа
+        #expect(library.names.isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: sandbox.folder.path))
+    }
+}
+
+@Test func fileOverTheLimitInsideTheFolderIsListedButNotLoaded() throws {
+    // положили в папку руками, мимо добавления: в списке есть (выбрать можно), а читаться не будет — как и испорченный
+    try with { sandbox in
+        try FileManager.default.createDirectory(at: sandbox.folder, withIntermediateDirectories: true)
+        try paddedCube(bytes: LUTLibrary.maxFileBytes + 1).write(to: sandbox.folder.appendingPathComponent("heavy.cube"))
+        let library = sandbox.library()
+        #expect(library.names == ["heavy"])
+        #expect(library.load("heavy") == nil)
     }
 }
 
@@ -516,5 +566,78 @@ private func with<T>(_ body: (Sandbox) throws -> T) throws -> T {
         #expect(library.names == ["LOOK"])
         #expect(sandbox.stored() == ["LOOK.cube"])
         #expect(library.load("LOOK") == (try CubeFile.parse(cube(inverted: true))))
+    }
+}
+
+// MARK: - Остатки оборванной записи
+
+/// Положить в папку программы файл (папку создаёт, если её нет).
+private func put(_ name: String, in folder: URL, _ text: String = "x") throws {
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    try Data(text.utf8).write(to: folder.appendingPathComponent(name))
+}
+
+@Test func leftoversOfAKilledWriteAreSweptWhenTheLibraryIsCreated() throws {
+    // процесс убили между записью во временный файл и переименованием: `.import-*.tmp` остался навсегда
+    try with { sandbox in
+        try put(".import-6F1C2D3E-AAAA-BBBB-CCCC-0123456789AB.tmp", in: sandbox.folder, String(repeating: "x", count: 5000))
+        try put(".import-halfwritten.tmp", in: sandbox.folder, "LUT_3D_SIZE 2\n0 0 0\n")
+        try put("keep.cube", in: sandbox.folder, cube())
+        let library = sandbox.library()
+        #expect(sandbox.stored() == ["keep.cube"])
+        #expect(library.names == ["keep"])
+    }
+}
+
+@Test func onlyImportLeftoversAreSwept() throws {
+    // чужое не трогаем: скрытый .cube, другие .tmp, файл с другим суффиксом, папка с таким именем
+    try with { sandbox in
+        try put(".import-1.tmp", in: sandbox.folder)
+        try put(".hidden.cube", in: sandbox.folder, cube())
+        try put("notes.tmp", in: sandbox.folder)
+        try put(".import-2.txt", in: sandbox.folder)
+        try put(".other-3.tmp", in: sandbox.folder)
+        try put("look.cube", in: sandbox.folder, cube())
+        try FileManager.default.createDirectory(at: sandbox.folder.appendingPathComponent(".import-dir.tmp"), withIntermediateDirectories: true)
+        _ = sandbox.library()
+        #expect(sandbox.stored() == [".hidden.cube", ".import-2.txt", ".import-dir.tmp", ".other-3.tmp", "look.cube", "notes.tmp"])
+    }
+}
+
+@Test func aLinkNamedLikeALeftoverIsRemovedButNotWhatItPointsTo() throws {
+    try with { sandbox in
+        let target = try sandbox.write("precious.cube", cube())
+        try FileManager.default.createDirectory(at: sandbox.folder, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: sandbox.folder.appendingPathComponent(".import-link.tmp"), withDestinationURL: target)
+        _ = sandbox.library()
+        #expect(sandbox.stored().isEmpty)
+        #expect(FileManager.default.fileExists(atPath: target.path))
+    }
+}
+
+@Test func creatingTheLibraryDoesNotMakeTheFolder() throws {
+    try with { sandbox in
+        _ = sandbox.library()
+        #expect(!FileManager.default.fileExists(atPath: sandbox.folder.path))
+    }
+}
+
+@Test func theLibraryStillWorksRightAfterASweep() throws {
+    try with { sandbox in
+        try put(".import-old.tmp", in: sandbox.folder, "half")
+        let library = sandbox.library()
+        #expect(try library.importFile(try sandbox.write("fresh.cube", cube())) == "fresh")
+        #expect(sandbox.stored() == ["fresh.cube"])
+    }
+}
+
+@Test func aSecondLibraryOnTheSameFolderSweepsOnlyWhatIsLeftBehind() throws {
+    // один запуск программы — одна библиотека; но и вторая (скажем, в тесте) не должна трогать настоящие файлы
+    try with { sandbox in
+        _ = try sandbox.library().importFile(try sandbox.write("Look.cube", cube()))
+        try put(".import-dead.tmp", in: sandbox.folder)
+        let second = sandbox.library()
+        #expect(sandbox.stored() == ["Look.cube"])
+        #expect(second.load("Look") == (try CubeFile.parse(cube())))
     }
 }

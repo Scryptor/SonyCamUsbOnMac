@@ -61,15 +61,13 @@ struct TouchFocusHelp: View {
                     .frame(width: 18, height: 18)
                 Text("Фокус касанием").font(.headline)
             }
-            Text(controller.touchFocusNow)
+            // Одна строка «Сейчас». Пипетка отбирает щелчок у фокуса: пока она включена, кнопка горит, но фокус не ставится —
+            // об этом и строка, жёлтая; белая «касание двигает точку AF» была бы неправдой и спорила бы с ней, так что не рядом,
+            // а вместо неё (`TouchFocus.nowLine`)
+            let probeOn = screen.assist.probe
+            Text(TouchFocus.nowLine(probeOn: probeOn, now: controller.touchFocusNow))
                 .font(.callout.weight(.semibold))
-            // пипетка отбирает щелчок у фокуса: пока она включена, кнопка горит, но фокус не ставится — сказать об этом здесь
-            if screen.assist.probe {
-                Text("Сейчас включена «Пипетка»: щелчок по кадру ставит её, а не фокус. Выключили пипетку (клавиша I) — щелчок "
-                     + "снова ставит фокус.")
-                    .font(.callout.weight(.semibold))
-                    .foregroundStyle(.yellow)
-            }
+                .foregroundStyle(probeOn ? AnyShapeStyle(.yellow) : AnyShapeStyle(.primary))
             Text("Пока кнопка горит синим, щелчок по кадру ставит туда фокус. Как — решает зона фокуса камеры:")
             VStack(alignment: .leading, spacing: 5) {
                 Text("• «Точка» и «Зона» — рамка AF переезжает в точку щелчка.")

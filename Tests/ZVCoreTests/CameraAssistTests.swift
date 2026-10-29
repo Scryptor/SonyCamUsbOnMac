@@ -97,6 +97,26 @@ import Testing
             .hasPrefix("Сейчас камера не даёт"))
 }
 
+@Test func helpHasOneNowLineAndTheProbeOwnsItWhileItIsOn() {
+    let cameraSays = [
+        TouchFocus.helpNow(method: .areaPosition, area: "Точка M", touchFunction: 4, focusMode: 0x8004, zoomScale: 1000),
+        TouchFocus.helpNow(method: .remoteTouch, area: "Широкая", touchFunction: 4, focusMode: 0x8004, zoomScale: 1000),
+        TouchFocus.helpNow(method: nil, area: "Широкая", touchFunction: 4, focusMode: 1, zoomScale: nil),
+        TouchFocus.helpNow(method: nil, area: "Центр", touchFunction: 3, focusMode: 0x8004, zoomScale: 1100),
+    ]
+    for now in cameraSays {
+        // пипетка выключена — строка камеры как есть
+        #expect(TouchFocus.nowLine(probeOn: false, now: now) == now)
+        // включена — вместо неё (а не рядом) строка про пипетку: «касание двигает точку AF» тут неправда, и жёлтая под ней
+        // противоречила бы ей; что бы камера ни говорила, строка одна и та же
+        #expect(TouchFocus.nowLine(probeOn: true, now: now) == TouchFocus.probeNow)
+    }
+    #expect(TouchFocus.probeNow.hasPrefix("Сейчас включена «Пипетка»"))
+    #expect(!TouchFocus.probeNow.contains("двигает точку AF"))
+    // про выход: как снова поставить фокус
+    #expect(TouchFocus.probeNow.contains("Выключили пипетку"))
+}
+
 @Test func touchFocusMapsTheFrameTo640x480() {
     #expect(TouchFocus.encode(x: 0, y: 0) == 0)
     #expect(TouchFocus.encode(x: 1, y: 1) == (639 << 16 | 479))

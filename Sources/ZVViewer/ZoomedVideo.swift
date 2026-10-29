@@ -119,11 +119,13 @@ struct ZoomableVideo: View {
             .simultaneousGesture(
                 DragGesture(minimumDistance: 3)
                     .onChanged { value in
-                        // новый жест: начат на метке пипетки — тащит её, а не картинку (и не ставит фокус: это не щелчок)
+                        // новый жест: начат на метке пипетки — тащит её, а не картинку (и не ставит фокус: это не щелчок). Метку, которой
+                        // не видно (увеличение сдвинули, она за краем экрана), жест у края не хватает
                         if drag?.start != value.startLocation {
                             let marker = ProbeLayout.markerCenter(screen.probePoint, in: screen.zoom.imageRect(view: size, frame: frameSize))
-                            drag = (value.startLocation,
-                                    screen.assist.probe && ProbeLayout.grabs(value.startLocation, marker: marker) ? screen.probePoint : nil)
+                            let grabbed = screen.assist.probe
+                                && ProbeLayout.grabs(value.startLocation, marker: marker, within: CGRect(origin: .zero, size: size))
+                            drag = (value.startLocation, grabbed ? screen.probePoint : nil)
                         }
                         if let base = drag?.probe {
                             screen.placeProbe(ProbeLayout.dragged(from: base, by: value.translation,

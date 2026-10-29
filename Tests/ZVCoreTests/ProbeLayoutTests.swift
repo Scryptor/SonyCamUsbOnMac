@@ -121,6 +121,134 @@ private let reach = ProbeLayout.markerDiameter / 2 + ProbeLayout.gap
     #expect(empty.x.isFinite && empty.y.isFinite)
 }
 
+// MARK: - Табличка и колонка кнопок справа
+
+/// Экран окна: 1280×800 pt, колонка кнопок справа (зум, режим, фокус, запись) — высокая, по середине высоты.
+private let screen = CGRect(x: 0, y: 0, width: 1280, height: 800)
+private let column = CGRect(x: 1186, y: 110, width: 72, height: 580)
+
+/// Пересечение с положительной площадью: прикосновение краями — не наложение (как `overlaps` у Compose на Android).
+private func overlaps(_ a: CGRect, _ b: CGRect) -> Bool {
+    a.maxX > b.minX && b.maxX > a.minX && a.maxY > b.minY && b.maxY > a.minY
+}
+
+@Test func markerNextToTheColumnGetsItsPlateOnTheLeft() {
+    // метка в 180 pt от края: справа табличка вошла бы в область (1116…1266), но легла бы на колонку
+    let o = ProbeLayout.plateOrigin(marker: CGPoint(x: 1100, y: 400), plate: plate, in: screen, avoiding: column)
+    #expect(o == CGPoint(x: 1100 - reach - plate.width, y: 380))
+    // и то же место без колонки — справа, как было
+    #expect(ProbeLayout.plateOrigin(marker: CGPoint(x: 1100, y: 400), plate: plate, in: screen).x == 1100 + reach)
+    #expect(ProbeLayout.plateOrigin(marker: CGPoint(x: 1100, y: 400), plate: plate, in: screen, avoiding: nil).x == 1100 + reach)
+}
+
+@Test func markerAboveOrBelowTheColumnKeepsItsPlateOnTheRight() {
+    // над колонкой (y < 110 − 12 − 40) и под ней места справа хватает, и колонка не мешает: правило прежнее
+    for y in [CGFloat(40), 770] {
+        #expect(ProbeLayout.plateOrigin(marker: CGPoint(x: 1100, y: y), plate: plate, in: screen, avoiding: column).x == 1100 + reach, "\(y)")
+    }
+    // у самого правого края над колонкой места справа нет, и табличка уходит влево, как раньше, — колонка тут ни при чём
+    let corner = ProbeLayout.plateOrigin(marker: CGPoint(x: 1250, y: 40), plate: plate, in: screen, avoiding: column)
+    #expect(corner.x == 1250 - reach - plate.width)
+}
+
+@Test func plateThatJustClearsTheColumnGapStaysOnTheMarkersSide() {
+    // табличка в 12 pt от колонки ровно (край в край с просветом) колонку не трогает: вбок её не уводят, а на 0,5 pt ближе — уводят
+    let gapTop = column.minY - ProbeLayout.columnGap - plate.height          // нижний край таблички — на просвете над колонкой
+    let gapBottom = column.maxY + ProbeLayout.columnGap                      // верхний край — на просвете под колонкой
+    for (top, name) in [(gapTop, "над"), (gapBottom, "под")] {
+        let marker = CGPoint(x: 1100, y: top + plate.height / 2)
+        #expect(ProbeLayout.plateOrigin(marker: marker, plate: plate, in: screen, avoiding: column).x == 1100 + reach, "ровно \(name)")
+    }
+    let closer = CGPoint(x: 1100, y: gapBottom - 0.5 + plate.height / 2)
+    #expect(ProbeLayout.plateOrigin(marker: closer, plate: plate, in: screen, avoiding: column).x == 1100 - reach - plate.width)
+}
+
+@Test func markerOnTheColumnPushesThePlateBesideIt() {
+    // метка прямо под колонкой: табличка не ложится ни справа, ни слева от метки — встаёт левее колонки, не на метку
+    for x in [CGFloat(1190), 1200, 1222, 1250, 1275] {
+        let o = ProbeLayout.plateOrigin(marker: CGPoint(x: x, y: 400), plate: plate, in: screen, avoiding: column)
+        let box = CGRect(origin: o, size: plate)
+        #expect(!overlaps(box, column), "\(x)")
+        #expect(abs(box.maxX - (column.minX - ProbeLayout.columnGap)) < 1e-9, "\(x)")
+        #expect(!overlaps(box, CGRect(x: x - 10, y: 390, width: 20, height: 20)), "\(x)")
+    }
+}
+
+@Test func plateNeverLiesOnTheColumnNorOnTheMarkerWhileItFitsTheArea() {
+    // по сетке от угла до угла (в том числе по самой колонке): внутри области, не на колонке (с просветом) и не на метке
+    let r = ProbeLayout.markerDiameter / 2
+    let inner = screen.insetBy(dx: ProbeLayout.margin, dy: ProbeLayout.margin)
+    let keepOff = column.insetBy(dx: -ProbeLayout.columnGap, dy: -ProbeLayout.columnGap)
+    for x in stride(from: CGFloat(0), through: screen.width, by: 13) {
+        for y in stride(from: CGFloat(0), through: screen.height, by: 11) {
+            let box = CGRect(origin: ProbeLayout.plateOrigin(marker: CGPoint(x: x, y: y), plate: plate, in: screen, avoiding: column),
+                             size: plate)
+            #expect(box.minX >= inner.minX - 1e-9 && box.maxX <= inner.maxX + 1e-9, "\(x),\(y)")
+            #expect(box.minY >= inner.minY - 1e-9 && box.maxY <= inner.maxY + 1e-9, "\(x),\(y)")
+            #expect(!overlaps(box, keepOff), "колонка \(x),\(y)")
+            #expect(!overlaps(box, CGRect(x: x - r, y: y - r, width: 2 * r, height: 2 * r)), "метка \(x),\(y)")
+        }
+    }
+}
+
+@Test func anObstacleAtTheLeftPushesThePlateToItsRight() {
+    // общее правило, а не «справа»: препятствие у левого края (лента камер) — табличка правее него
+    let strip = CGRect(x: 16, y: 80, width: 200, height: 320)
+    let o = ProbeLayout.plateOrigin(marker: CGPoint(x: 100, y: 200), plate: plate, in: screen, avoiding: strip)
+    #expect(abs(o.x - (strip.maxX + ProbeLayout.columnGap)) < 1e-9)
+    #expect(!overlaps(CGRect(origin: o, size: plate), strip))
+}
+
+@Test func anObstacleThatLeavesNoRoomDoesNotPushThePlateOutOfTheArea() {
+    // область уже таблички и колонки вместе: табличка остаётся в области (у её левого края), колонку не обещаем
+    let tight = CGRect(x: 0, y: 0, width: 300, height: 600)
+    let obstacle = CGRect(x: 120, y: 0, width: 180, height: 600)
+    let o = ProbeLayout.plateOrigin(marker: CGPoint(x: 150, y: 300), plate: plate, in: tight, avoiding: obstacle)
+    #expect(o.x >= tight.minX + ProbeLayout.margin - 1e-9)
+    #expect(o.x + plate.width <= tight.maxX - ProbeLayout.margin + 1e-9)
+    #expect(o.x.isFinite && o.y.isFinite)
+}
+
+@Test func theMarkerIsNeverCoveredJustToKeepOffTheColumn() {
+    // область 400 в ширину, колонка у правого края: метка в 150 от левого края — слева таблички нет места, справа колонка;
+    // рядом с колонкой табличка легла бы на метку — тогда она остаётся у метки (справа) и ложится на колонку, а не на метку
+    let narrow = CGRect(x: 0, y: 0, width: 400, height: 600)
+    let obstacle = CGRect(x: 300, y: 0, width: 100, height: 600)
+    let o = ProbeLayout.plateOrigin(marker: CGPoint(x: 150, y: 300), plate: plate, in: narrow, avoiding: obstacle)
+    #expect(!overlaps(CGRect(origin: o, size: plate), CGRect(x: 140, y: 290, width: 20, height: 20)))
+    #expect(o.x >= narrow.minX + ProbeLayout.margin && o.x + plate.width <= narrow.maxX - ProbeLayout.margin)
+}
+
+@Test func threeByTwoFrameBeingCutByTheColumnStillAvoidsIt() {
+    // 1024×680 вписан в 1204,7×800: правая часть картинки лежит под колонкой; метка на ней — табличка левее колонки
+    let picture = CGRect(x: 37.65, y: 0, width: 1204.7, height: 800)
+    for fx in [0.90, 0.93, 0.96, 0.99, 1.0] as [CGFloat] {
+        let marker = ProbeLayout.markerCenter(CGPoint(x: fx, y: 0.5), in: picture)
+        let box = CGRect(origin: ProbeLayout.plateOrigin(marker: marker, plate: plate, in: picture, avoiding: column), size: plate)
+        #expect(!overlaps(box, column.insetBy(dx: -ProbeLayout.columnGap, dy: -ProbeLayout.columnGap)), "\(fx)")
+        #expect(box.maxX <= picture.maxX - ProbeLayout.margin + 1e-9, "\(fx)")
+    }
+}
+
+@Test func squareFrameKeepsThePlateInsideThePictureAndOffTheColumn() {
+    // 1024×1024 вписан в 800×800 посередине: область — картинка; у её правого края табличка уходит влево, у левого — вправо
+    let picture = CGRect(x: 240, y: 0, width: 800, height: 800)
+    let atEdge = ProbeLayout.markerCenter(CGPoint(x: 1, y: 0.5), in: picture)
+    #expect(atEdge == CGPoint(x: 1040, y: 400))
+    #expect(ProbeLayout.plateOrigin(marker: atEdge, plate: plate, in: picture, avoiding: column).x == 1040 - reach - plate.width)
+    let atLeft = ProbeLayout.markerCenter(CGPoint(x: 0, y: 0.5), in: picture)
+    #expect(ProbeLayout.plateOrigin(marker: atLeft, plate: plate, in: picture, avoiding: column).x == 240 + reach)
+}
+
+@Test func notANumberObstacleOrMarkerDoesNotProduceNaN() {
+    // метки нет под рукой, а колонка есть, — и наоборот: ни NaN, ни выхода из области
+    let a = ProbeLayout.plateOrigin(marker: CGPoint(x: CGFloat.nan, y: CGFloat.infinity), plate: plate, in: screen, avoiding: column)
+    #expect(a.x.isFinite && a.y.isFinite)
+    #expect(CGRect(origin: a, size: plate).maxX <= screen.maxX && a.x >= screen.minX)
+    let b = ProbeLayout.plateOrigin(marker: CGPoint(x: 500, y: 300), plate: plate, in: screen, avoiding: .zero)
+    #expect(b == ProbeLayout.plateOrigin(marker: CGPoint(x: 500, y: 300), plate: plate, in: screen))
+}
+
 // MARK: - Перетаскивание
 
 @Test func dragMovesThePointByTheTranslationInFrameFractions() {
@@ -175,6 +303,28 @@ private let reach = ProbeLayout.markerDiameter / 2 + ProbeLayout.gap
 @Test func nothingGrabsAMarkerThatIsNotANumber() {
     #expect(!ProbeLayout.grabs(CGPoint(x: 5, y: 5), marker: CGPoint(x: CGFloat.nan, y: 5)))
     #expect(!ProbeLayout.grabs(CGPoint(x: CGFloat.infinity, y: 5), marker: CGPoint(x: 5, y: 5)))
+}
+
+@Test func aMarkerOutsideTheScreenIsNotGrabbed() {
+    // увеличение сдвинули: метка за краем экрана, невидима, и жест у края экрана её не хватает
+    let screenRect = CGRect(x: 0, y: 0, width: 1280, height: 800)
+    let hidden = CGPoint(x: -5, y: 400)
+    #expect(!ProbeLayout.grabs(CGPoint(x: 5, y: 400), marker: hidden, within: screenRect))
+    // без «где метка видна» — как было: жест в двух точках от невидимой метки берёт её
+    #expect(ProbeLayout.grabs(CGPoint(x: 5, y: 400), marker: hidden))
+    // на экране — берётся, и на самом краю видимой части тоже; на краю (правом, нижнем) за экраном — уже нет
+    #expect(ProbeLayout.grabs(CGPoint(x: 5, y: 400), marker: CGPoint(x: 0, y: 400), within: screenRect))
+    #expect(ProbeLayout.grabs(CGPoint(x: 1275, y: 400), marker: CGPoint(x: 1279, y: 400), within: screenRect))
+    #expect(!ProbeLayout.grabs(CGPoint(x: 1275, y: 400), marker: CGPoint(x: 1280, y: 400), within: screenRect))
+    #expect(!ProbeLayout.grabs(CGPoint(x: 600, y: 795), marker: CGPoint(x: 600, y: 800), within: screenRect))
+    #expect(!ProbeLayout.grabs(CGPoint(x: 600, y: 3), marker: CGPoint(x: 600, y: -1), within: screenRect))
+}
+
+@Test func aVisibleMarkerIsGrabbedByTheSameRadiusWithOrWithoutTheScreen() {
+    let screenRect = CGRect(x: 0, y: 0, width: 1280, height: 800)
+    let marker = CGPoint(x: 400, y: 300)
+    #expect(ProbeLayout.grabs(CGPoint(x: 400 + ProbeLayout.grabRadius, y: 300), marker: marker, within: screenRect))
+    #expect(!ProbeLayout.grabs(CGPoint(x: 400 + ProbeLayout.grabRadius + 0.5, y: 300), marker: marker, within: screenRect))
 }
 
 // MARK: - Точка кадра

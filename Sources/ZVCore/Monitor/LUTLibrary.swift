@@ -15,6 +15,7 @@ import Foundation
 /// Замена не теряет прежнее, пока новое не на диске: сначала новое пишется во временный скрытый файл рядом, потом он
 /// атомарно ложится на место, и только потом правится написание имени. На диске Mac «Look» и «look» — один файл, и запись поверх
 /// него оставляет прежнее написание; тот же файл переименовывается (на диске с регистром это два файла — лишний убирается).
+/// Упала программа между записью и переименованием — временный файл остался: когда библиотека создаётся, такие убираются.
 ///
 /// К файлу ведёт только имя из списка: «../чужой» или «a/b» не совпадают ни с одним файлом папки, так что и прочитать, и
 /// удалить за пределами папки нельзя. Вызывать можно из любого потока: изменяемо только запомненное, оно под замком.
@@ -35,10 +36,14 @@ public final class LUTLibrary: @unchecked Sendable {
 
     /// Больше своих LUT не бывает; тринадцатый отказывается.
     public static let limit = 12
-    /// Больше этого файл не читается: куб 65³ — около десяти мегабайт, всё, что тяжелее, — не LUT.
-    static let maxFileBytes = 32 << 20
+    /// Больше этого файл не читается: куб 65³ текстом — от семи до двенадцати мегабайт, всё, что тяжелее, — не LUT. Тот же
+    /// предел, 16 МБ, у программы для Android (там больший куб не помещается в память планшета): один файл подходит обеим.
+    static let maxFileBytes = 16 << 20
     /// Сколько разобранных кубов держится в памяти: куб 65³ — несколько мегабайт.
     static let cacheLimit = 3
+    /// Временный файл записи: `.import-<случайное>.tmp`, скрытый, чтобы список его не видел.
+    private static let tempPrefix = ".import-"
+    private static let tempSuffix = ".tmp"
 
     public let folder: URL
     /// Как новое содержимое пишется во временный файл; тесты подменяют, чтобы проверить, что не записалось — прежнее на месте.
@@ -51,6 +56,24 @@ public final class LUTLibrary: @unchecked Sendable {
     init(folder: URL, write: @escaping @Sendable (Data, URL) throws -> Void) {
         self.folder = folder
         self.write = write
+        Self.sweepLeftovers(in: folder)
+    }
+
+    /// Убрать временные файлы `.import-*.tmp`, которые оставила оборванная запись (процесс убили между записью и
+    /// переименованием): никто их не ждёт, а до 16 МБ каждый лежали бы в папке программы вечно. Вызывается, когда библиотека
+    /// создана, — в программе она одна и создаётся до первого добавления, так что чужой записи, идущей сейчас, тут нет. Чужое не
+    /// трогает: настоящие файлы, скрытые файлы с другими именами и папки остаются; ссылка с таким именем убирается сама, а то,
+    /// на что она ведёт, остаётся. Папки нет — ничего не делается (и она не создаётся).
+    private static func sweepLeftovers(in folder: URL) {
+        // скрытые файлы тоже: без `.skipsHiddenFiles`
+        guard let urls = try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.isDirectoryKey],
+                                                                      options: []) else { return }
+        for url in urls {
+            let name = url.lastPathComponent
+            guard name.hasPrefix(tempPrefix), name.hasSuffix(tempSuffix) else { continue }
+            if (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true { continue }
+            try? FileManager.default.removeItem(at: url)
+        }
     }
 
     /// Имена своих LUT по алфавиту; папки нет или она пуста — пусто.
@@ -76,7 +99,7 @@ public final class LUTLibrary: @unchecked Sendable {
 
         let destination = folder.appendingPathComponent(name + ".cube")
         // сначала новое — во временный скрытый файл (его не видно в списке): не записалось — прежнее не тронуто
-        let temporary = folder.appendingPathComponent(".import-\(UUID().uuidString).tmp")
+        let temporary = folder.appendingPathComponent(Self.tempPrefix + UUID().uuidString + Self.tempSuffix)
         do {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             try write(data, temporary)

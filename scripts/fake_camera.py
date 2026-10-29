@@ -37,8 +37,9 @@ Creative Look 0xD0FA, гамма и цвет профиля 0xD0E1 и 0xD0E9 (S-
 
 Посреди прогона камера делает то, что ей скажут по управляющему порту (--control, scripts/fake_control.py; по умолчанию порта нет):
 сменить объектив (событие 0xC21B), переименовать подписи Creative Look (0xC20F), поставить 0xE086 или положение фокуса 0xE043,
-прислать любое событие. Один механизм на все проверки: команды — в справке (--help) и в fake_control.COMMANDS. --broken ломает
-ответы новой камеры на 0x9215, 0x9216 и 0x9223: type0, garbage, refuse, hang (см. fake_newer.BROKEN).
+прислать любое событие, отвергнуть Near/Far с записью 0xE042 или чтение свойств ответом «занята». Один механизм на все
+проверки: команды — в справке (--help) и в fake_control.COMMANDS. --broken ломает ответы новой камеры на 0x9215, 0x9216 и
+0x9223: type0, garbage, refuse, hang (см. fake_newer.BROKEN).
 
 Несколько камер сразу (scripts/fake_cameras.py) различаются: --name, --serial (по нему программа отличает камеры),
 --mark (другой план сцены — zoom, pan — или кадр отражён и повёрнут), --battery, --mode, --format. --ssdp — отвечает на поиск в сети, как камера Sony, с портом
@@ -390,6 +391,8 @@ class Camera:
         self.zoom_dir = 0                                   # −1, 0, 1
         self.zoom_pos = 0.0                                 # 0…100 на шкале
         self.zoom_task = None
+        self.refuse_focus = False                           # по управляющему порту: Near/Far и запись 0xE042 камера отвергает (0x2019)
+        self.refuse_props = False                           # и чтение всех свойств (0x9209), на время
         self.focus_goal = None                              # новая камера: куда едет фокус после записи 0xE042
         self.focus_timer = None                             # и таймер его следующего шага (None — стоит)
         self.focus_due = 0.0                                # когда он сработает по часам цикла событий
@@ -613,6 +616,9 @@ class Camera:
                 self.log("слежение снято")
             return OK
         if code == NEAR_FAR:
+            if self.refuse_focus:                           # камера занята: отвечает сразу и не двигает
+                self.log(f"Near/Far {value:+d} — отказ 0x{DEVICE_BUSY:04X} (управление: refuse-focus), не двигаю")
+                return DEVICE_BUSY
             self.reply_delay = self.focus_step              # линза едет: ответ приходит через --focus-step-ms
             if self.props.get(NEAR_FAR_ENABLED) != 1:
                 self.log(f"Near/Far {value:+d} — закрыт (не MF), не двигаю")
@@ -832,6 +838,9 @@ def respond(cam, code, params, out):
     if code == 0x9202:
         return cam.ext_info, OK
     if code == 0x9209:
+        if cam.refuse_props:
+            cam.log(f"чтение свойств (0x9209) — отказ 0x{DEVICE_BUSY:04X} (управление: refuse-props)")
+            return None, DEVICE_BUSY
         return bytes(cam.props.blob), OK
     # три операции новой камеры (--model newer): у ZV-E10 их нет в DeviceInfo, и до этого места дело не доходит
     if code in (0x9215, 0x9216, 0x9223) and cam.broken == "hang":
@@ -857,6 +866,9 @@ def respond(cam, code, params, out):
         cam.log(f"данные объектива (0x9223): метры, {cam.tables.pairs()} пар")
         return cam.tables.lens, OK
     if code == 0x9205 and params and out:
+        if params[0] == FOCUS_SETTING and cam.refuse_focus:
+            cam.log(f"запись 0x{FOCUS_SETTING:04X} — отказ 0x{DEVICE_BUSY:04X} (управление: refuse-focus), не меняю")
+            return None, DEVICE_BUSY
         if params[0] == 0xD26A:
             cam.quality = 1 if out[0] == 1 else 2
             cam.log(f"качество превью → {'низкое' if cam.quality == 1 else 'высокое'}"

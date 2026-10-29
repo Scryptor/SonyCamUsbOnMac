@@ -75,6 +75,13 @@ final class CameraController {
     @ObservationIgnored private var focusGeneration = 0
     /// Последняя команда объектива: следующая ждёт её — «стоп» зума не обгонит «пуск».
     @ObservationIgnored private var lensTail: Task<Void, Never>?
+    /// Последняя запись «встань здесь» абсолютному фокусу (`cancelFocusPull`): ручной шаг не уходит камере раньше неё, иначе
+    /// запись откатила бы его. Шаги идут циклом, который может уже работать, когда запись только поставлена в очередь, поэтому
+    /// цикл ждёт её на каждом проходе (`settleFocusStop`), а не один раз в начале.
+    @ObservationIgnored private var focusStopTask: Task<Void, Never>?
+    /// Какие отказы перевода уже записаны в журнал: по одной строке на вид отказа за перевод, а не на каждый тик (их десять в
+    /// секунду). Сбрасывается, когда начинается новый перевод.
+    @ObservationIgnored private var focusFailuresNoted: Set<FocusFailure> = []
     /// Что камера сообщает о себе сверх свойств: подписи списков, версия кода, данные объектива (0x9215, 0x9216, 0x9223) —
     /// только новые камеры Sony. Экраны видят это через `names(for:)`, `focusDistance` и другие в CameraController+OtherCameras.
     let info = CameraInfo()
@@ -2434,7 +2441,7 @@ final class CameraController {
         }
     }
 
-    private static func describe(_ error: Error) -> String {
+    private nonisolated static func describe(_ error: Error) -> String {
         switch error {
         case TransportError.timeout: return "нет ответа"
         case TransportError.disconnected: return "соединение закрыто"
@@ -2605,6 +2612,8 @@ final class CameraController {
         focusUnits = 0
         focusGeneration += 1
         focusDriving = false
+        // запись остановки шла этому сеансу — новому она не нужна
+        focusStopTask = nil
         touchMark = nil
         // перевод фокуса к метке — тоже команды этого сеанса; подпись прошлого перевода новой камере не принадлежит
         cancelFocusPull(stopCamera: false)
@@ -2617,21 +2626,34 @@ final class CameraController {
     func focusStep(_ units: Int) {
         guard units != 0, phase == .ready, focusDriveAvailable, let session else { return }
         // ручное движение — перевод к метке кончился; у абсолютного фокуса камере перед ним велено встать там, где стоит
-        let stopped = cancelFocusPull(stopCamera: true)
+        cancelFocusPull(stopCamera: true)
         focusUnits += units
         guard !focusDriving else { return }
         focusDriving = true
         let generation = focusGeneration
         Task { [weak self] in
-            // «встать» уходит раньше первого шага: иначе камера вернула бы фокус туда, где он был до шага
-            await stopped?.value
-            while let self, self.focusGeneration == generation, self.focusUnits != 0 {
-                guard let next = FocusDrive.commands(units: self.focusUnits).first else { break }
+            while let self, self.focusGeneration == generation {
+                // «встать» уходит раньше любого шага, и первого, и тех, что цикл берёт позже: иначе камера вернула бы фокус туда,
+                // где он был до шага. Цикл может идти уже давно — перевод обнулил очередь, а цикл доживает последнюю команду, и
+                // ручной шаг в этот миг его не запускает, а попадает в него, — поэтому ждём на каждом проходе
+                await self.settleFocusStop()
+                // пока ждали, перевод мог обнулить очередь, а сеанс — уйти
+                guard self.focusGeneration == generation, self.focusUnits != 0,
+                      let next = FocusDrive.commands(units: self.focusUnits).first else { break }
                 self.focusUnits -= Int(next)
                 _ = try? await session.control(SonyControl.nearFar, value: next, type: PTPType.int16)
             }
             // сеанс ушёл, пока шла команда, — флаг уже сброшен, и новый цикл мог начаться: его не трогаем
             if let self, self.focusGeneration == generation { self.focusDriving = false }
+        }
+    }
+
+    /// Дождаться записи «встань здесь», если она ещё идёт или не ушла: ручному шагу до неё ехать нельзя. Запись могут поставить
+    /// ещё одну, пока ждём, — ждём и её.
+    private func settleFocusStop() async {
+        while let stop = focusStopTask {
+            await stop.value
+            if focusStopTask == stop { focusStopTask = nil }
         }
     }
 
@@ -2731,6 +2753,7 @@ final class CameraController {
         let duration = focusMarks.duration
         focusPullMark = mark
         focusPullProgress = 0
+        focusFailuresNoted = []
         note("метки фокуса: перевод к \(mark), \(Int(start.rounded())) → \(Int(target.rounded())) за \(Int(duration)) с, "
              + (mode == .absolute ? "абсолютный фокус" : "шаги Near/Far"))
         let generation = focusGeneration
@@ -2777,7 +2800,11 @@ final class CameraController {
                 case let .write(value):
                     try await session.setQuietly(SonyProp.focusPositionSetting, to: Int64(value), type: PTPType.uint16)
                 case let .nearFar(steps):
-                    try await session.control(SonyControl.nearFar, value: steps, type: PTPType.int16)
+                    // отказ камеры приходит кодом ответа, а не ошибкой: без этой проверки он бы пропал молча
+                    let code = try await session.control(SonyControl.nearFar, value: steps, type: PTPType.int16)
+                    if code != PTPResponseCode.ok, !Task.isCancelled {
+                        noteFocusFailure(.nearFar, "камера не приняла Near/Far", Self.refusal(code))
+                    }
                     // свежее положение — не дольше 300 мс; не пришло, автомат сам подождёт и посчитает по сроку
                     await refreshWithin(session, .milliseconds(300))
                 }
@@ -2786,7 +2813,14 @@ final class CameraController {
                 if !Task.isCancelled, focusGeneration == generation { cancelFocusPull(stopCamera: false) }
                 return
             } catch {
-                // камера отказала в этой команде — перевод идёт дальше, без движения его кончит срок
+                // камера отказала в этой команде (или не ответила) — перевод идёт дальше, без движения его кончит срок; в журнал —
+                // раз за перевод, не на каждый тик. Остановленный перевод отказом не считается
+                if !Task.isCancelled {
+                    switch action {
+                    case .write: noteFocusFailure(.write, "камера не приняла запись цели 0xE042", Self.describeFocus(error))
+                    default: noteFocusFailure(.nearFar, "камера не приняла Near/Far", Self.describeFocus(error))
+                    }
+                }
             }
             try? await Task.sleep(until: max(tickStart + .milliseconds(100), clock.now), clock: clock)
         }
@@ -2800,8 +2834,15 @@ final class CameraController {
             let finish: @Sendable () -> Void = {
                 if first.withLock({ isFirst -> Bool in defer { isFirst = false }; return isFirst }) { done.resume() }
             }
-            Task {
-                try? await session.refresh()
+            Task { @MainActor [weak self] in
+                // отказ чтения — в журнал, и позже срока ожидания тоже: цикл уже ушёл дальше, а положение фокуса устарело
+                do {
+                    try await session.refresh()
+                } catch TransportError.disconnected {
+                    // обрыв связи записан отдельно
+                } catch {
+                    self?.noteFocusFailure(.refresh, "положение фокуса не перечиталось", Self.describeFocus(error))
+                }
                 finish()
             }
             Task {
@@ -2828,23 +2869,92 @@ final class CameraController {
     }
 
     /// Прекратить идущий перевод — без подписи. `stopCamera`: у абсолютного фокуса камера едет к последней записанной цели и
-    /// сама не остановится — ей пишется положение, в котором фокус стоит сейчас (после очередного чтения свойств).
-    /// Отдаёт задачу этой записи, если она есть, — ручной шаг ждёт её, чтобы не получить фокус назад.
-    @discardableResult
-    private func cancelFocusPull(stopCamera: Bool) -> Task<Void, Never>? {
-        guard let task = focusPullTask else { return nil }
+    /// сама не остановится — ей пишется положение, в котором фокус стоит сейчас (после очередного чтения свойств). Задача этой
+    /// записи помнится в `focusStopTask`: ручной шаг ждёт её, чтобы не получить фокус назад. Что в ней не вышло — в журнал: без
+    /// остановки камера доедет до прежней цели, и объяснить это больше нечем.
+    private func cancelFocusPull(stopCamera: Bool) {
+        guard let task = focusPullTask else { return }
         task.cancel()
         focusPullTask = nil
         focusPullMark = nil
         focusPullProgress = nil
         note("метки фокуса: перевод остановлен")
-        guard stopCamera, focusPullMode == .absolute, let session else { return nil }
-        lensCommand {
-            try? await session.refresh()
-            guard let here = FocusPosition.current(await session.properties, mode: .absolute) else { return }
-            try? await session.setQuietly(SonyProp.focusPositionSetting, to: Int64(here), type: PTPType.uint16)
+        guard stopCamera, focusPullMode == .absolute, let session else { return }
+        lensCommand { [weak self] in
+            var problems: [String] = []
+            do {
+                try await session.refresh()
+            } catch TransportError.disconnected {
+                // обрыв связи записан отдельно, писать некому
+                return
+            } catch {
+                problems.append("положение не перечиталось (" + Self.describeFocus(error) + ")")
+            }
+            // не перечиталось — пишем последнее известное: лучше оно, чем цель, к которой камера едет
+            guard let here = FocusPosition.current(await session.properties, mode: .absolute) else {
+                problems.append("положения фокуса нет, записывать нечего")
+                await self?.noteFocusFailure(.stop, Self.stopText(problems, written: false), nil)
+                return
+            }
+            var written = true
+            do {
+                try await session.setQuietly(SonyProp.focusPositionSetting, to: Int64(here), type: PTPType.uint16)
+            } catch TransportError.disconnected {
+                return
+            } catch {
+                written = false
+                problems.append("запись 0xE042 не принята (" + Self.describeFocus(error) + ")")
+            }
+            if !problems.isEmpty { await self?.noteFocusFailure(.stop, Self.stopText(problems, written: written), nil) }
         }
-        return lensTail
+        focusStopTask = lensTail
+    }
+
+    /// Строка журнала об остановке абсолютного фокуса: что не вышло и чем это грозит. Запись не дошла до камеры — она доедет до
+    /// прежней цели; не перечиталось только положение — камере записано последнее известное, и фокус встанет рядом.
+    private nonisolated static func stopText(_ problems: [String], written: Bool) -> String {
+        written ? "остановка: " + problems.joined(separator: ", ") + "; камере записано последнее известное положение"
+            : "остановка не дошла до камеры: " + problems.joined(separator: ", ") + " — абсолютный фокус может доехать до прежней цели"
+    }
+
+    /// Вид отказа камеры при переводе фокуса — по одной строке в журнал на вид за перевод.
+    private enum FocusFailure: Hashable {
+        /// Камера не приняла шаг Near/Far.
+        case nearFar
+        /// Камера не приняла запись цели 0xE042.
+        case write
+        /// Свойства не перечитались: положение фокуса устарело.
+        case refresh
+        /// Остановка абсолютного фокуса не дошла до камеры.
+        case stop
+    }
+
+    /// Отказ перевода — в журнал панели отладки, раз на вид отказа за перевод (`focusFailuresNoted`): перевод шлёт десять команд в
+    /// секунду, и тот же отказ на каждой залил бы журнал. `why` — причина, nil — она уже в `what`.
+    private func noteFocusFailure(_ kind: FocusFailure, _ what: String, _ why: String?) {
+        guard focusFailuresNoted.insert(kind).inserted else { return }
+        // остановка пишет строку целиком (`stopText`); у остальных — что не вышло, почему и что больше об этом не будет
+        let rest = kind == .stop ? "" : " (такие отказы в этом переводе дальше не записываются)"
+        note("метки фокуса: " + what + (why.map { " — " + $0 } ?? "") + rest)
+    }
+
+    /// Причина отказа ответом камеры: код и, что знаем, его смысл.
+    private nonisolated static func refusal(_ code: UInt16) -> String {
+        let name: String
+        switch code {
+        case PTPResponseCode.deviceBusy: name = ", занята"
+        case PTPResponseCode.accessDenied: name = ", доступ закрыт"
+        case 0x2005: name = ", операции нет"
+        case 0x2006: name = ", параметр не принят"
+        default: name = ""
+        }
+        return "ответ камеры 0x" + String(code, radix: 16, uppercase: true) + name
+    }
+
+    /// Причина, по которой команда или чтение не вышли: отказ камеры (код ответа) или то, что сказал транспорт.
+    private nonisolated static func describeFocus(_ error: Error) -> String {
+        if case let SessionError.operationFailed(_, code) = error { return refusal(code) }
+        return describe(error)
     }
 
     /// Камера сообщила о смене объектива (0xC21B): метки стёрты, перевод к ним кончился.

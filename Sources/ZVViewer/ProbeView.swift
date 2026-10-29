@@ -2,7 +2,8 @@ import SwiftUI
 import ZVCore
 
 /// Пипетка на экране: метка 20 pt с перекрестием в точке кадра и рядом табличка из двух строк — «47 % · кожа» и
-/// «R 182 · G 140 · B 121». Табличка справа от метки, у правого края — слева, у нижнего — поднимается (`ProbeLayout`).
+/// «R 182 · G 140 · B 121». Табличка справа от метки, у правого края и рядом с колонкой кнопок справа — слева, у нижнего —
+/// поднимается (`ProbeLayout`).
 ///
 /// Только рисует: жестов у слоя нет, и касания проходят сквозь него к кадру. Ставит метку щелчок по кадру (`LiveScreen`:
 /// пока пипетка включена, щелчок ставит её, а не фокус), тащит — жест, начатый на метке (`ZoomableVideo`: он же двигает
@@ -39,7 +40,10 @@ struct ProbeView: View {
         let onScreen = screenRect.contains(center)
         // видимая часть кадра: у её краёв табличка уходит внутрь
         let visible = rect.intersection(screenRect)
-        let origin = ProbeLayout.plateOrigin(marker: center, plate: plate, in: visible.isNull || visible.isEmpty ? screenRect : visible)
+        // колонка кнопок справа (зум, режим, фокус, запись) — препятствие: табличка на неё не ложится (как гистограмма и наложение).
+        // Её место помнится и когда элементы спрятаны — табличка не прыгает туда и обратно
+        let origin = ProbeLayout.plateOrigin(marker: center, plate: plate, in: visible.isNull || visible.isEmpty ? screenRect : visible,
+                                             avoiding: screen.rightColumnRect)
         ZStack {
             if let shown, onScreen {
                 plateView(shown)

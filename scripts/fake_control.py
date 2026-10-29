@@ -35,6 +35,8 @@ COMMANDS = {
     "e043 [N]": "положение абсолютного фокуса 0xE043: с числом N (0…65535) поставить его (0xD24C — в процентах) и событие 0xC203, "
                 "без числа — ответить им («ok 30165»)",
     "event КОД [П …]": "любое событие камеры с параметрами, числа как 0xC20F или 195",
+    "refuse-focus on|off": "Near/Far (0xD2D1) и запись цели 0xE042 камера отвергает ответом 0x2019 («занята») и не двигает фокус, пока не «off»",
+    "refuse-props on|off": "чтение всех свойств (0x9209) камера отвергает ответом 0x2019, пока не «off»: положение фокуса не перечитывается",
 }
 
 
@@ -73,13 +75,15 @@ def run(cam, words):
         return f"ok {cam.props.get(fake_newer.FOCUS_CURRENT)}"
     elif command == "e043" and len(args) == 1 and args[0].isdigit() and int(args[0]) <= fake_newer.FOCUS_MAX:
         cam.set_focus(int(args[0]))
+    elif command in ("refuse-focus", "refuse-props") and args in (["on"], ["off"]):
+        setattr(cam, command.replace("-", "_"), args[0] == "on")
     elif command == "event" and args:
         try:
             numbers = [int(a, 0) for a in args]
         except ValueError:
             return "error: код и параметры события — числа"
         cam.send_event(numbers[0], *numbers[1:])
-    elif command in ("e086", "e043", "event"):
+    elif command in ("e086", "e043", "event", "refuse-focus", "refuse-props"):
         return "error: параметры команды " + command + " не те"
     else:
         return "unknown"

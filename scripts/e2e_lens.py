@@ -2,7 +2,8 @@
 """e2e_lens.py — фокус и зум с экрана в программе для Mac против поддельной камеры: фокус касанием (касание экрана
 камеры в зоне «Широкая», точка AF в зоне «Точка»), рамки фокуса камеры, моторный зум, шкала фокуса в MF. И метки фокуса A и B с
 переводом за выбранное время — на камере с физикой объектива (--focus-gain 3.5 --focus-step-ms 80 --focus-deadband 2): перевод
-к метке за 4 с, остановка, отмены (AF, ручной шаг, второй «перевести», обрыв связи, смена объектива), отказы API.
+к метке за 4 с, остановка, отмены (AF, ручной шаг, второй «перевести», обрыв связи, смена объектива), отказы API, отказы камеры
+(Near/Far отвергнут — одна строка в журнале программы за перевод).
 
 Запускает scripts/fake_camera.py на 127.0.0.1:15741 (с управляющим портом: смена объектива — событие 0xC21B) и программу с API
 автоматизации (адрес камеры подменён), проверяет /state и снимает скриншоты в --out. Зону и режим фокуса поддельной камеры
@@ -314,6 +315,31 @@ def run_marks(out, stand):
     check("ручной шаг: перевод кончился, подписи нет", lens(s)["pull"] is None, lens(s)["pull"])
     still, seen = stands_still(settle=0.8)
     check("после ручного шага автоматика не двигает фокус", still, seen)
+
+    # камера отвергает Near/Far посреди перевода (управляющий порт: refuse-focus): отказ записан в журнале программы — одна строка за
+    # перевод, а не по строке на каждую отвергнутую команду; автомат сам сдаётся, когда фокус не двигается
+    go_to(20)
+    try:
+        for n in (1, 2):
+            stand.camera.control("refuse-focus", "on")
+            lines_before = len([line for line in state()["journal"] if "камера не приняла Near/Far" in line])
+            refused_before = len(re.findall(r"Near/Far [+-]\d+ — отказ", stand.camera.session_log()))
+            act("focusPullTime", seconds=4)
+            act("focusMark", mark="A", op="go")
+            s = wait(lambda s: lens(s)["pull"] is not None and lens(s)["pull"]["caption"] is not None, 8)
+            stand.camera.control("refuse-focus", "off")
+            refused = len(re.findall(r"Near/Far [+-]\d+ — отказ", stand.camera.session_log())) - refused_before
+            lines = [line for line in state()["journal"] if "камера не приняла Near/Far" in line]
+            print(f"  Near/Far отвергнут: камера отказала {refused} раз, новых строк в журнале программы {len(lines) - lines_before}")
+            check(f"отказ камеры (перевод {n}): камера отвергала Near/Far не раз ({refused})", refused >= 2, refused)
+            check(f"отказ камеры (перевод {n}): в журнале программы новая строка одна, с кодом ответа камеры",
+                  len(lines) - lines_before == 1 and "0x2019" in lines[-1], lines[-2:])
+            check(f"отказ камеры (перевод {n}): перевод кончился сам, фокус не двигался",
+                  (lens(s)["pull"] or {}).get("caption") == "Дальше камера не двигает", lens(s)["pull"])
+            wait(lambda s: lens(s)["pull"] is None, 5)
+            go_to(20)
+    finally:
+        stand.camera.control("refuse-focus", "off")
 
     # два «перевести» подряд — двигатель один
     go_to(20)

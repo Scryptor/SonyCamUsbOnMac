@@ -6,8 +6,9 @@ Style, абсолютный фокус (0xE042 пишется, 0xE043 читае
 Сценарии (--scenario, по умолчанию все по порядку):
   newer   новая камера целиком: ни одной подписи «#N» в Fn и «Все настройки», Creative Look «FL» после записи 0x0006, расстояние
           на шкале фокуса и `lens.absolute`, перевод A → B за 2 с (1,8–3 с, итог ±0,5 %), остановка и ручной шаг посреди перевода
-          (фокус стоит там, где остановили), события камеры: подписи переименованы, список пропал, объектив сменили, таблицы
-          (одна, телеобъектив, две, мусор), 0xE086
+          (фокус стоит там, где остановили), ручной шаг сразу после «перевести» или «стоп» (запись остановки его не откатывает),
+          отказы камеры при переводе (запись цели, чтение свойств, остановка) — по одной строке в журнале программы за перевод,
+          события камеры: подписи переименованы, список пропал, объектив сменили, таблицы (одна, телеобъектив, две, мусор), 0xE086
   broken  камера, у которой подписи не читаются (`--broken type0|garbage|refuse`): названия — из таблиц Sony, а не «#N»; связь жива
   switch  выбор в Fn переезжает вместе с камерой: новая (Creative Look) → ZV-E10 (Creative Style, новых операций камере не шлют)
           → новая; камеры меняются на том же адресе, поиска в сети нет
@@ -115,6 +116,31 @@ def pull_to(mark, limit=12):
             return time.monotonic() - t0, pull["caption"]
         time.sleep(0.05)
     return None, None
+
+
+def last_near_far(text):
+    """Положение 0xE043 после последней команды Near/Far по журналу камеры и номер её строки; None — команд не было."""
+    found = None
+    for n, line in enumerate(text.splitlines()):
+        m = re.search(r"фокус (?:ближе|дальше) на \d+.*0xE043 = (\d+)", line)
+        if m:
+            found = (int(m.group(1)), n)
+    return found
+
+
+def writes_after(text, n):
+    """Записи цели 0xE042 в журнале камеры после строки n."""
+    return [int(m.group(1)) for line in text.splitlines()[n + 1:] if (m := re.search(r"записано 0xE042 = (\d+)", line))]
+
+
+def journal_lines(needle):
+    """Строки журнала программы (последние 30 в /state), где есть `needle`."""
+    return [line for line in state()["journal"] if needle in line]
+
+
+def camera_log_count(stand, needle):
+    """Сколько раз в журнале камеры, запущенной последней, встретилась строка с `needle`."""
+    return sum(needle in line for line in stand.camera.session_log().splitlines())
 
 
 def goal_reached(text):
@@ -302,6 +328,84 @@ def run_newer(out, stand):
               abs(final - here) <= allowed and abs(final - a) > 0.05 * FOCUS_MAX, (here, final, a))
     time.sleep(3.3)
     act("focusPullTime", seconds=2)
+
+    # ---- ручной шаг СРАЗУ после «перевести» или «стоп»: запись остановки уходит раньше шага и не откатывает его. Шаг — одна команда
+    # Near/Far (−3): из двух вторая сама снимала бы откат первой, и гонка пряталась бы. «go»: очередь шагов (+30) перевод обнуляет, пока
+    # цикл доживает её последнюю команду, и ручной шаг в этот миг попадает в старый цикл; «stop»: запись остановки ещё не ушла
+    for how in ("go", "stop"):
+        go_to(22)
+        wait(lambda s: lens(s)["pull"] is None, 4)
+        act("focusPullTime", seconds=4)
+        time.sleep(0.6)
+        log_before = len(stand.camera.session_log())
+        if how == "go":
+            act("focusStep", offset=30)
+            act("focusMark", mark="A", op="go")
+        else:
+            act("focusMark", mark="A", op="go")
+            time.sleep(0.8)
+            act("focusPullStop")
+        act("focusStep", offset=-3)
+        time.sleep(3.0)
+        text = stand.camera.session_log()[log_before:]
+        step = last_near_far(text)
+        final = e043(stand)
+        after = writes_after(text, step[1]) if step else None
+        print(f"  ручной шаг после «{how}»: последний Near/Far → 0xE043 = {step and step[0]}, итог у камеры {final}, записей 0xE042 после шага: {after}")
+        check(f"после «{how}»: итог у камеры — там, где шаг её оставил, а не откат на прежнее место",
+              step is not None and final == step[0], (step, final))
+        check(f"после «{how}»: записей цели 0xE042 после шага нет", step is not None and not after, after)
+    act("focusPullStop")
+    time.sleep(3.3)
+
+    # ---- камера отвергает запись цели 0xE042 и чтение свойств посреди перевода: отказ записан в журнале программы — по одной строке
+    # на вид отказа за перевод, а не десять в секунду; не вышла и остановка — об этом тоже строка. Потом камера снова отвечает
+    try:
+        go_to(22)
+        stand.camera.control("refuse-focus", "on")
+        refused_before = camera_log_count(stand, "запись 0xE042 — отказ")
+        act("focusPullTime", seconds=4)
+        act("focusMark", mark="A", op="go")
+        time.sleep(2.0)
+        refused = camera_log_count(stand, "запись 0xE042 — отказ") - refused_before
+        lines = journal_lines("камера не приняла запись цели 0xE042")
+        print(f"  камера отвергла запись цели {refused} раз; в журнале программы строк: {len(lines)}")
+        check(f"камера отвергала запись цели много раз ({refused})", refused >= 10, refused)
+        check("…а в журнале программы одна строка о ней, с кодом ответа камеры", len(lines) == 1 and "0x2019" in lines[0], lines)
+        act("focusPullStop")
+        time.sleep(1.0)
+        stops = journal_lines("остановка не дошла до камеры")
+        check("остановка не принята камерой — одна строка: что не вышло и чем грозит", len(stops) == 1
+              and "запись 0xE042 не принята" in stops[0] and "может доехать до прежней цели" in stops[0], stops)
+        stand.camera.control("refuse-focus", "off")
+        wait(lambda s: lens(s)["pull"] is None, 4)
+        time.sleep(1.5)
+        go_to(22)
+        stand.camera.control("refuse-props", "on")
+        reads_before = camera_log_count(stand, "чтение свойств (0x9209) — отказ")
+        act("focusMark", mark="A", op="go")
+        time.sleep(2.2)
+        reads = camera_log_count(stand, "чтение свойств (0x9209) — отказ") - reads_before
+        lines = journal_lines("положение фокуса не перечиталось")
+        print(f"  камера отвергла чтение свойств {reads} раз; в журнале программы строк: {len(lines)}")
+        check(f"камера отвергала чтение свойств много раз ({reads})", reads >= 5, reads)
+        check("…а в журнале программы одна строка о чтении во время перевода", len(lines) == 1 and "0x2019" in lines[0], lines)
+        act("focusPullStop")
+        time.sleep(1.2)
+        stand.camera.control("refuse-props", "off")
+        stops = journal_lines("остановка: положение не перечиталось")
+        check("остановка при отказе чтения — строка: положение не перечиталось, камере записано последнее известное",
+              len(stops) == 1 and "камере записано последнее известное положение" in stops[0] and "прежней цели" not in stops[0], stops)
+    finally:
+        stand.camera.control("refuse-focus", "off")
+        stand.camera.control("refuse-props", "off")
+    wait(lambda s: lens(s)["pull"] is None, 4)
+    time.sleep(1.5)
+    go_to(22)
+    act("focusPullTime", seconds=2)
+    took, caption = pull_to("A")
+    check("камера снова отвечает: перевод к A кончился подписью «Фокус у метки A»", caption == "Фокус у метки A", (took, caption))
+    time.sleep(3.3)
 
     # ---- события: 0xC20F — список подписей изменился
     before = count(stand, "9215")
