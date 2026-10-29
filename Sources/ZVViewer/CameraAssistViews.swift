@@ -63,6 +63,13 @@ struct TouchFocusHelp: View {
             }
             Text(controller.touchFocusNow)
                 .font(.callout.weight(.semibold))
+            // пипетка отбирает щелчок у фокуса: пока она включена, кнопка горит, но фокус не ставится — сказать об этом здесь
+            if screen.assist.probe {
+                Text("Сейчас включена «Пипетка»: щелчок по кадру ставит её, а не фокус. Выключили пипетку (клавиша I) — щелчок "
+                     + "снова ставит фокус.")
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(.yellow)
+            }
             Text("Пока кнопка горит синим, щелчок по кадру ставит туда фокус. Как — решает зона фокуса камеры:")
             VStack(alignment: .leading, spacing: 5) {
                 Text("• «Точка» и «Зона» — рамка AF переезжает в точку щелчка.")
@@ -112,10 +119,12 @@ struct TouchFocusButton: View {
                     .foregroundStyle(.white)
                     .frame(width: 42, height: 42)
                     .background(screen.touchFocusOn ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.ultraThinMaterial), in: Circle())
-                    .opacity(method == nil ? 0.5 : 1)
+                    // включена пипетка — щелчок по кадру ставит её, фокус пока не ставится: кнопка приглушена, как при отказе камеры
+                    .opacity(method == nil || screen.assist.probe ? 0.5 : 1)
             }
             .buttonStyle(.plain)
             .help(method == nil ? controller.touchRefusal
+                  : screen.assist.probe ? "Пока включена «Пипетка», щелчок по кадру ставит пипетку, а не фокус"
                   : screen.touchFocusOn ? "Фокус касанием включён: щелчок по кадру ставит фокус" : "Фокус касанием: щелчок по кадру ставит фокус")
             .accessibilityLabel("Фокус касанием")
             .contextMenu {
@@ -153,17 +162,21 @@ struct TouchFocusIcon: View {
 }
 
 /// Поверх кадра: рамки фокуса камеры (зелёные — фокус найден, слежение — пунктиром) и отметка касания, которая гаснет
-/// за секунду. rect — где кадр на экране, с увеличением.
+/// за секунду. rect — где кадр на экране, с увеличением. И рамки, и отметка лежат в долях кадра камеры; кадр на экране может
+/// быть зеркальным или перевёрнутым (`orientation`) — тогда они переезжают на то место картинки, где камера их видит.
 struct FocusFramesLayer: View {
     let controller: CameraController
     let rect: CGRect
+    let orientation: FrameOrientation
 
     var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 30, paused: controller.touchMark == nil)) { timeline in
             Canvas { context, _ in
+                // из долей кадра камеры — в точки экрана
                 func area(_ r: CGRect) -> CGRect {
-                    CGRect(x: rect.minX + r.minX * rect.width, y: rect.minY + r.minY * rect.height,
-                           width: r.width * rect.width, height: r.height * rect.height)
+                    let r = orientation.fromCamera(r)
+                    return CGRect(x: rect.minX + r.minX * rect.width, y: rect.minY + r.minY * rect.height,
+                                  width: r.width * rect.width, height: r.height * rect.height)
                 }
                 for frame in controller.focusFrames {
                     let color: Color = frame.focused ? .green : .white
@@ -176,7 +189,8 @@ struct FocusFramesLayer: View {
                     if age < 1 {
                         // сжимается к точке и гаснет — как отметка касания на экране камеры
                         let side = 70 - 20 * min(age / 0.25, 1)
-                        let c = CGPoint(x: rect.minX + mark.point.x * rect.width, y: rect.minY + mark.point.y * rect.height)
+                        let at = orientation.fromCamera(mark.point)
+                        let c = CGPoint(x: rect.minX + at.x * rect.width, y: rect.minY + at.y * rect.height)
                         let box = CGRect(x: c.x - side / 2, y: c.y - side / 2, width: side, height: side)
                         context.stroke(Path(box), with: .color(.yellow.opacity(1 - max(0, age - 0.5) * 2)), lineWidth: 2)
                     }

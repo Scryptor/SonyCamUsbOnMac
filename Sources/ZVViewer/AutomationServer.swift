@@ -384,6 +384,7 @@ final class AutomationServer {
             guard controller.touchFocusMethod != nil else {
                 return "touch focus is not available now (focus mode MF, or the camera has no AF position / remote touch)"
             }
+            // x, y — экранные доли, как у щелчка по кадру; в доли кадра камеры (зеркало, переворот) их переводит контроллер
             controller.touchFocus(at: CGPoint(x: min(max(x, 0), 1), y: min(max(y, 0), 1)))
         case .cancelTouch:
             guard controller.touchCancelAvailable else { return "nothing to cancel" }

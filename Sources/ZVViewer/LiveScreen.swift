@@ -24,12 +24,19 @@ struct LiveScreen: View {
         .animation(.easeInOut(duration: 0.2), value: screen.zoom.isZoomed)
         .contentShape(Rectangle())
         .onTapGesture(coordinateSpace: .local) { location in
-            // открыто меню — щелчок его закрывает; иначе, при фокусе касанием, — фокус в эту точку кадра
+            // открыто меню — щелчок его закрывает; иначе: пока включена пипетка, — пипетка в эту точку кадра, а не фокус
+            // (что бы ни горело на кнопке «Фокус»); без неё, при фокусе касанием, — фокус в эту точку
             let menus = screen.fnOpen || screen.assistOpen || screen.allSettingsOpen || screen.pillInfo != nil || screen.presetMenuOpen
                 || screen.touchFocusHelpOpen
             screen.closeOverlays()
             screen.noteActivity()
-            if !menus, screen.touchFocusOn, let point = framePoint(location) { controller.touchFocus(at: point) }
+            guard !menus, let point = framePoint(location) else { return }
+            if screen.assist.probe {
+                screen.placeProbe(point)
+            } else if screen.touchFocusOn {
+                // точка экранная: в долях кадра камеры её делает контроллер (зеркало и переворот)
+                controller.touchFocus(at: point)
+            }
         }
         .onContinuousHover { _ in screen.noteActivity() }
         // файл .cube перетащили на окно — это свой LUT: добавляется и сразу выбирается; картинка — эталон наложения
@@ -302,15 +309,22 @@ struct LiveScreen: View {
             ZoomableVideo(screen: screen, frame: frame, size: size, dimmed: controller.linkIndicator.dimsPicture,
                           overlay: screen.assist.needsRaster ? controller.assistOverlay : nil, assistInput: controller.assistInput,
                           reference: screen.overlayHidden ? nil : screen.assist.overlay.opacity.flatMap { _ in controller.reference?.image },
-                          referenceOpacity: screen.overlayHidden ? 0 : screen.assist.overlay.opacity ?? 0)
+                          referenceOpacity: screen.overlayHidden ? 0 : screen.assist.overlay.opacity ?? 0,
+                          orientation: screen.assist.orientation)
                 .onAppear { zoomScroll.viewSize = size }
                 .onChange(of: size) { _, size in zoomScroll.viewSize = size }
             if screen.assist.hasMarkers {
                 AssistMarkers(assist: screen.assist, frame: frameSize, rect: screen.zoom.imageRect(view: size, frame: frameSize))
             }
             // рамки фокуса камеры — всегда, как на её экране: выключили кнопку «Фокус» — слежение продолжается, рамка видна;
-            // отметка касания — после щелчка в режиме фокуса касанием
-            FocusFramesLayer(controller: controller, rect: screen.zoom.imageRect(view: size, frame: frameSize))
+            // отметка касания — после щелчка в режиме фокуса касанием. Лежат в долях кадра камеры; при зеркале и перевороте
+            // слой переводит их на экран
+            FocusFramesLayer(controller: controller, rect: screen.zoom.imageRect(view: size, frame: frameSize),
+                             orientation: screen.assist.orientation)
+            // пипетка: метка, которую можно тащить, и табличка с показанием
+            if screen.assist.probe {
+                ProbeView(controller: controller, screen: screen, frame: frameSize, view: size)
+            }
             // рамка записи — по краю видимой картинки, при увеличении — по краю экрана
             TallyBorder(recording: controller.isRecording,
                         rect: screen.zoom.imageRect(view: size, frame: frameSize)
@@ -331,7 +345,9 @@ struct LiveScreen: View {
         return CaptureFeedback.caption(phase)
     }
 
-    /// Точка кадра (доли) под точкой экрана — с увеличением; nil — мимо кадра или кадра нет.
+    /// Точка кадра (доли) под точкой экрана — с увеличением; nil — мимо кадра или кадра нет. Доли экранные: считаются по
+    /// картинке, какой её видно (зеркальной и перевёрнутой, как показывает `controller.frame`). Пипетка берёт их как есть, а
+    /// фокус — через `controller.touchFocus`, который переводит их в доли кадра камеры.
     private func framePoint(_ location: CGPoint) -> CGPoint? {
         guard let frame = controller.frame else { return nil }
         // размер экрана — как у слоя с видео: тот же GeometryReader

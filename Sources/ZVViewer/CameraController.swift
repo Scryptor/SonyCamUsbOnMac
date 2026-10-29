@@ -40,6 +40,9 @@ final class CameraController {
     @ObservationIgnored private(set) var meanLuma: Double?
     /// Зеркало, переворот и LUT картинки: один объект на программу, считает в потоке кадров.
     @ObservationIgnored private let pictureTransform = PictureTransform()
+    /// Зеркало и переворот картинки на экране — как выбрано в «Мониторе» (экран кладёт выбор в `assistInput` сразу, при
+    /// изменении). По нему экранные доли кадра (касание для фокуса) становятся долями кадра камеры.
+    var orientation: FrameOrientation { assistInput.current.assist.orientation }
     /// Встроенный LUT, который сейчас на картинке: выбранный в «Мониторе» рукой, а у «Авто» — по профилю изображения главной
     /// камеры (следует за ним с ближайшего кадра); nil — встроенного нет («Выкл», «Свой», «Авто» без профиля).
     var resolvedLUT: BuiltinLUT? { assistInput.current.builtinLUT }
@@ -57,7 +60,8 @@ final class CameraController {
     private(set) var controlCodes: Set<UInt16> = []
     /// Рамки фокуса последнего кадра: где камера фокусирует.
     private(set) var focusFrames: [FocusFrame] = []
-    /// Куда коснулись для фокуса и когда — для отметки на кадре.
+    /// Куда коснулись для фокуса и когда — для отметки на кадре. Точка — в долях кадра камеры, а не экрана (как рамки фокуса):
+    /// на экран её переводит `FrameOrientation.fromCamera`.
     private(set) var touchMark: (point: CGPoint, at: Date)?
     /// Зум едет: 1 — к теле, −1 — к широкому; 0 — стоит.
     private(set) var zoomDirection = 0
@@ -2486,7 +2490,10 @@ final class CameraController {
         TouchFocus.refusal(focusMode: value(SonyProp.focusMode), zoomScale: value(SonyProp.zoomScale))
     }
 
-    /// Фокус в точку кадра (доли 0…1): точка AF или касание экрана камеры. false — сейчас нельзя.
+    /// Фокус в точку кадра (доли 0…1, каким его видно на экране): точка AF или касание экрана камеры. false — сейчас нельзя.
+    /// Точка экранная — с зеркалом и переворотом картинки она не та, что у камеры: в долях кадра камеры её переводит
+    /// `orientation.toCamera`, здесь, в одном месте, — и для щелчка по кадру, и для действия API `touchFocus`. Дальше всё —
+    /// в долях камеры: команда, отметка касания (`touchMark`) и рамки фокуса.
     @discardableResult
     func touchFocus(at point: CGPoint) -> Bool {
         guard phase == .ready, let session else { return false }
@@ -2494,6 +2501,7 @@ final class CameraController {
             showStatus(touchRefusal)
             return false
         }
+        let point = orientation.toCamera(point)
         let mark = Date()
         touchMark = (point, mark)
         // отметка гаснет за секунду — потом её нет, и слой с рамками не перерисовывается 30 раз в секунду

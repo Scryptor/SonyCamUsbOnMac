@@ -18,11 +18,16 @@ struct ZoomableVideo: View {
     /// Эталонный кадр поверх живого — повторить композицию — и с какой непрозрачностью.
     var reference: CGImage?
     var referenceOpacity = 0.0
+    /// Зеркало и переворот живой картинки. Эталон снят камерой, как есть, поэтому ложится на неё только с тем же поворотом.
+    var orientation = FrameOrientation.off
     @State private var pinchBase: ViewZoom?
     @State private var panBase: ViewZoom?
     /// С какой точки начался жест: прерванный жест не доходит до onEnded, и новый узнаётся по другой точке.
     @State private var pinchStart: CGPoint?
     @State private var panStart: CGPoint?
+    /// Жест перетаскивания: откуда начат и, если на метке пипетки, где она стояла (доли кадра). Метку берёт тот же жест, что
+    /// сдвигает увеличенную картинку, — отдельного жеста у метки нет: поверх кадра он перехватил бы и щипок над ней.
+    @State private var drag: (start: CGPoint, probe: CGPoint?)?
     @State private var sharp = ZoomPatch()
     /// До этого момента идёт анимация увеличения: заплатка встала бы сразу в конечное место — прячем её.
     @State private var animatingUntil = Date.distantPast
@@ -53,6 +58,8 @@ struct ZoomableVideo: View {
                     .resizable()
                     .interpolation(.medium)
                     .frame(width: fill.width, height: fill.height)
+                    // вокруг своей середины, она же середина кадра: эталон переворачивается так же, как живая картинка
+                    .scaleEffect(x: orientation.flipsX ? -1 : 1, y: orientation.flipsY ? -1 : 1)
                     .position(x: fill.midX, y: fill.midY)
                     .opacity(referenceOpacity)
                     .mask {
@@ -112,6 +119,18 @@ struct ZoomableVideo: View {
             .simultaneousGesture(
                 DragGesture(minimumDistance: 3)
                     .onChanged { value in
+                        // новый жест: начат на метке пипетки — тащит её, а не картинку (и не ставит фокус: это не щелчок)
+                        if drag?.start != value.startLocation {
+                            let marker = ProbeLayout.markerCenter(screen.probePoint, in: screen.zoom.imageRect(view: size, frame: frameSize))
+                            drag = (value.startLocation,
+                                    screen.assist.probe && ProbeLayout.grabs(value.startLocation, marker: marker) ? screen.probePoint : nil)
+                        }
+                        if let base = drag?.probe {
+                            screen.placeProbe(ProbeLayout.dragged(from: base, by: value.translation,
+                                                                  rect: screen.zoom.imageRect(view: size, frame: frameSize),
+                                                                  visible: screen.zoom.visibleRegion(view: size, frame: frameSize)))
+                            return
+                        }
                         guard screen.zoom.isZoomed else { return }
                         if panStart != value.startLocation {
                             panStart = value.startLocation
@@ -121,6 +140,7 @@ struct ZoomableVideo: View {
                         screen.zoom = base.panned(by: value.translation, view: size, frame: frameSize)
                     }
                     .onEnded { _ in
+                        drag = nil
                         panBase = nil
                         panStart = nil
                         refreshPatch()
