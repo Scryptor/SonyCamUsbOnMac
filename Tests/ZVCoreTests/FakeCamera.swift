@@ -43,6 +43,8 @@ final class FakeCamera: PTPTransport, @unchecked Sendable {
     private var processing: [(String, Data)] = []
     private var processingReads = 0
     private var _captureDelayReads = 0
+    /// Ответы тестовой камеры на операции, которых у ZV-E10 нет (0x9215, 0x9216, 0x9223): по параметрам запроса.
+    private var answers: [UInt16: @Sendable ([UInt32]) -> PTPReply] = [:]
 
     init(props: [Prop], deviceInfo: Data? = nil) {
         self.props = props
@@ -100,6 +102,12 @@ final class FakeCamera: PTPTransport, @unchecked Sendable {
     }
 
     func emit(_ event: PTPEvent) { eventContinuation.yield(event) }
+
+    /// Камера отвечает на `operation` так: параметры запроса → ответ. Без этого такая операция получает 0x2005, как у ZV-E10.
+    /// Ответ строится под замком камеры: обращаться к самой камере из него нельзя.
+    func answer(_ operation: UInt16, _ reply: @escaping @Sendable ([UInt32]) -> PTPReply) {
+        locked { answers[operation] = reply }
+    }
 
     /// «Покрутили колесо на камере».
     func setCurrent(_ code: UInt16, _ value: Int64) {
@@ -188,6 +196,7 @@ final class FakeCamera: PTPTransport, @unchecked Sendable {
                 guard !_liveViewReplies.isEmpty else { return PTPReply(code: PTPResponseCode.accessDenied) }
                 return _liveViewReplies.removeFirst()
             default:
+                if let reply = answers[operation] { return reply(params) }
                 return PTPReply(code: 0x2005)
             }
         }

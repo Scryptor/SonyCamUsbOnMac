@@ -28,7 +28,9 @@ struct FnMenu: View {
 
     @ViewBuilder private func tile(_ slot: FnSlot) -> some View {
         switch slot {
-        case let .setting(id):
+        case let .setting(setting):
+            // у новой камеры Sony на месте «Творческого стиля» — Creative Look
+            let id = controller.resolved(setting)
             let enabled = controller.isWritable(id)
             Button { screen.selected = id } label: {
                 TileLabel(title: id.shortTitle, value: controller.label(id),

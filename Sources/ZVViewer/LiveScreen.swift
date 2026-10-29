@@ -219,7 +219,8 @@ struct LiveScreen: View {
                 FocusMarksHelp(screen: screen)
                     .fixedSize()
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-                    .padding(.bottom, 168)
+                    // над шкалой фокуса; с подписями расстояний под линейкой она выше
+                    .padding(.bottom, 168 + (controller.focusLens == nil ? 0 : FocusScale.distancesHeight))
                     .transition(.opacity)
             }
             // панель наложения — тоже не среди элементов: щелчок по миниатюре нужен и когда они спрятаны

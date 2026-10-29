@@ -49,6 +49,25 @@ public struct DisplayStrings: Equatable, Sendable {
     public mutating func merge(_ other: DisplayStrings) {
         lists.merge(other.lists) { _, new in new }
     }
+
+    /// Камера сообщила, что список типа `type` изменился, и прислала его заново. Тип 0 — «все списки»: набор заменяется целиком.
+    /// Иначе заменяется список этого типа; если камера его больше не отдаёт (в ответе его нет), он стирается — старые названия не
+    /// должны жить дальше нового списка. Списки других типов остаются.
+    public mutating func replace(type: UInt32, with fresh: DisplayStrings) {
+        if type == 0 {
+            self = fresh
+        } else {
+            lists[type] = nil
+            merge(fresh)
+        }
+    }
+
+    /// Названия значений настройки от самой камеры (`ValueFormatter.label(…, names:)`). Из списков камеры программа показывает
+    /// только Creative Look (тип 0x13); у остальных настроек списков камеры нет, их подписывают наши таблицы и справочник Sony.
+    /// nil — названий от камеры нет.
+    public func names(for id: SettingID) -> [Int64: String]? {
+        id == .creativeLook ? lists[Self.creativeLookType] : nil
+    }
 }
 
 /// Набор данных Sony (ответы 0x9215 и 0x9223): u32 смещение до данных, u32 размер данных, дальше сами данные.

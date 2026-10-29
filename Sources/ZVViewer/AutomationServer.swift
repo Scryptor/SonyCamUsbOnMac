@@ -609,7 +609,10 @@ final class AutomationServer {
                 },
                 "marks": marksState(),
                 "pull": pullState(),
+                "distance": controller.focusDistance ?? NSNull(),
+                "absolute": controller.focusPullMode == .absolute,
             ] as [String: Any],
+            "camera": cameraState(),
             "reference": controller.reference.map { ["source": $0.source, "width": $0.image.width, "height": $0.image.height] as [String: Any] }
                 ?? NSNull(),
             "assistOverlay": controller.assistOverlay.map { overlay -> [String: Any] in
@@ -722,6 +725,19 @@ final class AutomationServer {
             "whiteLevel": controller.whiteLevel ?? NSNull(),
             "meanLuma": controller.meanLuma.map { ($0 * 10).rounded() / 10 } ?? NSNull(),
         ]
+    }
+
+    /// Что камера сообщила сверх свойств (новые камеры Sony): `displayStringLists` — списки подписей `{"0x13": 18}` (тип списка
+    /// → сколько строк), null — камера 0x9215 не называет; `lensPairs` — сколько пар в каждой таблице объектива (`[12]`), null —
+    /// данных объектива нет; `vendorCodeVersion` — число, как прислала камера (310 — «3.10»), null — нет.
+    private func cameraState() -> [String: Any] {
+        let info = controller.info
+        let lists: Any = controller.deviceInfo?.supports(SonyOp.getDisplayStringList) == true
+            ? Dictionary(uniqueKeysWithValues: info.strings.lists.map { (String(format: "0x%X", $0.key), $0.value.count) })
+            : NSNull()
+        return ["displayStringLists": lists,
+                "lensPairs": info.lens.map { $0.tables.map(\.count) } ?? NSNull(),
+                "vendorCodeVersion": info.vendorCodeVersion ?? NSNull()]
     }
 
     /// Метки фокуса камеры на связи: `A` и `B` — положение в единицах режима перевода (0…65535 у абсолютного фокуса, 0…100 у

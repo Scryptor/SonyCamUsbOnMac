@@ -137,21 +137,25 @@ public enum PresetCatalog {
     }()
 
     /// Что из того, что пресет применяет, на камере сейчас другое. Только то, что камера сейчас даёт менять: выдержку
-    /// в режиме A пресет поставить не может — это не изменение, его не сохранить в пресет и не вернуть.
-    public static func changes(_ preset: Preset, _ properties: [UInt16: SonyProperty]) -> [PresetChange] {
+    /// в режиме A пресет поставить не может — это не изменение, его не сохранить в пресет и не вернуть. `strings` — подписи от
+    /// самой камеры: значения Creative Look называются в списке так, как их называет камера.
+    public static func changes(_ preset: Preset, _ properties: [UInt16: SonyProperty],
+                               strings: DisplayStrings = DisplayStrings()) -> [PresetChange] {
         let values = effective(preset)
         return changeOrder.compactMap { id in
             guard let value = values[id], let property = properties[id.code], property.isWritable,
                   let current = property.current.intValue, current != value else { return nil }
             return PresetChange(id: id, preset: value, camera: current,
                                 label: changeLabel(id, value, current, presetKelvin: values[.colorTemperature],
-                                                   cameraKelvin: properties[SettingID.colorTemperature.code]?.current.intValue))
+                                                   cameraKelvin: properties[SettingID.colorTemperature.code]?.current.intValue,
+                                                   names: strings.names(for: id)))
         }
     }
 
     /// «1/50 → 1/100», «f/2.8 → f/4», «3200 K → 5600 K» — значения говорят сами за себя; «ISO 800 → 1600»; баланс
     /// белого — как в `summary`, с температурой пресета и камеры; остальное — с коротким названием: «Фокус AF-S → AF-C».
-    static func changeLabel(_ id: SettingID, _ from: Int64, _ to: Int64, presetKelvin: Int64?, cameraKelvin: Int64?) -> String {
+    static func changeLabel(_ id: SettingID, _ from: Int64, _ to: Int64, presetKelvin: Int64?, cameraKelvin: Int64?,
+                            names: [Int64: String]? = nil) -> String {
         switch id {
         case .shutter, .aperture, .colorTemperature:
             return ValueFormatter.label(id, from) + " → " + ValueFormatter.label(id, to)
@@ -161,7 +165,7 @@ public enum PresetCatalog {
             return ValueFormatter.whiteBalanceLabel(whiteBalance: from, colorTemperature: presetKelvin) + " → "
                 + ValueFormatter.whiteBalanceLabel(whiteBalance: to, colorTemperature: cameraKelvin)
         default:
-            return id.shortTitle + " " + ValueFormatter.label(id, from) + " → " + ValueFormatter.label(id, to)
+            return id.shortTitle + " " + ValueFormatter.label(id, from, names: names) + " → " + ValueFormatter.label(id, to, names: names)
         }
     }
 
@@ -185,16 +189,18 @@ public enum PresetCatalog {
     }
 
     /// Из чего выбирать значение в окне пресетов: что камера даёт выбрать сейчас, с подписями меню Fn; температура
-    /// без списка камеры — из запасного диапазона. Значение пресета, которого среди вариантов нет, — в начале.
-    public static func options(_ id: SettingID, _ property: SonyProperty?, _ preset: Preset) -> [SettingOption] {
-        var list = property.map { SettingOptions.options(id, $0) } ?? []
+    /// без списка камеры — из запасного диапазона. Значение пресета, которого среди вариантов нет, — в начале. `names` —
+    /// названия значений от самой камеры, как в меню Fn.
+    public static func options(_ id: SettingID, _ property: SonyProperty?, _ preset: Preset,
+                               names: [Int64: String]? = nil) -> [SettingOption] {
+        var list = property.map { SettingOptions.options(id, $0, names: names) } ?? []
         if list.isEmpty, id == .colorTemperature, property != nil {
             let range = WhiteBalanceTemperature.fallbackRange
             list = stride(from: range.min, through: range.max, by: Int64.Stride(range.step))
                 .map { SettingOption(value: $0, label: ValueFormatter.label(id, $0)) }
         }
         if !list.isEmpty, let value = preset.values[id], !list.contains(where: { $0.value == value }) {
-            list.insert(SettingOption(value: value, label: ValueFormatter.label(id, value)), at: 0)
+            list.insert(SettingOption(value: value, label: ValueFormatter.label(id, value, names: names)), at: 0)
         }
         return list
     }

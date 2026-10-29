@@ -347,7 +347,8 @@ private struct PresetEditor: View {
             Form {
                 ForEach(Self.groups, id: \.self) { group in
                     Section(group.title) {
-                        ForEach(group.settings.filter(PresetCatalog.order.contains), id: \.self) { id in
+                        // у новой камеры Sony на месте «Творческого стиля» — Creative Look (со своим значением в пресете)
+                        ForEach(group.settings.map(controller.resolved).filter(PresetCatalog.order.contains), id: \.self) { id in
                             PresetSettingRow(controller: controller, index: index, id: id, preset: preset, online: online)
                         }
                     }
@@ -380,7 +381,8 @@ private struct PresetSettingRow: View {
         // температуру камера даёт менять только в «Цвет. темп.»: другой баланс белого в пресете её отменяет
         let blocked = id == .colorTemperature && !preset.skip.contains(.whiteBalance)
             && preset.values[.whiteBalance].map { $0 != WhiteBalanceTemperature.manualMode } ?? false
-        let options = online ? PresetCatalog.options(id, controller.property(id), preset) : []
+        let names = controller.names(for: id)
+        let options = online ? PresetCatalog.options(id, controller.property(id), preset, names: names) : []
         HStack(spacing: 10) {
             Toggle(isOn: Binding(get: { included }, set: { controller.setPresetIncluded(index, id, $0) })) {
                 Text(id.title)
@@ -401,7 +403,7 @@ private struct PresetSettingRow: View {
                 .disabled(!included)
             } else {
                 VStack(alignment: .trailing, spacing: 1) {
-                    Text(value.map { ValueFormatter.label(id, $0) } ?? "—").monospacedDigit()
+                    Text(value.map { ValueFormatter.label(id, $0, names: names) } ?? "—").monospacedDigit()
                     if online, value != nil {
                         Text("камера сейчас не даёт выбрать").font(.caption).foregroundStyle(.secondary)
                     }

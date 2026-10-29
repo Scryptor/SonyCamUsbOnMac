@@ -11,9 +11,10 @@ public struct SettingOption: Equatable, Sendable {
 }
 
 public enum SettingOptions {
-    /// Значения, которые можно выбрать сейчас. Берутся только из переданного свойства.
-    public static func options(_ id: SettingID, _ property: SonyProperty) -> [SettingOption] {
-        values(property).map { SettingOption(value: $0, label: ValueFormatter.label(id, $0)) }
+    /// Значения, которые можно выбрать сейчас. Берутся только из переданного свойства. `names` — названия значений от самой
+    /// камеры (`DisplayStrings.names(for:)`): они важнее наших таблиц.
+    public static func options(_ id: SettingID, _ property: SonyProperty, names: [Int64: String]? = nil) -> [SettingOption] {
+        values(property).map { SettingOption(value: $0, label: ValueFormatter.label(id, $0, names: names)) }
     }
 
     /// Соседнее разрешённое значение; nil, если сдвинуться некуда.

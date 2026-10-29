@@ -17,8 +17,8 @@ public actor CameraSession {
     /// Каждое перечитывание свойств — сколько угодно слушателям; поток завершается при разрыве связи.
     private nonisolated let snapshotBroadcast = Broadcast<[UInt16: SonyProperty]>()
     private var eventTask: Task<Void, Never>?
-    /// Слушатели смены объектива (событие 0xC21B): у каждого своя подписка.
-    private var lensChangeSubscribers: [UUID: AsyncStream<Void>.Continuation] = [:]
+    /// Слушатели событий камеры (`events`): у каждого своя подписка.
+    private var eventSubscribers: [UUID: AsyncStream<CameraEvent>.Continuation] = [:]
     private var closed = false
     private var refreshRunning = false
     private var refreshWanted = false
@@ -37,25 +37,26 @@ public actor CameraSession {
     /// То же, что `snapshotStream()`: каждое обращение — своя подписка.
     public nonisolated var snapshots: AsyncStream<[UInt16: SonyProperty]> { snapshotStream() }
 
-    /// Камера сообщает о смене объектива событием 0xC21B (у новых камер Sony): по одному значению на событие. Подписка своя у
-    /// каждого, событие, пришедшее до неё, не повторяется; поток кончается вместе с сеансом. Нужна тем, кто хранит что-то
-    /// по объективу — например, метки фокуса.
-    public func lensChanges() -> AsyncStream<Void> {
-        let (stream, continuation) = AsyncStream.makeStream(of: Void.self, bufferingPolicy: .bufferingNewest(1))
+    /// События новых камер Sony — список подписей изменился (0xC20F, с типом списка), объектив сменили (0xC21B), фокус дошёл до
+    /// цели (0xC218) — приходят тем же путём, что изменение свойств (0xC203), но слушателям, а не в `snapshots`. Подписка своя у
+    /// каждого обращения: событие, пришедшее до неё, не повторяется; поток кончается вместе с сеансом. Нужна тем, кто хранит что-то
+    /// по объективу и подписям — например, метки фокуса и названия Creative Look.
+    public var events: AsyncStream<CameraEvent> {
+        let (stream, continuation) = AsyncStream.makeStream(of: CameraEvent.self)
         guard !closed else {
             continuation.finish()
             return stream
         }
         let id = UUID()
-        lensChangeSubscribers[id] = continuation
+        eventSubscribers[id] = continuation
         continuation.onTermination = { [weak self] _ in
-            Task { await self?.dropLensSubscriber(id) }
+            Task { await self?.dropEventSubscriber(id) }
         }
         return stream
     }
 
-    private func dropLensSubscriber(_ id: UUID) {
-        lensChangeSubscribers[id] = nil
+    private func dropEventSubscriber(_ id: UUID) {
+        eventSubscribers[id] = nil
     }
 
     /// Рукопожатие Sony, передача приоритета компьютеру и первое чтение свойств.
@@ -95,6 +96,65 @@ public actor CameraSession {
         properties = try SonyPropertyParser.parse(reply.data)
         snapshotBroadcast.yield(properties)
     }
+
+    // MARK: - Другие камеры Sony: подписи, версия кода, данные объектива
+
+    /// Назвала ли камера операцию в GetDeviceInfo. Новые операции Sony (0x9215, 0x9216, 0x9223) зовём только если да: у ZV-E10
+    /// их нет, и она на них отвечает отказом.
+    private func supports(_ operation: UInt16) -> Bool { deviceInfo?.supports(operation) == true }
+
+    /// Подписи значений от самой камеры (0x9215): список типа `type`, 0 — все списки. Камера, которая 0x9215 не называет, не
+    /// спрашивается совсем — ответ пуст. Ответ, который не разобрался, — ошибка: лучше без подписей, чем с половиной.
+    public func displayStrings(type: UInt32) async throws -> DisplayStrings {
+        guard supports(SonyOp.getDisplayStringList) else { return DisplayStrings() }
+        return try DisplayStrings.parse(try await call(SonyOp.getDisplayStringList, [type]).data)
+    }
+
+    /// Чем кончился запрос подписей при подключении.
+    public struct DisplayStringsLoad: Sendable {
+        /// Что удалось получить.
+        public var strings = DisplayStrings()
+        /// Что не вышло: какой тип просили и что ответила камера — для журнала.
+        public var failures: [(type: UInt32, error: any Error)] = []
+    }
+
+    /// Подписи при подключении: сначала все списки (тип 0). Один список с неизвестным типом данных PTP обрывает разбор всего
+    /// набора — тогда просим один Creative Look (0x13), единственное, что программа показывает; не вышло и это — подписей нет, и
+    /// названия берутся из таблиц Sony. Ошибки не бросаются, а возвращаются: подписи не должны мешать подключению. Исключение —
+    /// обрыв связи и отмена: после них пробовать другой тип незачем.
+    public func loadDisplayStrings() async throws -> DisplayStringsLoad {
+        var load = DisplayStringsLoad()
+        guard supports(SonyOp.getDisplayStringList) else { return load }
+        for type in [0, DisplayStrings.creativeLookType] as [UInt32] {
+            do {
+                load.strings = try await displayStrings(type: type)
+                return load
+            } catch {
+                if error is CancellationError || (error as? TransportError) == .disconnected { throw error }
+                load.failures.append((type, error))
+            }
+        }
+        return load
+    }
+
+    /// Версия кода производителя (0x9216), ×100: 310 — «3.10». Камера отдаёт её в параметре ответа. nil — камера операцию не
+    /// называет или версии в ответе нет.
+    public func vendorCodeVersion() async throws -> Int? {
+        guard supports(SonyOp.getVendorCodeVersion) else { return nil }
+        return try await call(SonyOp.getVendorCodeVersion).params.first.map(Int.init)
+    }
+
+    /// Данные объектива (0x9223) в метрах. Спрашиваем, только если камера называет операцию и 0xE086 = 1 (данные объектива
+    /// готовы): без объектива с электроникой их нет. nil — условий нет. Поэтому звать надо после того, как свойства
+    /// перечитаны: 0xE086 берётся из последнего чтения.
+    public func lensInformation() async throws -> LensInformation? {
+        guard supports(SonyOp.getLensInformation),
+              properties[SonyProp.lensInfoEnabled]?.current.intValue == 1 else { return nil }
+        return try LensInformation.parse(try await call(SonyOp.getLensInformation, [Self.metersParameter]).data)
+    }
+
+    /// Параметр 0x9223: 1 — футы, 2 — метры. Показываем метры.
+    private static let metersParameter: UInt32 = 2
 
     // MARK: - Изменение настроек, запись, live view
 
@@ -218,12 +278,14 @@ public actor CameraSession {
     // MARK: - Внутреннее
 
     private func listenForEvents() {
-        let events = transport.events
+        let incoming = transport.events
         eventTask = Task { [weak self] in
-            for await event in events {
+            for await event in incoming {
                 switch event.code {
                 case Sony.propertyChangedEvent: await self?.propertiesChanged()
-                case SonyEvent.lensInfoChanged: await self?.lensChanged()
+                case SonyEvent.displayListChanged: await self?.publish(.displayListChanged(type: event.params.first ?? 0))
+                case SonyEvent.lensInfoChanged: await self?.publish(.lensChanged)
+                case SonyEvent.focusPositionResult: await self?.publish(.focusPositionResult(reached: event.params.first == 1))
                 default: break
                 }
             }
@@ -241,9 +303,9 @@ public actor CameraSession {
         Task { await self.refreshWhileWanted() }
     }
 
-    /// Объектив сменился: всем подписчикам по одному значению.
-    private func lensChanged() {
-        for subscriber in lensChangeSubscribers.values { subscriber.yield() }
+    /// Событие камеры — всем подписчикам.
+    private func publish(_ event: CameraEvent) {
+        for subscriber in eventSubscribers.values { subscriber.yield(event) }
     }
 
     private func refreshWhileWanted() async {
@@ -259,8 +321,8 @@ public actor CameraSession {
         closed = true
         eventTask?.cancel()
         snapshotBroadcast.finish()
-        let subscribers = lensChangeSubscribers.values
-        lensChangeSubscribers = [:]
+        let subscribers = eventSubscribers.values
+        eventSubscribers = [:]
         for subscriber in subscribers { subscriber.finish() }
     }
 

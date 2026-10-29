@@ -585,15 +585,16 @@ public struct GroupFailures: Equatable, Sendable {
         return "Не удалось " + parts.joined(separator: "; ")
     }
 
-    /// Что не дошло: «ISO 51200», «1/50», «f/2.8», «AWB», «Видео M», «Фокус AF-C», «запись».
-    public static func label(_ id: SettingID, _ value: Int64) -> String {
+    /// Что не дошло: «ISO 51200», «1/50», «f/2.8», «AWB», «Видео M», «Фокус AF-C», «запись», «Look FL». `names` — названия
+    /// значений от самой главной камеры (`DisplayStrings.names(for:)`): значение выбрано по её списку.
+    public static func label(_ id: SettingID, _ value: Int64, names: [Int64: String]? = nil) -> String {
         switch id {
         case .shutter, .aperture, .colorTemperature, .whiteBalance, .exposureProgram, .movieRecordingSetting:
             return ValueFormatter.label(id, value)
         case .iso:
             return "ISO " + ValueFormatter.label(id, value)
         default:
-            return id.shortTitle + " " + ValueFormatter.label(id, value)
+            return id.shortTitle + " " + ValueFormatter.label(id, value, names: names)
         }
     }
 }

@@ -4,9 +4,9 @@ import Foundation
 public enum ValueFormatter {
     private static let minus = "\u{2212}"
 
-    public static func label(_ id: SettingID, _ property: SonyProperty?) -> String {
+    public static func label(_ id: SettingID, _ property: SonyProperty?, names: [Int64: String]? = nil) -> String {
         guard let value = property?.current.intValue else { return "—" }
-        return label(id, value)
+        return label(id, value, names: names)
     }
 
     /// Баланс белого в строке значений: в режиме «Цвет. темп.» — сама температура, как на экране камеры.

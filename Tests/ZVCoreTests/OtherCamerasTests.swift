@@ -154,6 +154,21 @@ private func lensTables(_ tables: [[(UInt32, UInt32)]], version: UInt16 = 100) -
     #expect(strings.lists.count == 3)
 }
 
+@Test func refreshedListReplacesOnlyItsOwnTypeAndDropsWhatTheCameraNoLongerGives() {
+    var strings = DisplayStrings(lists: [0x13: [1: "ST", 2: "PT"], 0x15: [1: "Человек"]])
+    // пришёл заново список 0x13: он заменяется целиком, 0x15 на месте
+    strings.replace(type: 0x13, with: DisplayStrings(lists: [0x13: [1: "ST", 3: "NT"]]))
+    #expect(strings.lists == [0x13: [1: "ST", 3: "NT"], 0x15: [1: "Человек"]])
+    // камера на тип 0x15 ответила пустым набором (списка у неё больше нет): старые названия стираются
+    strings.replace(type: 0x15, with: DisplayStrings())
+    #expect(strings.lists == [0x13: [1: "ST", 3: "NT"]])
+    // тип 0 — все списки: набор заменяется целиком
+    strings.replace(type: 0, with: DisplayStrings(lists: [0x17: [5: "x"]]))
+    #expect(strings.lists == [0x17: [5: "x"]])
+    strings.replace(type: 0, with: DisplayStrings())
+    #expect(strings == DisplayStrings())
+}
+
 // MARK: - Данные объектива (0x9223)
 
 @Test func lensInformationOfTheNewerCameraIsParsed() throws {
@@ -510,6 +525,78 @@ private func lensTables(_ tables: [[(UInt32, UInt32)]], version: UInt16 = 100) -
     #expect(checked > 150)
 }
 
+// MARK: - Названия от камеры в настройках
+
+private func creativeLook(current: Int64, values: [Int64] = [1, 6, 0x101]) -> SonyProperty {
+    SonyProperty(code: SonyProp.creativeLook, dataType: PTPType.uint16, getSet: 1, enabled: 1, current: .int(current),
+                 range: nil, settableValues: values, allValues: values)
+}
+
+@Test func onlyCreativeLookHasNamesFromTheCamera() throws {
+    let strings = try DisplayStrings.parse(Fixture.data("display_strings"))
+    #expect(strings.names(for: .creativeLook)?[6] == "FL")
+    #expect(strings.names(for: .creativeLook)?.count == 18)
+    // остальные списки камеры (тип 0x15 и прочие) к настройкам программы не относятся
+    for id in SettingID.allCases where id != .creativeLook { #expect(strings.names(for: id) == nil, "\(id)") }
+    // списка Creative Look нет — названия берутся из таблиц
+    #expect(DisplayStrings().names(for: .creativeLook) == nil)
+    #expect(DisplayStrings(lists: [0x15: [1: "x"]]).names(for: .creativeLook) == nil)
+}
+
+@Test func propertyLabelUsesTheCameraNamesToo() {
+    let look = creativeLook(current: 6)
+    #expect(ValueFormatter.label(.creativeLook, look, names: [6: "FL"]) == "FL")
+    #expect(ValueFormatter.label(.creativeLook, look) == "FL(Film)")
+    #expect(ValueFormatter.label(.creativeLook, look, names: [1: "ST"]) == "FL(Film)")
+    #expect(ValueFormatter.label(.creativeLook, nil, names: [6: "FL"]) == "—")
+}
+
+@Test func valueStripOptionsUseTheCameraNames() {
+    let look = creativeLook(current: 1)
+    let named = SettingOptions.options(.creativeLook, look, names: [1: "ST", 6: "FL", 0x101: "Custom Look 1"])
+    #expect(named.map(\.label) == ["ST", "FL", "Custom Look 1"])
+    #expect(named.map(\.value) == [1, 6, 0x101])
+    // без списка камеры — таблицы Sony, как было; значения те же
+    let plain = SettingOptions.options(.creativeLook, look)
+    #expect(plain.map(\.value) == [1, 6, 0x101])
+    #expect(plain.map(\.label) == [1, 6, 0x101].map { ValueFormatter.label(.creativeLook, $0) })
+    #expect(plain[1].label == "FL(Film)")
+    // в списке камеры нет одного значения — для него таблица, а не номер
+    let partial = SettingOptions.options(.creativeLook, look, names: [1: "ST"])
+    #expect(partial.map(\.label) == ["ST", "FL(Film)", plain[2].label])
+}
+
+@Test func presetWindowOptionsAndChangesUseTheCameraNames() {
+    let look = creativeLook(current: 6)
+    let preset = Preset(name: "Look", values: [.creativeLook: 1])
+    let names: [Int64: String] = [1: "ST", 6: "FL", 0x101: "Custom Look 1"]
+    // выбор значения в окне пресетов
+    #expect(PresetCatalog.options(.creativeLook, look, preset, names: names).map(\.label) == ["ST", "FL", "Custom Look 1"])
+    #expect(PresetCatalog.options(.creativeLook, look, preset).map(\.label)[1] == "FL(Film)")
+    // значения пресета нет среди разрешённых — его подпись тоже от камеры
+    let outside = Preset(name: "Look", values: [.creativeLook: 7])
+    #expect(PresetCatalog.options(.creativeLook, look, outside, names: [7: "IN"] ).first?.label == "IN")
+    // «На камере изменено»
+    let strings = DisplayStrings(lists: [DisplayStrings.creativeLookType: names])
+    #expect(PresetCatalog.changes(preset, [SonyProp.creativeLook: look], strings: strings).map(\.label) == ["Look ST → FL"])
+    let plain = PresetCatalog.changes(preset, [SonyProp.creativeLook: look]).map(\.label)
+    #expect(plain == ["Look \(ValueFormatter.label(.creativeLook, 1)) → FL(Film)"])
+    // названия камеры не задевают подписи других настроек
+    let iso = SonyProperty(code: SonyProp.iso, dataType: PTPType.uint32, getSet: 1, enabled: 1, current: .int(400),
+                           range: nil, settableValues: [100, 400], allValues: [100, 400])
+    let isoPreset = Preset(name: "ISO", values: [.iso: 100])
+    #expect(PresetCatalog.changes(isoPreset, [SonyProp.iso: iso], strings: strings).map(\.label) == ["ISO 100 → 400"])
+}
+
+@Test func groupFailureNamesCreativeLookLikeTheMainCamera() {
+    // значение выбрано по списку главной камеры — в «Не удалось на «B»: …» оно называется так же
+    #expect(GroupFailures.label(.creativeLook, 6, names: [6: "FL"]) == "Look FL")
+    #expect(GroupFailures.label(.creativeLook, 6) == "Look FL(Film)")
+    // другие подписи — как были
+    #expect(GroupFailures.label(.iso, 51200, names: [51200: "x"]) == "ISO 51200")
+    #expect(GroupFailures.label(.focusMode, 0x8004) == "Фокус AF-C")
+}
+
 // MARK: - Имена свойств
 
 @Test func propertyNamesFallBackToTheReference() {
@@ -560,6 +647,207 @@ private func lensTables(_ tables: [[(UInt32, UInt32)]], version: UInt16 = 100) -
     #expect(SonyEvent.displayListChanged == 0xC20F)
     #expect(SonyEvent.focusPositionResult == 0xC218)
     #expect(SonyEvent.lensInfoChanged == 0xC21B)
+}
+
+// MARK: - Сеанс: подписи, версия кода и данные объектива
+
+/// Новая камера для тестов сеанса: в GetDeviceInfo — три новые операции, на них она отвечает теми же байтами, что в фикстурах
+/// (их отдаёт и поддельная камера в профиле newer); версия кода 3.10. `lensEnabled` — значение 0xE086; nil — свойства нет.
+private func newerCamera(lensEnabled: Int64? = 1, operations: [UInt16] = [0x9201, 0x9209, 0x9215, 0x9216, 0x9223]) throws -> FakeCamera {
+    let props: [FakeCamera.Prop] = lensEnabled.map {
+        [.init(code: SonyProp.lensInfoEnabled, type: PTPType.uint8, getSet: 0, current: $0, values: [0, 1])]
+    } ?? []
+    let cam = FakeCamera(props: props, deviceInfo: FakeCamera.deviceInfo(operations: operations))
+    let all = try Fixture.data("display_strings")
+    let looks = dataset(stringLists([(0x13, PTPType.uint16, [(1, "ST"), (6, "FL")])]))
+    let lens = try Fixture.data("lens_information")
+    cam.answer(SonyOp.getDisplayStringList) { params in
+        // версия списков 1.00 — в параметре ответа; другой тип списка — пустой набор (ListTypeNum = 0)
+        PTPReply(code: PTPResponseCode.ok, params: [100], data: params == [0] ? all : params == [0x13] ? looks : dataset(stringLists([])))
+    }
+    cam.answer(SonyOp.getVendorCodeVersion) { _ in PTPReply(code: PTPResponseCode.ok, params: [0x0136]) }
+    // только метры (параметр 2), как просит программа; футы камера этого стенда не отдаёт
+    cam.answer(SonyOp.getLensInformation) { params in
+        params == [2] ? PTPReply(code: PTPResponseCode.ok, data: lens) : PTPReply(code: 0x2006)
+    }
+    return cam
+}
+
+private let newOperations: [UInt16] = [SonyOp.getDisplayStringList, SonyOp.getVendorCodeVersion, SonyOp.getLensInformation]
+
+@Test func sessionAsksForDisplayStringsOfTheTypeItIsGiven() async throws {
+    let cam = try newerCamera()
+    let session = try await readySession(cam)
+    let all = try await session.displayStrings(type: 0)
+    #expect(all.lists[0x13]?[0x0006] == "FL" && all.lists[0x15]?.count == 2)
+    let looks = try await session.displayStrings(type: DisplayStrings.creativeLookType)
+    #expect(looks.lists == [0x13: [1: "ST", 6: "FL"]])
+    // тип списка — параметр запроса, 0 — «все»
+    #expect(cam.sent.filter { $0.op == SonyOp.getDisplayStringList }.map(\.params) == [[0], [0x13]])
+    // тип, которого у камеры нет, — пустой набор, а не ошибка
+    #expect(try await session.displayStrings(type: 0x99) == DisplayStrings())
+}
+
+@Test func cameraThatDoesNotListTheNewOperationsIsNeverAskedForThem() async throws {
+    // ZV-E10: в списке операций нет ни 0x9215, ни 0x9216, ни 0x9223. Эта камера на них ответила бы (ловушка) и даже говорит
+    // 0xE086 = 1, — но сеанс смотрит в список операций из GetDeviceInfo, а не на свойства
+    let cam = FakeCamera(props: [.init(code: SonyProp.lensInfoEnabled, type: PTPType.uint8, getSet: 0, current: 1, values: [0, 1])])
+    for operation in newOperations {
+        cam.answer(operation) { _ in PTPReply(code: PTPResponseCode.ok, params: [0x0136], data: Data(count: 64)) }
+    }
+    let session = try await readySession(cam)
+    #expect(try await session.displayStrings(type: 0) == DisplayStrings())
+    #expect(try await session.displayStrings(type: DisplayStrings.creativeLookType) == DisplayStrings())
+    let load = try await session.loadDisplayStrings()
+    #expect(load.strings == DisplayStrings() && load.failures.isEmpty)
+    #expect(try await session.vendorCodeVersion() == nil)
+    #expect(try await session.lensInformation() == nil)
+    #expect(!cam.sent.contains { newOperations.contains($0.op) }, "\(cam.sent.map { String($0.op, radix: 16) })")
+}
+
+@Test func oneOfTheOperationsDoesNotOpenTheOthers() async throws {
+    // камера назвала только 0x9223: подписи и версию по-прежнему не спрашиваем
+    let cam = try newerCamera(operations: [0x9201, 0x9209, 0x9223])
+    let session = try await readySession(cam)
+    #expect(try await session.displayStrings(type: 0) == DisplayStrings())
+    #expect(try await session.vendorCodeVersion() == nil)
+    #expect(try await session.lensInformation() != nil)
+    #expect(cam.sent.filter { newOperations.contains($0.op) }.map(\.op) == [SonyOp.getLensInformation])
+}
+
+@Test func vendorCodeVersionIsTheReplyParameter() async throws {
+    let cam = try newerCamera()
+    #expect(try await readySession(cam).vendorCodeVersion() == 0x0136)
+    #expect(try await readySession(try newerCamera()).vendorCodeVersion() == 310)
+    // без параметра в ответе версии нет
+    let bare = try newerCamera()
+    bare.answer(SonyOp.getVendorCodeVersion) { _ in PTPReply(code: PTPResponseCode.ok) }
+    #expect(try await readySession(bare).vendorCodeVersion() == nil)
+    // отказ камеры — ошибка с кодом операции
+    let refusing = try newerCamera()
+    refusing.answer(SonyOp.getVendorCodeVersion) { _ in PTPReply(code: 0x2002) }
+    let session = try await readySession(refusing)
+    await #expect(throws: SessionError.operationFailed(operation: SonyOp.getVendorCodeVersion, code: 0x2002)) {
+        try await session.vendorCodeVersion()
+    }
+}
+
+@Test func vendorCodeVersionIsShownLikeSonyWritesIt() {
+    // версия ×100: 0x0136 — 310 — «3.10»; 100 — «1.00»
+    #expect(VendorCodeVersion.label(310) == "3.10")
+    #expect(VendorCodeVersion.label(0x0136) == "3.10")
+    #expect(VendorCodeVersion.label(100) == "1.00")
+    #expect(VendorCodeVersion.label(105) == "1.05")
+    #expect(VendorCodeVersion.label(5) == "0.05")
+    #expect(VendorCodeVersion.label(1234) == "12.34")
+}
+
+@Test func lensInformationIsAskedInMetersAndOnlyWhileTheCameraHasItEnabled() async throws {
+    let on = try newerCamera(lensEnabled: 1)
+    let lens = try #require(try await readySession(on).lensInformation())
+    #expect(lens.pairs.count == 12 && lens.absoluteScale && lens.tableCount == 1)
+    #expect(on.sent.filter { $0.op == SonyOp.getLensInformation }.map(\.params) == [[2]])
+
+    // 0xE086 = 0 — данных объектива нет (например, объектив без электроники): камеру не спрашиваем
+    let off = try newerCamera(lensEnabled: 0)
+    #expect(try await readySession(off).lensInformation() == nil)
+    #expect(!off.sent.contains { $0.op == SonyOp.getLensInformation })
+
+    // свойства 0xE086 у камеры нет — то же самое
+    let none = try newerCamera(lensEnabled: nil)
+    #expect(try await readySession(none).lensInformation() == nil)
+    #expect(!none.sent.contains { $0.op == SonyOp.getLensInformation })
+}
+
+@Test func lensInformationFollowsTheEnableFlagAsItChanges() async throws {
+    let cam = try newerCamera(lensEnabled: 0)
+    let session = try await readySession(cam)
+    #expect(try await session.lensInformation() == nil)
+    // на камере поставили объектив с электроникой: 0xE086 стал 1, камера сообщила об изменении свойств
+    var updates = session.snapshots.makeAsyncIterator()
+    _ = await updates.next()
+    cam.setCurrent(SonyProp.lensInfoEnabled, 1)
+    cam.emit(PTPEvent(code: Sony.propertyChangedEvent))
+    #expect(await updates.next()?[SonyProp.lensInfoEnabled]?.current == .int(1))
+    #expect(try await session.lensInformation()?.pairs.count == 12)
+    // и снова снят
+    cam.setCurrent(SonyProp.lensInfoEnabled, 0)
+    cam.emit(PTPEvent(code: Sony.propertyChangedEvent))
+    #expect(await updates.next()?[SonyProp.lensInfoEnabled]?.current == .int(0))
+    #expect(try await session.lensInformation() == nil)
+}
+
+@Test func lensInformationThatCannotBeReadIsAnErrorNotATable() async throws {
+    let cam = try newerCamera()
+    cam.answer(SonyOp.getLensInformation) { _ in PTPReply(code: PTPResponseCode.ok, data: Data([8, 0, 0, 0, 40, 0, 0, 0])) }
+    let session = try await readySession(cam)
+    await #expect(throws: PTPParseError.self) { try await session.lensInformation() }
+    // отказ камеры — ошибка с кодом
+    cam.answer(SonyOp.getLensInformation) { _ in PTPReply(code: 0x2019) }
+    await #expect(throws: SessionError.operationFailed(operation: SonyOp.getLensInformation, code: 0x2019)) {
+        try await session.lensInformation()
+    }
+}
+
+// MARK: Подписи при подключении: один сломанный список не лишает остальных
+
+@Test func startupDisplayStringsAreAllTheListsOfTheCamera() async throws {
+    let cam = try newerCamera()
+    let load = try await readySession(cam).loadDisplayStrings()
+    #expect(Set(load.strings.lists.keys) == [0x13, 0x15] && load.failures.isEmpty)
+    #expect(cam.sent.filter { $0.op == SonyOp.getDisplayStringList }.map(\.params) == [[0]])
+}
+
+@Test func startupDisplayStringsFallBackToCreativeLookWhenTheWholeSetIsUnreadable() async throws {
+    // один список с неизвестным типом данных PTP обрывает разбор всего набора (тип 0): первый список целый, второй — нет
+    var whole: [UInt8] = le16(2) + [0, 0]
+    whole += le32(0x13) + le16(PTPType.uint16) + le16(1)                  // список 0x13 из одной строки…
+    whole += le16(1) + le16(3) + [0x53, 0x54, 0]                          // …1 → «ST»
+    whole += le32(0x15) + le16(0x0000) + le16(1)                          // список 0x15: типа данных 0 в PTP нет
+    whole += [0, 0, 0]
+    let unreadable = dataset(whole)
+    let looks = dataset(stringLists([(0x13, PTPType.uint16, [(1, "ST"), (6, "FL")])]))
+    let cam = try newerCamera()
+    cam.answer(SonyOp.getDisplayStringList) { params in
+        PTPReply(code: PTPResponseCode.ok, params: [100], data: params == [DisplayStrings.creativeLookType] ? looks : unreadable)
+    }
+    let load = try await readySession(cam).loadDisplayStrings()
+    // от камеры — только Creative Look, единственное, что программа показывает
+    #expect(load.strings.lists == [0x13: [1: "ST", 6: "FL"]])
+    #expect(load.failures.map(\.type) == [0])
+    #expect(load.failures.first?.error as? PTPParseError == .unsupportedType(0x0000))
+    #expect(cam.sent.filter { $0.op == SonyOp.getDisplayStringList }.map(\.params) == [[0], [0x13]])
+}
+
+@Test func startupDisplayStringsFallBackWhenTheCameraRefusesTheWholeSet() async throws {
+    let cam = try newerCamera()
+    let looks = dataset(stringLists([(0x13, PTPType.uint16, [(6, "FL")])]))
+    cam.answer(SonyOp.getDisplayStringList) { params in
+        params == [0] ? PTPReply(code: 0x2006) : PTPReply(code: PTPResponseCode.ok, params: [100], data: looks)
+    }
+    let load = try await readySession(cam).loadDisplayStrings()
+    #expect(load.strings.lists == [0x13: [6: "FL"]])
+    #expect(load.failures.count == 1 && load.failures[0].type == 0)
+    #expect(load.failures[0].error as? SessionError == .operationFailed(operation: SonyOp.getDisplayStringList, code: 0x2006))
+}
+
+@Test func startupDisplayStringsCarryOnWithoutNamesWhenNothingCanBeRead() async throws {
+    let cam = try newerCamera()
+    cam.answer(SonyOp.getDisplayStringList) { _ in PTPReply(code: PTPResponseCode.ok, data: Data([1, 2, 3])) }
+    let load = try await readySession(cam).loadDisplayStrings()
+    // ни ошибки, ни названий: программа берёт названия Creative Look из таблиц Sony
+    #expect(load.strings == DisplayStrings())
+    #expect(load.failures.map(\.type) == [0, 0x13])
+    #expect(cam.sent.filter { $0.op == SonyOp.getDisplayStringList }.count == 2)
+}
+
+@Test func startupDisplayStringsDoNotAskAgainAfterTheLinkIsLost() async throws {
+    let cam = try newerCamera()
+    let session = try await readySession(cam)
+    cam.disconnectOnNext = SonyOp.getDisplayStringList
+    await #expect(throws: TransportError.disconnected) { try await session.loadDisplayStrings() }
+    // обрыв — не повод пробовать другой тип: второй запрос в оборванную связь не уходит
+    #expect(cam.sent.filter { $0.op == SonyOp.getDisplayStringList }.count == 1)
 }
 
 // MARK: - Фикстуры

@@ -29,7 +29,8 @@ struct AllSettingsPanel: View {
             ScrollView {
                 VStack(spacing: 0) {
                     ForEach(screen.group.settings, id: \.self) { id in
-                        row(id)
+                        // у новой камеры Sony на месте «Творческого стиля» — Creative Look
+                        row(controller.resolved(id))
                     }
                 }
                 .padding(14)

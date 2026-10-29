@@ -202,8 +202,9 @@ struct FocusFramesLayer: View {
 }
 
 /// Шкала фокуса — ручной фокус с экрана (в MF): слева ближе, справа дальше. Кнопки — шаги 7, 3 и 1; перетаскивание по
-/// шкале — как поворот кольца фокуса, колесо мыши — по шагу. Метка — где фокус, если камера его отдаёт. Под линейкой — метки
-/// фокуса: `[A] [B] [⏱ 2 с]`.
+/// шкале — как поворот кольца фокуса, колесо мыши — по шагу. Метка — где фокус, если камера его отдаёт: по 0xE043, а если его
+/// нет — по 0xD24C. Если камера дала данные объектива, под линейкой подписаны расстояния — на делениях и у метки положения. Под
+/// линейкой — метки фокуса: `[A] [B] [⏱ 2 с]`.
 struct FocusScale: View {
     let controller: CameraController
     let screen: ScreenState
@@ -259,12 +260,17 @@ struct FocusScale: View {
 
     /// Над линейкой, пока метки есть, — место под значки меток.
     private static let flagsHeight: CGFloat = 16
+    /// Под линейкой, пока есть расстояния, — место под подписи.
+    static let distancesHeight: CGFloat = 12
+    private static let distanceFont = Font.system(size: 9)
 
     private var ruler: some View {
         let flags = controller.focusMarksAvailable ? Self.flagsHeight : 0
+        let lens = controller.focusLens
+        let labels = lens == nil ? 0 : Self.distancesHeight
         return Canvas { context, size in
             let top = flags
-            let barHeight = size.height - top
+            let barHeight = size.height - top - labels
             let mid = top + barHeight / 2
             // деления — как на кольце фокуса; сдвигаются, пока шкалу тянут
             let spacing: CGFloat = 12
@@ -277,11 +283,13 @@ struct FocusScale: View {
                 context.stroke(tick, with: .color(.white.opacity(0.4)), lineWidth: 1)
                 x += spacing
             }
-            if let position = controller.focalPosition {
-                let px = size.width * CGFloat(position) / 100
+            // где фокус: по 0xE043, если камера его отдаёт (точнее, чем сотые доли 0xD24C), иначе по 0xD24C
+            if let fraction = controller.focusFraction {
+                let px = size.width * CGFloat(fraction)
                 context.fill(Path(roundedRect: CGRect(x: px - 2, y: top + 2, width: 4, height: barHeight - 4), cornerRadius: 2),
                              with: .color(.yellow))
             }
+            if let lens { drawDistances(context, width: size.width, y: top + barHeight, lens: lens) }
             guard flags > 0 else { return }
             // значки меток: буква на цветной плашке и остриё к месту на линейке. Рядом друг с другом плашки расходятся,
             // чтобы не закрывать буквы; остриё остаётся там, где метка
@@ -306,7 +314,7 @@ struct FocusScale: View {
                              at: CGPoint(x: badge.midX, y: badge.midY))
             }
         }
-        .frame(height: 24 + flags)
+        .frame(height: 24 + flags + labels)
         .contentShape(Rectangle())
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = max($0, 1) }
         .gesture(DragGesture(minimumDistance: 1)
@@ -319,6 +327,34 @@ struct FocusScale: View {
             }
             .onEnded { _ in dragged = 0 })
         .help("Тяните влево — ближе, вправо — дальше; колесо мыши — по шагу")
+    }
+
+    /// Подписи расстояний под линейкой, от `y`: на делениях — круглые расстояния и оба края таблицы, сколько помещается, а у метки
+    /// положения — текущее расстояние жёлтым (деления рядом с ним не подписываются, чтобы подписи не налезали друг на друга).
+    private func drawDistances(_ context: GraphicsContext, width: CGFloat, y: CGFloat, lens: LensInformation) {
+        let ruler = Double(width)
+        func resolve(_ text: String, _ color: Color, _ weight: Font.Weight = .regular) -> GraphicsContext.ResolvedText {
+            context.resolve(Text(text).font(Self.distanceFont.weight(weight)).foregroundColor(color))
+        }
+        func measure(_ text: String) -> Double {
+            Double(resolve(text, .white).measure(in: CGSize(width: 200, height: 20)).width)
+        }
+        func centre(_ span: ClosedRange<Double>) -> CGFloat { CGFloat((span.lowerBound + span.upperBound) / 2) }
+        let middle = y + 3 + (Self.distancesHeight - 3) / 2
+        var reserved: [ClosedRange<Double>] = []
+        if let fraction = controller.focusFraction, let label = lens.label(atFraction: fraction) {
+            let span = FocusDistanceScale.span(fraction: fraction, labelWidth: measure(label), width: ruler)
+            reserved = [span]
+            context.draw(resolve(label, .yellow, .semibold), at: CGPoint(x: centre(span), y: middle))
+        }
+        for tick in FocusDistanceScale.ticks(for: lens, width: ruler, reserved: reserved, labelWidth: measure) {
+            let span = FocusDistanceScale.span(fraction: tick.fraction, labelWidth: measure(tick.label), width: ruler)
+            var line = Path()
+            line.move(to: CGPoint(x: width * CGFloat(tick.fraction), y: y))
+            line.addLine(to: CGPoint(x: width * CGFloat(tick.fraction), y: y + 3))
+            context.stroke(line, with: .color(.white.opacity(0.4)), lineWidth: 1)
+            context.draw(resolve(tick.label, .white.opacity(0.7)), at: CGPoint(x: centre(span), y: middle))
+        }
     }
 
     // MARK: Метки фокуса
@@ -334,23 +370,29 @@ struct FocusScale: View {
         .padding(.top, 2)
     }
 
-    /// Кнопка метки. Пустая — «A+»: касание запоминает, где фокус. Заданная — «A»: касание переводит фокус к ней. Пока фокус
-    /// едет, кнопка заливается по доле пути, и касание её же останавливает; на конце мигает один раз.
+    /// Кнопка метки. Пустая — «A+»: касание запоминает, где фокус. Заданная — «A»: касание переводит фокус к ней; если камера дала
+    /// данные объектива — «A 1,2 м», расстояние, на которое метка поставлена. Пока фокус едет, кнопка заливается по доле пути, и
+    /// касание её же останавливает; на конце мигает один раз.
     private func markButton(_ mark: Character) -> some View {
         let name = String(mark)
         let isSet = controller.focusMarks[mark] != nil
         let moving = controller.focusPullMark == mark
         let color = Self.markColor(mark)
         let seconds = Int(controller.focusMarks.duration)
+        let distance = isSet ? controller.focusMarkDistance(mark) : nil
         let shape = RoundedRectangle(cornerRadius: 8)
         return Button { controller.focusMarkTapped(mark) } label: {
             HStack(spacing: 4) {
                 Text(isSet ? name : name + "+").font(.system(size: 12, weight: .bold))
+                if let distance { Text(distance).font(.system(size: 10)).opacity(0.85).monospacedDigit() }
                 // едет — значок «стоп»: касание остановит
                 if moving { Image(systemName: "stop.fill").font(.system(size: 8)) }
             }
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
+            // с расстояниями кнопка шире; без них (ZV-E10) — как была
+            .frame(width: controller.focusLens == nil ? 60 : 80, height: 24)
             .foregroundStyle(.white.opacity(isSet ? 1 : 0.85))
-            .frame(width: 60, height: 24)
             .background {
                 ZStack(alignment: .leading) {
                     shape.fill(isSet ? color.opacity(0.22) : Color.white.opacity(0.1))
@@ -375,10 +417,12 @@ struct FocusScale: View {
         }
         .buttonStyle(.plain)
         .help(moving ? "Остановить перевод фокуса к метке \(name)"
-              : isSet ? "Перевести фокус к метке \(name) за \(seconds) с. Правый щелчок — запомнить заново или стереть"
+              : isSet ? "Перевести фокус к метке \(name)" + (distance.map { " (\($0))" } ?? "")
+                  + " за \(seconds) с. Правый щелчок — запомнить заново или стереть"
               : "Запомнить, где сейчас фокус, в метку \(name). Правый щелчок — меню")
         .accessibilityLabel(moving ? "Остановить перевод к метке \(name)"
-                            : isSet ? "Метка \(name): перевести фокус" : "Метка \(name): запомнить фокус")
+                            : isSet ? "Метка \(name): перевести фокус" + (distance.map { ", \($0)" } ?? "")
+                            : "Метка \(name): запомнить фокус")
         .contextMenu {
             Button("Запомнить здесь") { controller.focusMarkSave(mark) }
             Button("Стереть") { controller.focusMarkClear(mark) }

@@ -76,7 +76,9 @@ struct DebugPanel: View {
         } else {
             Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 5) {
                 ForEach(items) { row in
-                    GridRow {
+                    // название — на уровне первой строки значения: у длинного значения (списки подписей, таблица объектива) оно
+                    // переносится на несколько строк
+                    GridRow(alignment: .firstTextBaseline) {
                         Text(row.label)
                             .font(tab == .log ? .system(.callout, design: .monospaced) : .callout)
                             .foregroundStyle(.secondary)
@@ -224,7 +226,54 @@ enum DebugReport {
             rows.append(Row(label: "Качество превью в камере", value: quality == 1 ? "низкое (1)" : quality == 2 ? "высокое (2)" : "\(quality)"))
         }
         rows.append(Row(label: "Свойств", value: "\(c.properties.count)"))
+        return rows + otherCameras(c, info)
+    }
+
+    /// Что новая камера Sony сообщает сверх свойств: версия кода (0x9216), списки подписей (0x9215) и таблица объектива (0x9223),
+    /// как пришли, — для отчётов с других камер. У ZV-E10 этих операций нет, и строк тоже.
+    private static func otherCameras(_ c: CameraController, _ device: DeviceInfo) -> [Row] {
+        var rows: [Row] = []
+        if device.supports(SonyOp.getVendorCodeVersion) {
+            rows.append(Row(label: "Версия кода (0x9216)",
+                            value: c.info.vendorCodeVersion.map { "\(VendorCodeVersion.label($0)) (\($0))" } ?? "нет"))
+        }
+        if device.supports(SonyOp.getDisplayStringList) {
+            let lists = c.info.strings.lists
+            if lists.isEmpty { rows.append(Row(label: "Подписи (0x9215)", value: "списков нет")) }
+            for type in lists.keys.sorted() {
+                let names = lists[type] ?? [:]
+                let title = type == DisplayStrings.creativeLookType ? "Creative Look, " : ""
+                // неразрывный пробел: пара «код название» при переносе строки не рвётся
+                let pairs = names.keys.sorted().map { String(format: "0x%04llX\u{00A0}", $0) + (names[$0] ?? "") }
+                rows.append(Row(label: "Подписи 0x" + String(type, radix: 16, uppercase: true),
+                                value: "\(title)\(names.count) шт.: " + pairs.joined(separator: " · ")))
+            }
+        }
+        if device.supports(SonyOp.getLensInformation) {
+            if let lens = c.info.lens {
+                for (index, table) in lens.tables.enumerated() {
+                    let pairs = table.map { Self.number($0.position) + "\u{00A0}→\u{00A0}" + Self.number($0.meters) + "\u{00A0}м" }
+                    rows.append(Row(label: lens.tableCount == 1 ? "Объектив (0x9223)" : "Объектив: таблица \(index + 1) из \(lens.tableCount)",
+                                    value: "\(table.count) пар, шкала 0…\(lens.absoluteScale ? "65535" : "100") (догадка по наибольшему положению)\n"
+                                        + pairs.joined(separator: " · ")))
+                }
+                if lens.tableCount > 1 {
+                    rows.append(Row(label: "Расстояния на шкале", value: "нет: таблиц \(lens.tableCount), какая верна, справочник не говорит"))
+                }
+            } else {
+                let enabled = c.properties[SonyProp.lensInfoEnabled]?.current.intValue
+                rows.append(Row(label: "Объектив (0x9223)", value: "данных нет, 0xE086 = " + (enabled.map(String.init) ?? "нет свойства")))
+            }
+        }
         return rows
+    }
+
+    /// Число как пришло, без лишних нулей: 5958, 0,25, 1000000.
+    private static func number(_ value: Double) -> String {
+        var text = String(format: "%.2f", value)
+        while text.hasSuffix("0") { text.removeLast() }
+        if text.hasSuffix(".") { text.removeLast() }
+        return text.replacingOccurrences(of: ".", with: ",")
     }
 
     private static func properties(_ c: CameraController, filter: String) -> [Row] {
@@ -243,7 +292,7 @@ enum DebugReport {
             case let .array(values): value.append("[" + values.map(String.init).joined(separator: ", ") + "]")
             case .unsupported: value.append("тип не разобран")
             }
-            if let id { value.append(ValueFormatter.label(id, property)) }
+            if let id { value.append(ValueFormatter.label(id, property, names: c.names(for: id))) }
             value.append(property.enabled == 0 ? "недоступно" : property.isWritable ? "можно менять" : property.getSet == 1 ? "менять нельзя сейчас" : "только чтение")
             if let range = property.range {
                 value.append("от \(range.min) до \(range.max), шаг \(range.step)")

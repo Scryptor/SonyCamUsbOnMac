@@ -72,6 +72,9 @@ final class CameraController {
     @ObservationIgnored private var focusGeneration = 0
     /// Последняя команда объектива: следующая ждёт её — «стоп» зума не обгонит «пуск».
     @ObservationIgnored private var lensTail: Task<Void, Never>?
+    /// Что камера сообщает о себе сверх свойств: подписи списков, версия кода, данные объектива (0x9215, 0x9216, 0x9223) —
+    /// только новые камеры Sony. Экраны видят это через `names(for:)`, `focusDistance` и другие в CameraController+OtherCameras.
+    let info = CameraInfo()
     /// Метки фокуса A и B всех камер: у каждой свои, до выхода из программы (в настройки не пишутся).
     private(set) var focusMarkBook = FocusMarkBook()
     /// К какой метке («A» или «B») сейчас едет фокус; nil — не едет.
@@ -314,6 +317,7 @@ final class CameraController {
     @ObservationIgnored private var cableAccessWatch = CableAccessWatch()
 
     init() {
+        info.note = { [weak self] text in self?.note(text) }
         library = Self.loadPresets(key: presetsKey)
         roster = CameraRoster.load(cameras: UserDefaults.standard.data(forKey: camerasKey),
                                    preferred: UserDefaults.standard.string(forKey: preferredCameraKey),
@@ -381,7 +385,7 @@ final class CameraController {
             return RecordingModes.label(format: property(.movieFileFormat)?.current.intValue,
                                         setting: property(.movieRecordingSetting)?.current.intValue,
                                         allowed: allowedRecordingSettings)
-        default: return ValueFormatter.label(id, property(id))
+        default: return ValueFormatter.label(id, property(id), names: names(for: id))
         }
     }
 
@@ -402,7 +406,7 @@ final class CameraController {
         if id == .movieRecordingSetting, !recordingModes.isEmpty {
             return recordingModes.map { SettingOption(value: $0.code, label: $0.label) }
         }
-        return property(id).map { SettingOptions.options(id, $0) } ?? []
+        return property(id).map { SettingOptions.options(id, $0, names: names(for: id)) } ?? []
     }
 
     /// Текущее значение в ленте — в той же кодировке, что `stripOptions`.
@@ -934,7 +938,7 @@ final class CameraController {
     /// Чем камера сейчас отличается от текущего пресета; пусто — не изменён или камера не на связи.
     var currentPresetChanges: [PresetChange] {
         guard phase == .ready, let index = currentPresetIndex else { return [] }
-        return PresetCatalog.changes(presets[index], properties)
+        return PresetCatalog.changes(presets[index], properties, strings: info.strings)
     }
 
     /// Камера сменила режим — показываем его пресеты и запоминаем: без связи список — того, в котором она была.
@@ -986,7 +990,7 @@ final class CameraController {
         for side in linkedSides {
             Task { [weak self] in
                 for id in await side.apply(preset) {
-                    self?.groupFailed(side, preset.values[id].map { GroupFailures.label(id, $0) } ?? id.shortTitle)
+                    self?.groupFailed(side, preset.values[id].map { GroupFailures.label(id, $0, names: self?.names(for: id)) } ?? id.shortTitle)
                 }
             }
         }
@@ -1276,6 +1280,8 @@ final class CameraController {
                 // сеанс готов — восстановление кончилось, даже если кадров пока нет (иначе карточка висела бы)
                 self.finishReconnect()
                 self.startQuality(session)
+                // подписи и данные объектива новых камер — после того, как сеанс готов, и не задерживая его
+                self.info.begin(session, properties: self.properties)
                 onReady()
             } catch is CancellationError {
                 return
@@ -1542,6 +1548,7 @@ final class CameraController {
             for await status in transport.linkStatus { self?.linkChanged(status) }
         })
         phase = .ready
+        info.begin(session, properties: properties)
         wifiPolicy.connected()
         wifiPolicy.sessionReady()
         // в ленте превью было низкого качества — на главной сразу высокое, дальше решает политика
@@ -1560,7 +1567,7 @@ final class CameraController {
         let side = SideCamera(id: id, endpoint: endpoint)
         side.onWriteFailed = { [weak self, weak side] setting, value in
             guard let self, let side else { return }
-            self.groupFailed(side, GroupFailures.label(setting, value))
+            self.groupFailed(side, GroupFailures.label(setting, value, names: self.names(for: setting)))
         }
         return side
     }
@@ -1972,6 +1979,7 @@ final class CameraController {
     /// таймер записи и ленту снимков оставить на экране.
     private func suspendSession() {
         releaseLens()
+        info.suspend()
         tasks.forEach { $0.cancel() }
         tasks.removeAll()
         // старое соединение — сбросом (RST): камера, застрявшая на передаче, освобождается сразу и примет новое
@@ -2098,9 +2106,9 @@ final class CameraController {
             let codes = await session.controlCodes
             self?.controlCodes = codes
         })
-        // камера сообщила о смене объектива: метки фокуса прежнего ни к чему
+        // события новых камер: смена объектива (метки фокуса прежнего ни к чему), список подписей изменился, фокус у цели
         tasks.append(Task { [weak self] in
-            for await _ in await session.lensChanges() { self?.lensChanged() }
+            for await event in await session.events { self?.handle(event, session: session) }
         })
         tasks.append(Task { [weak self] in
             for await snapshot in session.snapshots {
@@ -2156,6 +2164,8 @@ final class CameraController {
     private func apply(_ snapshot: [UInt16: SonyProperty]) {
         properties = snapshot
         lastSnapshotAt = Date()
+        // 0xE086 стал 1 (или перестал быть 1) — данные объектива появились (или пропали)
+        if let session { info.propertiesChanged(snapshot, session: session) }
         // вышли из ручного фокуса (Near/Far закрылся): перевод к метке кончился, фокусом занимается камера
         if focusPullTask != nil, !focusDriveAvailable { cancelFocusPull(stopCamera: false) }
         followPresetMode()
@@ -2306,6 +2316,7 @@ final class CameraController {
     /// closing: false — сеанс уходит в ленту: всё, что связано с главным экраном, сбрасывается, а соединение — нет.
     private func teardown(closing: Bool = true) {
         releaseLens()
+        info.reset()
         tasks.forEach { $0.cancel() }
         tasks.removeAll()
         reconnectTask?.cancel()
@@ -2827,6 +2838,12 @@ final class CameraController {
         cancelFocusPull(stopCamera: false)
         focusMarkBook.lensChanged(for: camera)
         note("объектив сменился (0xC21B): метки фокуса стёрты")
+    }
+
+    /// Событие новых камер Sony: смена объектива стирает метки фокуса; подписи и данные объектива перечитываются.
+    private func handle(_ event: CameraEvent, session: CameraSession) {
+        if case .lensChanged = event { lensChanged() }
+        info.handle(event, session: session)
     }
 
     private static func seconds(_ duration: Duration) -> Double {

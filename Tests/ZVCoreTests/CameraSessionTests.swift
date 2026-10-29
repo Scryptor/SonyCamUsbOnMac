@@ -42,88 +42,125 @@ import Testing
     #expect(await updates.next()?[SonyProp.iso]?.current == .int(100))
 }
 
-/// Считает значения потока в фоне: тест ждёт счёт с потолком, а не само значение, — сломанный код роняет проверку, а не
-/// подвешивает тест.
-private final class Counted: @unchecked Sendable {
+/// Собирает значения потока в фоне: тест ждёт их с потолком, а не само значение, — сломанный код роняет проверку, а не
+/// подвешивает тест (`AsyncStream.next()` потолка не имеет).
+private final class Collected<Value: Sendable>: @unchecked Sendable {
     private let lock = NSLock()
-    private var count = 0
+    private var received: [Value] = []
     private var ended = false
     private var task: Task<Void, Never>?
 
-    init(_ stream: AsyncStream<Void>) {
+    init(_ stream: AsyncStream<Value>) {
         task = Task { [self] in
-            for await _ in stream { lock.withLock { count += 1 } }
+            for await value in stream { lock.withLock { received.append(value) } }
             lock.withLock { ended = true }
         }
     }
 
-    var values: Int { lock.withLock { count } }
+    var values: [Value] { lock.withLock { received } }
     var isEnded: Bool { lock.withLock { ended } }
     func stop() { task?.cancel() }
 }
 
 /// Ждёт условия не дольше `seconds`.
-private func eventually(_ seconds: Double = 2, _ condition: () -> Bool) async -> Bool {
+private func eventually(_ seconds: Double = 2, _ condition: () async -> Bool) async -> Bool {
     let end = Date().addingTimeInterval(seconds)
     while Date() < end {
-        if condition() { return true }
+        if await condition() { return true }
         try? await Task.sleep(for: .milliseconds(5))
     }
-    return condition()
+    return await condition()
 }
 
 @Test func lensChangeEventReachesEverySubscriber() async throws {
     let cam = FakeCamera(props: [.init(code: SonyProp.iso, type: PTPType.uint32, current: 200, values: [100, 200])])
     let session = CameraSession(transport: cam, timing: .test)
     try await session.start()
-    let first = Counted(await session.lensChanges())
-    let second = Counted(await session.lensChanges())
+    let first = Collected(await session.events)
+    let second = Collected(await session.events)
     defer {
         first.stop()
         second.stop()
     }
-    // 0xC203 — обычное изменение свойств, к смене объектива не относится
+    // 0xC203 — обычное изменение свойств, к событиям камеры не относится
     cam.emit(PTPEvent(code: Sony.propertyChangedEvent))
     try await Task.sleep(for: .milliseconds(150))
-    #expect(first.values == 0 && second.values == 0)
+    #expect(first.values.isEmpty && second.values.isEmpty)
     // 0xC21B — смена объектива: каждому подписчику по одному разу
     cam.emit(PTPEvent(code: SonyEvent.lensInfoChanged))
-    #expect(await eventually { first.values == 1 && second.values == 1 })
+    #expect(await eventually { first.values == [.lensChanged] && second.values == [.lensChanged] })
     cam.emit(PTPEvent(code: SonyEvent.lensInfoChanged))
-    #expect(await eventually { first.values == 2 && second.values == 2 })
+    #expect(await eventually { first.values == [.lensChanged, .lensChanged] && second.values.count == 2 })
 }
 
-@Test func lensChangeBeforeSubscribingIsNotReplayed() async throws {
+@Test func eventsBeforeSubscribingAreNotReplayed() async throws {
     let cam = FakeCamera(props: [])
     let session = CameraSession(transport: cam, timing: .test)
     try await session.start()
-    // событие шло по свойствам: ждём его по перечитыванию, чтобы оно точно дошло до сеанса
-    var updates = session.snapshots.makeAsyncIterator()
-    _ = await updates.next()
+    // события идут по порядку: когда за ними пришло второе перечитывание свойств (первое — в start), оба уже дошли до сеанса
+    let refreshes = { cam.sent.filter { $0.op == SonyOp.getAllExtPropInfo }.count }
     cam.emit(PTPEvent(code: SonyEvent.lensInfoChanged))
+    cam.emit(PTPEvent(code: SonyEvent.displayListChanged, params: [0x13]))
+    cam.emit(PTPEvent(code: SonyEvent.focusPositionResult, params: [1]))
     cam.emit(PTPEvent(code: Sony.propertyChangedEvent))
-    _ = await updates.next()
-    let late = Counted(await session.lensChanges())
+    #expect(await eventually { refreshes() >= 2 })
+    let late = Collected(await session.events)
     defer { late.stop() }
     try await Task.sleep(for: .milliseconds(150))
-    #expect(late.values == 0)
-    // старого события не будет, новое придёт
+    #expect(late.values.isEmpty)
+    // старых событий не будет, новое придёт
     cam.emit(PTPEvent(code: SonyEvent.lensInfoChanged))
-    #expect(await eventually { late.values == 1 })
+    #expect(await eventually { late.values == [.lensChanged] })
 }
 
-@Test func lensChangeStreamEndsWhenTheSessionEnds() async throws {
+@Test func eventsEndWhenTheSessionEnds() async throws {
     let cam = FakeCamera(props: [])
     let session = CameraSession(transport: cam, timing: .test)
     try await session.start()
-    let open = Counted(await session.lensChanges())
+    let open = Collected(await session.events)
     defer { open.stop() }
     try await Task.sleep(for: .milliseconds(50))
     #expect(!open.isEnded)
     await session.close()
     #expect(await eventually { open.isEnded })
     // подписка на закрытый сеанс тоже заканчивается сразу
-    let after = Counted(await session.lensChanges())
+    let after = Collected(await session.events)
     defer { after.stop() }
     #expect(await eventually { after.isEnded })
+}
+
+@Test func cameraEventsCarryTheirParametersInOrder() async throws {
+    let cam = FakeCamera(props: [])
+    let session = CameraSession(transport: cam, timing: .test)
+    try await session.start()
+    let events = Collected(await session.events)
+    defer { events.stop() }
+    // список подписей изменился: тип списка — в параметре события; без параметра — 0, «все списки»
+    cam.emit(PTPEvent(code: SonyEvent.displayListChanged, params: [0x13]))
+    cam.emit(PTPEvent(code: SonyEvent.displayListChanged))
+    // фокус дошёл до цели (параметр 1) или нет
+    cam.emit(PTPEvent(code: SonyEvent.focusPositionResult, params: [1]))
+    cam.emit(PTPEvent(code: SonyEvent.focusPositionResult, params: [0]))
+    cam.emit(PTPEvent(code: SonyEvent.lensInfoChanged))
+    // чужое событие потока не пачкает
+    cam.emit(PTPEvent(code: 0xC2FF, params: [7]))
+    cam.emit(PTPEvent(code: SonyEvent.displayListChanged, params: [0x15]))
+    let expected: [CameraEvent] = [.displayListChanged(type: 0x13), .displayListChanged(type: 0),
+                                   .focusPositionResult(reached: true), .focusPositionResult(reached: false), .lensChanged,
+                                   .displayListChanged(type: 0x15)]
+    #expect(await eventually { events.values.count >= expected.count })
+    #expect(events.values == expected)
+}
+
+@Test func propertyEventsStillRefreshTheSnapshotAlongsideCameraEvents() async throws {
+    let cam = FakeCamera(props: [.init(code: SonyProp.iso, type: PTPType.uint32, current: 200, values: [100, 200])])
+    let session = CameraSession(transport: cam, timing: .test)
+    try await session.start()
+    let events = Collected(await session.events)
+    defer { events.stop() }
+    cam.setCurrent(SonyProp.iso, 100)
+    cam.emit(PTPEvent(code: SonyEvent.lensInfoChanged))
+    cam.emit(PTPEvent(code: Sony.propertyChangedEvent))
+    #expect(await eventually { await session.properties[SonyProp.iso]?.current == .int(100) })
+    #expect(await eventually { events.values == [.lensChanged] })
 }
