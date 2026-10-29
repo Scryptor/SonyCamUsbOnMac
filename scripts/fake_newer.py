@@ -18,10 +18,10 @@ CREATIVE_LOOK, PP_GAMMA, PP_COLOR_MODE = 0xD0FA, 0xD0E1, 0xD0E9
 FOCUS_SETTING, FOCUS_CURRENT, LENS_INFO_ENABLED = 0xE042, 0xE043, 0xE086
 FOCUS_MAX = 0xFFFF                                         # шкала абсолютного фокуса 0…65535
 FOCUS_START = FOCUS_MAX                                    # дальний край — как 0xD24C = 100 в дампе ZV-E10
-# версии: 0x0100 — по заданию стенда (по справочнику версия ×100, то есть 1.00 было бы 100); 0x0136 — это 3.10
-DISPLAY_LIST_VERSION = 0x0100                              # параметр ответа 0x9215
-VENDOR_CODE_VERSION = 0x0136                               # параметр ответа 0x9216
-LENS_INFO_VERSION = 0x0100                                 # версия данных объектива (в самом наборе)
+# версии Sony пишет ×100: 1.00 — это 100 (0x0064), 3.10 — 0x0136
+DISPLAY_LIST_VERSION = 100                                 # параметр ответа 0x9215: версия списков 1.00
+VENDOR_CODE_VERSION = 0x0136                               # параметр ответа 0x9216: версия кода производителя 3.10
+LENS_INFO_VERSION = 100                                    # версия данных объектива 1.00 (в самом наборе)
 LENS_METERS = 2                                            # параметр 0x9223: 1 — футы, 2 — метры; отдаём метры
 CREATIVE_LOOK_LIST, SUBJECT_LIST = 0x13, 0x15              # типы списков 0x9215: Creative Look; «Человек/Животное»
 UINT8, UINT16 = 2, 4                                       # типы данных PTP
