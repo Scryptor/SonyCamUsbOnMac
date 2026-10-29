@@ -795,9 +795,11 @@ Create `scripts/e2e_newer.py`
 
   Декодирование каждого — тест в `AutomationTests`.
 - [ ] **Состояние:**
-  - `picture {orientation, lut: {mode, resolved, file, scopes}, whiteLevel, meanLuma}`;
+  - `picture {orientation, lut: {mode, resolved, file, scopes}, whiteLevel, meanLuma, lumaSpread}` — `lumaSpread` —
+    размах яркости p1–p99 по гистограмме помощи (в S-Log3 средняя с LUT почти не меняется, меняется контраст);
   - `luts [имена]`;
-  - `vectorscope {on, zoom, peakCb, peakCr}` — центр самой полной корзины;
+  - `vectorscope {on, zoom, peakCb, peakCr, targets}` — `peak` — центр самой полной корзины, `targets` — отсчёты в
+    пределах ±2 корзин от каждой из шести меток `{R, Mg, B, Cy, G, Yl}`;
   - `probe {on, x, y, percent, r, g, b, zone}`;
   - `lens.marks {A, B, duration}`, `lens.pull {progress, caption}`, `lens.distance`, `lens.absolute`;
   - `camera {displayStringLists, lensPairs, vendorCodeVersion}`.
@@ -806,12 +808,12 @@ Create `scripts/e2e_newer.py`
 - [ ] **`e2e_monitor.py`:**
   - 13 инструментов в `ui.assist`;
   - LUT «Авто»: `request {setting: "pictureProfile", value: 8}` → `picture.lut.resolved == "slog3cine"` за ≤ 1 с и
-    `meanLuma` выше, чем при `lut off`; значение 0 → `resolved == null`;
+    `lumaSpread` больше, чем при `lut off`; значение 0 → `resolved == null`;
   - свой `.cube` (тождественный 2³ из временной папки): `lutImport`, `luts` содержит имя; `lutDelete` убирает;
   - зеркало: `orientation mirror`, `touchFocus (0,3; 0,5)` → рамка AF на поддельной камере в (0,7; 0,5) ±0,01;
     `orientation mirror` + `setZoom 2×` + `touchFocus (0,4; 0,4)` → рамка в `toCamera` ±0,01;
   - отдельный запуск поддельной камеры с `--picture scripts/assets/bars.jpg`:
-    - вектороскоп — `peakCb/peakCr` у одной из шести меток ±0,03;
+    - вектороскоп — `targets`: у всех шести меток отсчёты > 0 (пик — центр: туда ложатся белая и чёрная полосы);
     - пипетка в середине красной полосы — `r ≥ 180`, `g ≤ 15`, `b ≤ 15`, `percent` 15–18 (яркость 0,2126·191 = 40,6:
       17 % от белого 234);
     - пипетка на белой полосе 75 % при `white` 234 — `percent` 79–84;
@@ -851,8 +853,8 @@ Create `scripts/e2e_newer.py`
 LUT тот же, что на Mac: кэш по ключу, свои файлы — из `filesDir/luts/`. «Авто» — по свойствам главной камеры.
 
 - [ ] **Проверка:**
-  - на планшете с поддельной камерой (PP8 и «Авто») — `ZVAssist` в logcat: `lut=slog3cine`, `meanLuma` выше, чем
-    без LUT;
+  - на планшете с поддельной камерой (PP8 и «Авто») — `ZVAssist` в logcat: `lut=slog3cine`, размах яркости p1–p99
+    больше, чем без LUT;
   - `ZVFrames` — частота с LUT + зеркалом ≥ 90 % от базы;
   - `:app:testDebugUnitTest` зелёный.
 - [ ] Commit `feat(android): picture transform after decode — orientation and LUT`.
