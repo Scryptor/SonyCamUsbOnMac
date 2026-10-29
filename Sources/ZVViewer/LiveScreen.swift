@@ -113,7 +113,8 @@ struct LiveScreen: View {
             return .handled
         }
         .onKeyPress(characters: CharacterSet(charactersIn: "lLдДvVмМiIшШ")) { press in
-            guard screen.galleryShot == nil else { return .ignored }
+            // ⌘V — вставить, ⌘L и ⌘I — чужие сочетания: с ⌘, ⌃ и ⌥ клавиша не наша (Shift — наша, как и русская раскладка)
+            guard screen.galleryShot == nil, press.modifiers.isDisjoint(with: [.command, .control, .option]) else { return .ignored }
             let key = press.characters.lowercased()
             screen.toggleAssist("lд".contains(key) ? .lut : "vм".contains(key) ? .vectorscope : .probe)
             return .handled
@@ -193,7 +194,7 @@ struct LiveScreen: View {
             }
             // вектороскоп — тоже не среди элементов; прячется вместе с гистограммой: в просмотре снимка и в галерее
             if screen.assist.vectorscope, let trace = controller.vectorscope, controller.review == nil, screen.galleryShot == nil {
-                FloatingVectorscope(screen: screen, trace: trace, view: size)
+                FloatingVectorscope(controller: controller, screen: screen, trace: trace, view: size)
             }
             // подсказка к фокусу касанием — левее кнопок справа, на высоте колонки
             if screen.touchFocusHelpOpen {
@@ -356,6 +357,8 @@ struct LiveScreen: View {
                 // камер на связи две и больше — лента слева под верхней панелью
                 if !controller.sideCameras.isEmpty {
                     CameraStrip(controller: controller)
+                        // меряем саму ленту, без отступа над ней: вектороскоп встаёт правее неё
+                        .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(Self.space)) } action: { screen.stripRect = $0 }
                         .padding(.top, 8)
                 }
                 Spacer()

@@ -230,13 +230,16 @@ struct SettingsButton: View {
 
 /// Панель поверх кадра, которую можно утащить мышью куда угодно: гистограмма, волновая форма. Видна, пока включена, — и
 /// когда остальные элементы скрыты, и при открытом меню Fn: там она нужнее всего. Место запоминается долями свободного
-/// места (переживает смену размера окна); у края прилипает к отступу. На правую колонку кнопок не ложится — встаёт левее.
+/// места (переживает смену размера окна); у края прилипает к отступу. На правую колонку кнопок не ложится — встаёт левее;
+/// так же, если задано, — на ленту камер слева: встаёт правее (`FloatingPlacement.clear`).
 struct FloatingPanel<Content: View>: View {
     let view: CGSize
     let placement: FloatingPlacement?
     let place: (FloatingPlacement) -> Void
     /// Правая колонка кнопок: панель её не закрывает.
     let avoiding: CGRect?
+    /// Ещё одно место, которое панель не закрывает: лента камер слева (nil — не мешает).
+    var alsoAvoiding: CGRect? = nil
     /// Где стоит, пока её не перетаскивали, — по размеру панели.
     let restingDefault: (CGSize) -> CGPoint
     @ViewBuilder let content: () -> Content
@@ -297,9 +300,10 @@ struct FloatingPanel<Content: View>: View {
 
     private var restingOrigin: CGPoint {
         var origin = placement?.origin(panel: panel, view: view) ?? restingDefault(panel)
-        // легла бы на запись и спуск — встаёт левее колонки, на той же высоте
-        if let column = avoiding, CGRect(origin: origin, size: panel).intersects(column) {
-            origin.x = max(CGFloat(FloatingPlacement.margin), column.minX - 12 - panel.width)
+        // легла бы на ленту камер — встаёт правее неё, на запись и спуск — левее колонки; высота та же, и место из настроек
+        // остаётся прежним: убрали препятствие — панель вернулась
+        for obstacle in [alsoAvoiding, avoiding].compactMap({ $0 }) {
+            origin = FloatingPlacement.clear(origin, panel: panel, of: obstacle, view: view)
         }
         return origin
     }
@@ -341,15 +345,19 @@ struct FloatingWaveform: View {
 }
 
 /// Вектороскоп поверх кадра; по умолчанию — слева вверху, под верхней панелью (внизу слева — гистограмма, справа внизу — волновая
-/// форма, справа вверху — наложение). Щелчок — масштаб ×2, перетаскивание — место.
+/// форма, справа вверху — наложение). Щелчок — масштаб ×2, перетаскивание — место. Когда камер на связи две и больше, слева
+/// вверху лента камер: панель никогда не лежит под ней (там щелчок переключил бы камеру) — по умолчанию, после перетаскивания
+/// и при месте из прошлых запусков встаёт правее ленты.
 struct FloatingVectorscope: View {
+    let controller: CameraController
     let screen: ScreenState
     let trace: VectorscopeTrace
     let view: CGSize
 
     var body: some View {
         FloatingPanel(view: view, placement: screen.vectorscopePlacement, place: screen.placeVectorscope,
-                      avoiding: screen.rightColumnRect) { (_: CGSize) -> CGPoint in
+                      avoiding: screen.rightColumnRect,
+                      alsoAvoiding: controller.sideCameras.isEmpty ? nil : screen.stripRect) { (_: CGSize) -> CGPoint in
             CGPoint(x: CGFloat(FloatingPlacement.margin), y: 64)
         } content: {
             VectorscopeView(trace: trace, onZoom: screen.toggleVectorscopeZoom)

@@ -30,10 +30,12 @@ final class LUTStore: ObservableObject {
     /// Добавить файл `.cube`: проверка разбором, копия в папку, не больше 12. Возвращает имя — имя файла без расширения.
     /// Не вышло — `LUTLibrary.Failure` с текстом для окна (`localizedDescription`).
     func importFile(_ url: URL) throws -> String {
-        let name = try library.importFile(url)
-        revision += 1
-        refresh()
-        return name
+        // и при отказе список читается заново: папку тронули руками, а замена могла оборваться на середине
+        defer {
+            revision += 1
+            refresh()
+        }
+        return try library.importFile(url)
     }
 
     /// Убрать свой LUT из папки.

@@ -394,3 +394,127 @@ private func with<T>(_ body: (Sandbox) throws -> T) throws -> T {
         for await ok in group { #expect(ok) }
     }
 }
+
+// MARK: - Ссылки (symlink)
+
+@Test func symlinkedCubeIsImportedUnderTheLinkName() throws {
+    try with { sandbox in
+        let library = sandbox.library()
+        let text = cube(inverted: true)
+        // настоящий файл лежит в другой папке (общий каталог LUT), на рабочем столе — ссылка на него
+        let shared = sandbox.root.appendingPathComponent("Shared", isDirectory: true)
+        try FileManager.default.createDirectory(at: shared, withIntermediateDirectories: true)
+        let target = shared.appendingPathComponent("Warm Sunset v3.cube")
+        try Data(text.utf8).write(to: target)
+        let link = sandbox.desktop.appendingPathComponent("Sunset.cube")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+
+        let name = try library.importFile(link)
+        // имя — то, под которым файл выбрали; в папку ложится сам файл, а не ссылка
+        #expect(name == "Sunset")
+        #expect(library.names == ["Sunset"])
+        let copy = sandbox.folder.appendingPathComponent("Sunset.cube")
+        #expect(try copy.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink == false)
+        #expect(try Data(contentsOf: copy) == Data(text.utf8))
+        #expect(library.load("Sunset") == (try CubeFile.parse(text)))
+        #expect(FileManager.default.fileExists(atPath: target.path))
+    }
+}
+
+@Test func relativeAndChainedSymlinksAreFollowed() throws {
+    try with { sandbox in
+        let library = sandbox.library()
+        let text = cube()
+        try sandbox.write("real.cube", text)
+        // ссылка без пути до файла (рядом) и ссылка на ссылку
+        let rel = sandbox.desktop.appendingPathComponent("rel.cube")
+        let chain = sandbox.desktop.appendingPathComponent("chain.cube")
+        try FileManager.default.createSymbolicLink(atPath: rel.path, withDestinationPath: "real.cube")
+        try FileManager.default.createSymbolicLink(atPath: chain.path, withDestinationPath: "rel.cube")
+        #expect(try library.importFile(rel) == "rel")
+        #expect(try library.importFile(chain) == "chain")
+        let expected = try CubeFile.parse(text)
+        #expect(library.load("rel") == expected && library.load("chain") == expected)
+    }
+}
+
+@Test func brokenSymlinkAndSymlinkToAFolderAreUnreadable() throws {
+    try with { sandbox in
+        let library = sandbox.library()
+        let broken = sandbox.desktop.appendingPathComponent("broken.cube")
+        try FileManager.default.createSymbolicLink(atPath: broken.path, withDestinationPath: "nowhere.cube")
+        #expect(throws: LUTLibrary.Failure.unreadable) { try library.importFile(broken) }
+        let directory = sandbox.desktop.appendingPathComponent("folder", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let toFolder = sandbox.desktop.appendingPathComponent("to-folder.cube")
+        try FileManager.default.createSymbolicLink(at: toFolder, withDestinationURL: directory)
+        #expect(throws: LUTLibrary.Failure.unreadable) { try library.importFile(toFolder) }
+        #expect(library.names.isEmpty)
+    }
+}
+
+@Test func symlinkInTheFolderIsListedLoadedAndDeletedAsALink() throws {
+    // ссылку на общий каталог LUT положили в папку руками: она в списке, куб читается, «Удалить» убирает ссылку, а не файл
+    try with { sandbox in
+        let library = sandbox.library()
+        let text = cube(inverted: true)
+        let target = try sandbox.write("shared.cube", text)
+        try FileManager.default.createDirectory(at: sandbox.folder, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: sandbox.folder.appendingPathComponent("Linked.cube"), withDestinationURL: target)
+        #expect(library.names == ["Linked"])
+        #expect(library.load("Linked") == (try CubeFile.parse(text)))
+        library.delete("Linked")
+        #expect(library.names.isEmpty)
+        #expect(FileManager.default.fileExists(atPath: target.path))
+    }
+}
+
+// MARK: - Порядок замены
+
+@Test func failedWriteLeavesTheOldFileAlone() throws {
+    // замена под другим написанием: новое не записалось — прежний файл остаётся как был, а не пропадает до записи
+    try with { sandbox in
+        _ = try sandbox.library().importFile(try sandbox.write("Look.cube", cube(inverted: false)))
+        let failing = LUTLibrary(folder: sandbox.folder, write: { _, _ in throw CocoaError(.fileWriteOutOfSpace) })
+        let other = try sandbox.write("look.cube", cube(inverted: true))
+        #expect(throws: LUTLibrary.Failure.unsaved) { try failing.importFile(other) }
+        #expect(failing.names == ["Look"])
+        #expect(failing.load("Look") == (try CubeFile.parse(cube(inverted: false))))
+        #expect(sandbox.stored() == ["Look.cube"])
+    }
+}
+
+@Test func failedWriteOfTheSameSpellingLeavesTheOldFileAlone() throws {
+    try with { sandbox in
+        _ = try sandbox.library().importFile(try sandbox.write("grade.cube", cube(inverted: false)))
+        let failing = LUTLibrary(folder: sandbox.folder, write: { _, _ in throw CocoaError(.fileWriteOutOfSpace) })
+        #expect(throws: LUTLibrary.Failure.unsaved) { try failing.importFile(try sandbox.write("grade.cube", cube(inverted: true))) }
+        #expect(failing.load("grade") == (try CubeFile.parse(cube(inverted: false))))
+        #expect(sandbox.stored() == ["grade.cube"])
+    }
+}
+
+@Test func failedWriteWithAPartialFileLeavesNothingBehind() throws {
+    // запись оборвалась на середине: недописанный файл не остаётся ни в списке, ни под скрытым именем
+    try with { sandbox in
+        let half = LUTLibrary(folder: sandbox.folder, write: { data, url in
+            try data.prefix(10).write(to: url)
+            throw CocoaError(.fileWriteOutOfSpace)
+        })
+        #expect(throws: LUTLibrary.Failure.unsaved) { try half.importFile(try sandbox.write("fresh.cube", cube())) }
+        #expect(half.names.isEmpty)
+        #expect(sandbox.stored().isEmpty)
+        #expect(half.load("fresh") == nil)
+    }
+}
+
+@Test func replaceWithAnotherSpellingLeavesOneFileAndNothingTemporary() throws {
+    try with { sandbox in
+        let library = sandbox.library()
+        _ = try library.importFile(try sandbox.write("Look.cube", cube(inverted: false)))
+        _ = try library.importFile(try sandbox.write("LOOK.cube", cube(inverted: true)))
+        #expect(library.names == ["LOOK"])
+        #expect(sandbox.stored() == ["LOOK.cube"])
+        #expect(library.load("LOOK") == (try CubeFile.parse(cube(inverted: true))))
+    }
+}

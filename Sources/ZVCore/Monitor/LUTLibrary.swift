@@ -9,6 +9,13 @@ import Foundation
 /// - Чтение: куб разбирается один раз и помнится по имени и дате изменения файла — пока файл не менялся, повторный запрос
 ///   отдаёт тот же куб, без чтения.
 ///
+/// Ссылка (symlink) на файл — это файл: при добавлении читается то, на что она указывает (имя — имя ссылки, как её выбрали), а
+/// ссылка, положенная в папку руками, есть в списке; «Удалить» убирает ссылку, а не её цель.
+///
+/// Замена не теряет прежнее, пока новое не на диске: сначала новое пишется во временный скрытый файл рядом, потом он
+/// атомарно ложится на место, и только потом правится написание имени. На диске Mac «Look» и «look» — один файл, и запись поверх
+/// него оставляет прежнее написание; тот же файл переименовывается (на диске с регистром это два файла — лишний убирается).
+///
 /// К файлу ведёт только имя из списка: «../чужой» или «a/b» не совпадают ни с одним файлом папки, так что и прочитать, и
 /// удалить за пределами папки нельзя. Вызывать можно из любого потока: изменяемо только запомненное, оно под замком.
 public final class LUTLibrary: @unchecked Sendable {
@@ -34,16 +41,24 @@ public final class LUTLibrary: @unchecked Sendable {
     static let cacheLimit = 3
 
     public let folder: URL
+    /// Как новое содержимое пишется во временный файл; тесты подменяют, чтобы проверить, что не записалось — прежнее на месте.
+    private let write: @Sendable (Data, URL) throws -> Void
 
-    public init(folder: URL) {
+    public convenience init(folder: URL) {
+        self.init(folder: folder, write: { try $0.write(to: $1) })
+    }
+
+    init(folder: URL, write: @escaping @Sendable (Data, URL) throws -> Void) {
         self.folder = folder
+        self.write = write
     }
 
     /// Имена своих LUT по алфавиту; папки нет или она пуста — пусто.
     public var names: [String] { entries().map(\.name) }
 
-    /// Скопировать файл в папку и вернуть имя — имя файла без расширения. Порядок отказов: файл не читается, потом сам
-    /// файл (разбор), потом лимит: полная папка и плохой файл — это «плохой файл», место ему не поможет.
+    /// Скопировать файл в папку и вернуть имя — имя файла без расширения, как оно легло на диск (замена под другим написанием,
+    /// которую не удалось переименовать, оставляет прежнее). Порядок отказов: файл не читается, потом сам файл (разбор), потом
+    /// лимит: полная папка и плохой файл — это «плохой файл», место ему не поможет. Не записалось — в папке ничего не изменилось.
     @discardableResult
     public func importFile(_ url: URL) throws -> String {
         let data = try Self.read(url)
@@ -60,19 +75,32 @@ public final class LUTLibrary: @unchecked Sendable {
         if same.isEmpty, existing.count >= Self.limit { throw Failure.limit }
 
         let destination = folder.appendingPathComponent(name + ".cube")
+        // сначала новое — во временный скрытый файл (его не видно в списке): не записалось — прежнее не тронуто
+        let temporary = folder.appendingPathComponent(".import-\(UUID().uuidString).tmp")
         do {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            // «Look» и «look» на диске Mac — один файл: прежний с другим регистром уходит, чтобы остался один и с новым именем
-            for old in same where old.name != name {
-                try FileManager.default.removeItem(at: old.url)
-                forget(old.name)
-            }
-            try data.write(to: destination, options: .atomic)
+            try write(data, temporary)
+            // на место — одним переименованием: прежний файл под этим именем заменяется целиком, а не наполовину
+            guard Self.move(temporary, to: destination) else { throw Failure.unsaved }
         } catch {
+            try? FileManager.default.removeItem(at: temporary)
             throw Failure.unsaved
         }
-        remember(name, modified: Self.modified(destination), lut)
-        return name
+        // Новое уже на диске, так что дальше — только написание имени. Диск Mac: «Look.cube» остался с прежним написанием —
+        // тот же файл переименовывается. Диск с регистром: «Look.cube» — другой файл, он уходит.
+        let twins = entries().filter { $0.name.caseInsensitiveCompare(name) == .orderedSame }
+        for old in twins where old.name != name {
+            if twins.count > 1 {
+                try? FileManager.default.removeItem(at: old.url)
+            } else {
+                _ = Self.move(old.url, to: destination)
+            }
+            forget(old.name)
+        }
+        // имя — как оно легло на диск: если переименовать не вышло, это прежнее написание, и список с выбором не расходятся
+        let stored = entries().first { $0.name.caseInsensitiveCompare(name) == .orderedSame }
+        remember(stored?.name ?? name, modified: Self.modified(stored?.url ?? destination), lut)
+        return stored?.name ?? name
     }
 
     /// Убрать свой LUT из папки. Такого нет — ничего не происходит.
@@ -124,15 +152,25 @@ public final class LUTLibrary: @unchecked Sendable {
         let url: URL
     }
 
-    /// Файлы `.cube` папки (обычные, не скрытые), по алфавиту.
+    /// Файлы `.cube` папки (обычные или ссылки на обычные, не скрытые), по алфавиту.
     private func entries() -> [Entry] {
-        let keys: [URLResourceKey] = [.isRegularFileKey]
-        guard let urls = try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: keys,
+        guard let urls = try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil,
                                                                       options: [.skipsHiddenFiles]) else { return [] }
         return urls
-            .filter { $0.pathExtension.lowercased() == "cube" && (try? $0.resourceValues(forKeys: Set(keys)))?.isRegularFile == true }
+            .filter { $0.pathExtension.lowercased() == "cube" && Self.isRegularFile($0) }
             .map { Entry(name: $0.deletingPathExtension().lastPathComponent, url: $0) }
             .sorted { Self.precedes($0.name, $1.name) }
+    }
+
+    /// Обычный файл — или ссылка на него: у самой ссылки `isRegularFile` ложно, так что смотрим на то, куда она ведёт. Ссылка в
+    /// никуда и ссылка на папку — не файл.
+    private static func isRegularFile(_ url: URL) -> Bool {
+        (try? url.resolvingSymlinksInPath().resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true
+    }
+
+    /// Переименовать одним действием, поверх существующего — атомарно; то же имя в другом регистре на диске Mac — смена написания.
+    private static func move(_ from: URL, to destination: URL) -> Bool {
+        rename(from.path, destination.path) == 0
     }
 
     /// По алфавиту без учёта регистра, числа по значению; одинаковые без учёта регистра (на диске с регистром) — по буквам.
@@ -153,6 +191,8 @@ public final class LUTLibrary: @unchecked Sendable {
 
     /// Содержимое файла; не обычный файл, не читается или тяжелее предела — отказ. Тяжёлый — не `.cube` (отказ как у чужого файла).
     private static func read(_ url: URL) throws -> Data {
+        // ссылка на файл — это файл: проверяется и читается то, на что она указывает
+        let url = url.resolvingSymlinksInPath()
         guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]), values.isRegularFile == true,
               let size = values.fileSize else { throw Failure.unreadable }
         guard size <= maxFileBytes else { throw Failure.cube(.notThreeD) }
@@ -160,8 +200,9 @@ public final class LUTLibrary: @unchecked Sendable {
         return data
     }
 
+    /// Дата изменения файла; у ссылки — файла, на который она ведёт: правка цели сбрасывает запомненный куб.
     private static func modified(_ url: URL) -> Date? {
-        (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        (try? url.resolvingSymlinksInPath().resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
     }
 
     // MARK: - Запомненные кубы

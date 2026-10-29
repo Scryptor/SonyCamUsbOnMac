@@ -36,6 +36,17 @@ public struct FloatingPlacement: Equatable, Sendable, Codable {
                 y: min(max(origin.y, 0), max(view.height - panel.height, 0)))
     }
 
+    /// Панель с левым верхним углом в `origin` не должна лежать на `obstacle` (колонка кнопок справа, лента камер слева): если
+    /// лежит, встаёт рядом на той же высоте, на `gap` от края препятствия, — с той стороны, что дальше от края экрана:
+    /// левее препятствия у правого края, правее — у левого. Остаётся между отступами экрана; места нет — у отступа.
+    public static func clear(_ origin: CGPoint, panel: CGSize, of obstacle: CGRect, view: CGSize, gap: CGFloat = 12) -> CGPoint {
+        guard CGRect(origin: origin, size: panel).intersects(obstacle) else { return origin }
+        let margin = CGFloat(Self.margin)
+        let beside = obstacle.midX > view.width / 2 ? obstacle.minX - gap - panel.width : obstacle.maxX + gap
+        let rightmost = max(margin, view.width - panel.width - margin)
+        return CGPoint(x: min(max(beside, margin), rightmost), y: origin.y)
+    }
+
     private static func position(_ fraction: Double, panel: CGFloat, view: CGFloat) -> CGFloat {
         let free = view - panel - 2 * margin
         guard free > 0 else { return margin }
