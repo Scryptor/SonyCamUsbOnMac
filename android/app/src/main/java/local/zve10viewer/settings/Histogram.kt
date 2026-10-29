@@ -18,6 +18,30 @@ object LumaHistogram {
     }
 
     /**
+     * Уровни яркости по сетке columns × rows точек кадра из массива, который уже есть: из каждой клетки берётся точка в её
+     * середине, без сглаживания — как у уменьшенной копии кадра, которую рисует гистограмма по Bitmap. Так помощь, когда кадр
+     * уже разложен в точки (после прохода картинки), не тянет его в Bitmap второй раз. Без новых массивов: уровни ложатся в
+     * [into] (256 чисел, сначала обнуляются) и он же возвращается.
+     *
+     * @param argb точки кадра по строкам, `0xAARRGGBB`; массив может быть больше кадра, хвост не читается
+     */
+    fun sampledLevels(argb: IntArray, width: Int, height: Int, into: IntArray, columns: Int = 256, rows: Int = 144): IntArray {
+        java.util.Arrays.fill(into, 0, 256, 0)
+        if (width <= 0 || height <= 0 || columns <= 0 || rows <= 0) return into
+        for (j in 0 until rows) {
+            val row = ((2 * j + 1) * height / (2 * rows)) * width
+            for (i in 0 until columns) {
+                val p = argb[row + (2 * i + 1) * width / (2 * columns)]
+                val r = (p shr 16) and 0xFF
+                val g = (p shr 8) and 0xFF
+                val b = p and 0xFF
+                into[minOf((218 * r + 732 * g + 74 * b) shr 10, 255)]++
+            }
+        }
+        return into
+    }
+
+    /**
      * Столбцы для графика: уровни от чёрного до белого (`whiteLevel`), сложенные в count групп; что ярче белого —
      * в последний столбец. Так пересвет всегда у правого края.
      */

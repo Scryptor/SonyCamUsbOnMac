@@ -93,7 +93,11 @@ data class MonitorAssist(
     /** Что рисуется линиями поверх кадра: сетка, центр, рамка, безопасная зона. */
     val hasMarkers: Boolean get() = grid != Grid.off || center || frameMarker != FrameMarker.off || safeZone != SafeZone.off
 
-    /** Меняет ли картинку на экране: LUT и зеркало с переворотом. Без них преобразования нет и оно ничего не стоит. */
+    /**
+     * Выбраны ли LUT или зеркало с переворотом — по настройкам. Это не «картинка меняется»: «Авто» может ничего не выбрать
+     * (профиль без лога), «Свой» — остаться без файла. Кто рисует, решает по итоговому кубу (`LutCache.cube`) и по
+     * `orientation`: нет ни куба, ни поворота — преобразования нет и оно ничего не стоит.
+     */
     val transformsPicture: Boolean get() = lut != LutMode.off || orientation != FrameOrientation.off
 
     /** Включено хоть что-то. */

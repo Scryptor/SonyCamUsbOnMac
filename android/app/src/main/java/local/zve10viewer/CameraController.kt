@@ -92,8 +92,15 @@ import local.zve10viewer.settings.GroupFailures
 import local.zve10viewer.settings.LumaHistogram
 import local.zve10viewer.settings.LumaStats
 import local.zve10viewer.monitor.AssistRaster
+import local.zve10viewer.monitor.BuiltinLut
+import local.zve10viewer.monitor.CameraProfile
+import local.zve10viewer.monitor.FrameSurface
+import local.zve10viewer.monitor.LutCache
+import local.zve10viewer.monitor.LutChoice
 import local.zve10viewer.monitor.MonitorAssist
 import local.zve10viewer.monitor.MonitorTool
+import local.zve10viewer.monitor.PictureHelp
+import local.zve10viewer.monitor.PicturePath
 import local.zve10viewer.monitor.Waveform
 import local.zve10viewer.monitor.FocusDrive
 import local.zve10viewer.monitor.FocusFrame
@@ -271,6 +278,22 @@ class CameraController(private val context: Context, private val scope: Coroutin
     /** Инструменты и фото / видео — для потока кадров (белое в превью: в видео 234, в фото 255). */
     @Volatile private var assistForFrames = assist
     @Volatile private var assistVideo = true
+
+    /**
+     * Кубы LUT на картинке: встроенные — один на вид, свои — из `filesDir/luts/` по имени и дате файла, читаются в фоне. Один
+     * экземпляр на LUT: проход картинки узнаёт куб по ссылке и строит таблицу один раз на экземпляр.
+     */
+    private val luts = LutCache(java.io.File(context.filesDir, "luts"), { task -> scope.launch(Dispatchers.IO) { task.run() } }, ::journal)
+
+    /** Профиль изображения главной камеры — по нему «Авто» выбирает LUT. Ставит каждый снимок её свойств, читает поток кадров. */
+    @Volatile private var cameraProfile = CameraProfile.none
+
+    /**
+     * Встроенный LUT, который сейчас на картинке: выбранный рукой, а у «Авто» — по профилю изображения главной камеры
+     * (следует за ним, как только камера его сменит); null — встроенного нет («Выкл», «Свой», «Авто» без профиля лога).
+     */
+    val resolvedLut: BuiltinLut?
+        get() = LutChoice.resolve(assist.lut, value(SonyProp.PICTURE_PROFILE), value(SonyProp.PP_GAMMA), value(SonyProp.PP_COLOR_MODE))
 
     /** Волновая форма: включена ли, какая (яркость или RGB-парад) и где; место null — по умолчанию, справа внизу. */
     var waveformOn by mutableStateOf(prefs.waveformOn)
@@ -948,11 +971,17 @@ class CameraController(private val context: Context, private val scope: Coroutin
         if ((next.overlay == MonitorAssist.Overlay.off) != (assist.overlay == MonitorAssist.Overlay.off)) overlayHidden = false
         assist = next
         assistForFrames = next
+        warmLut()
         prefs.monitorAssist = next.toJson()
         // растровые выключили — старый растр не показываем, даже если новых кадров нет
         if (!next.needsRaster) assistOverlay = null
         // наложение включили — эталон нужен: прошлый из файла или текущий кадр
         if (next.overlay != MonitorAssist.Overlay.off) ensureReference()
+    }
+
+    /** Встроенный куб нужен — сделать его заранее, в фоне, а не на первом кадре с LUT («строится при первом выборе»). */
+    private fun warmLut() {
+        luts.resolved(assist, cameraProfile)?.let(luts::warm)
     }
 
     fun toggleTouchFocus() {
@@ -2861,25 +2890,100 @@ class CameraController(private val context: Context, private val scope: Coroutin
             }
         }
         jobs += scope.launch(Dispatchers.Default) {
-            // свои Bitmap у каждого сеанса: прошлый, может быть, ещё дорисовывает свой последний кадр
+            // свои Bitmap и свой проход картинки у каждого сеанса: прошлый, может быть, ещё дорисовывает свой последний кадр
             val pool = FramePool()
+            val picture = PicturePath()
+            val surface = BitmapSurface()
+            val pictureLevels = IntArray(256)
             var sampler: HistogramSampler? = null
             var assistSampler: AssistSampler? = null
-            for (sample in frames) {
-                val bitmap = pool.decode(sample.data, sample.jpegOffset, sample.jpegLength) ?: continue
-                // помощь в кадре и волновая форма — по тому же кадру и вместе с ним: подсветка не отстаёт от картинки
-                val tools = assistForFrames
-                val waveMode = waveformForFrames
-                val analyzing = tools.needsRaster || waveMode != null
-                // уровни — по той же уменьшенной копии, что у гистограммы и на Mac: белый уровень у всех один
-                val levels = if (histogramOn || analyzing) (sampler ?: HistogramSampler().also { sampler = it }).levels(bitmap) else null
-                val analysis = if (analyzing) {
-                    (assistSampler ?: AssistSampler().also { assistSampler = it })
-                        .analyze(bitmap, levels, tools, assistView, assistVideo, waveMode)
-                } else null
-                withContext(Dispatchers.Main) { show(session, bitmap, sample, if (histogramOn) levels else null, analysis) }
+            var reportedAt = 0L
+            // сколько стоит проход (чтение кадра, зеркало с LUT, запись) с прошлой строки в logcat
+            var passNanos = 0L
+            var passWorst = 0L
+            var passFrames = 0
+            try {
+                for (sample in frames) {
+                    val bitmap = pool.decode(sample.data, sample.jpegOffset, sample.jpegLength) ?: continue
+                    // одни настройки на весь кадр: картинка, уровни, белый и помощь видят одно и то же, и подсветка не
+                    // отстаёт от картинки
+                    val tools = assistForFrames
+                    val waveMode = waveformForFrames
+                    val video = assistVideo
+                    val profile = cameraProfile
+                    // итоговый куб, а не настройка: «Авто» у камеры без профиля лога куба не даёт, и тогда кадр не трогают
+                    val lut = luts.cube(tools, profile)
+                    val analyzing = tools.needsPixels || waveMode != null
+                    val now = System.currentTimeMillis()
+                    // строка в logcat раз в 2 с: в отладочной сборке всегда (проверка «с LUT и без» читает её и при выключенных
+                    // инструментах), в обычной — только пока что-то из монитора включено
+                    val report = now - reportedAt >= 2000 && (BuildConfig.DEBUG || tools.isActive || histogramOn || waveMode != null)
+                    val helpOn = histogramOn || analyzing || report
+                    // зеркало, переворот и LUT — один раз, сразу после декодирования, в тот же Bitmap, что пойдёт на экран
+                    surface.bitmap = bitmap
+                    val passStarted = System.nanoTime()
+                    val step = picture.apply(surface, tools.orientation, lut, PictureHelp.needsSignal(lut, tools.lutScopes, helpOn))
+                    if (step == PicturePath.Step.Done) {
+                        val spent = System.nanoTime() - passStarted
+                        passNanos += spent
+                        if (spent > passWorst) passWorst = spent
+                        passFrames += 1
+                    }
+                    if (step == PicturePath.Step.Stopped) {
+                        // проход закрыт: кадры больше не показываем, но и не падаем, и не крутимся
+                        Log.w(TAG, "проход картинки остановлен — кадры больше не идут", picture.failure)
+                        frames.cancel()
+                        break
+                    }
+                    // точки для помощи: картинка с LUT или повёрнутый сигнал, уже разложенные проходом; не тронули — сам кадр
+                    val pixels = if (step == PicturePath.Step.Done) picture.help else null
+                    val width = bitmap.width
+                    val height = bitmap.height
+                    // уровни — по той же картинке, что у помощи: белый уровень у всех один
+                    val levels = when {
+                        !helpOn -> null
+                        pixels != null -> LumaHistogram.sampledLevels(pixels, width, height, pictureLevels)
+                        // не тронутый кадр — уменьшенной копией, как раньше и как на Mac
+                        else -> (sampler ?: HistogramSampler().also { sampler = it }).levels(bitmap)
+                    }
+                    val white = if (levels != null) PictureHelp.whiteLevel(levels, video, lut != null, tools.lutScopes) else 255
+                    val analysis = if (analyzing) {
+                        val assistant = assistSampler ?: AssistSampler().also { assistSampler = it }
+                        assistant.analyze(pixels ?: assistant.pixelsOf(bitmap), width, height, white, tools, assistView, waveMode)
+                    } else null
+                    if (report && levels != null) {
+                        reportedAt = now
+                        val passAverageMs = if (passFrames > 0) passNanos / passFrames / 1e6 else Double.NaN
+                        val passWorstMs = if (passFrames > 0) passWorst / 1e6 else Double.NaN
+                        noteLook(tools, profile, lut != null, white, levels, width, height, passAverageMs, passWorstMs)
+                        passNanos = 0L
+                        passWorst = 0L
+                        passFrames = 0
+                    }
+                    withContext(Dispatchers.Main) {
+                        show(session, bitmap, sample, if (histogramOn) levels else null, white, analysis)
+                    }
+                }
+            } finally {
+                // потоки прохода уходят вместе с циклом кадров
+                picture.close()
             }
         }
+    }
+
+    /**
+     * Что на картинке: LUT, поворот, белый, размах яркости и цена прохода — в logcat (тег ZVAssist) раз в 2 с, для проверок
+     * по adb.
+     */
+    private fun noteLook(tools: MonitorAssist, profile: CameraProfile, lutOn: Boolean, white: Int, levels: IntArray, width: Int,
+                         height: Int, passAverageMs: Double, passWorstMs: Double) {
+        val applied = when {
+            !lutOn -> "off"
+            tools.lut == MonitorAssist.LutMode.file -> "file:" + tools.lutFile
+            else -> luts.resolved(tools, profile)?.value ?: "off"
+        }
+        Log.i("ZVAssist", PictureHelp.report(applied, tools.lut.value, tools.orientation, tools.lutScopes, white, levels, width,
+            height, passAverageMs, passWorstMs))
     }
 
     /** Связь по Wi-Fi: провал — для экрана, время ответа на пробы — для качества превью и журнала. */
@@ -2902,6 +3006,13 @@ class CameraController(private val context: Context, private val scope: Coroutin
     private fun apply(snapshot: Map<Int, SonyProperty>) {
         properties = snapshot
         assistVideo = mode != CaptureMode.photo
+        // «Авто» в LUT идёт за профилем изображения главной камеры: со следующего кадра
+        val profile = CameraProfile(snapshot[SonyProp.PICTURE_PROFILE]?.current?.intValue,
+            snapshot[SonyProp.PP_GAMMA]?.current?.intValue, snapshot[SonyProp.PP_COLOR_MODE]?.current?.intValue)
+        if (profile != cameraProfile) {
+            cameraProfile = profile
+            warmLut()
+        }
         // пресеты на экране — режима камеры; запоминаем его: без связи показываем тот же список
         snapshot[SettingID.exposureProgram.code]?.current?.intValue?.let(CaptureMode::of)?.let { mode ->
             if (mode != presetMode) {
@@ -2989,7 +3100,8 @@ class CameraController(private val context: Context, private val scope: Coroutin
         return hash
     }
 
-    private fun show(from: CameraSession, bitmap: Bitmap, sample: LiveViewSample, levels: IntArray?, analysis: FrameAnalysis?) {
+    /** [white] — белый уровень, по которому поток кадров считал помощь: гистограмма, статистика и помощь видят одну шкалу. */
+    private fun show(from: CameraSession, bitmap: Bitmap, sample: LiveViewSample, levels: IntArray?, white: Int, analysis: FrameAnalysis?) {
         // кадр прошлого сеанса, дошедший после обрыва, — не тот, что считается «восстановили»
         if (from !== session) return
         measure(sample)
@@ -3017,8 +3129,8 @@ class CameraController(private val context: Context, private val scope: Coroutin
         frameWindow.add(now, sample.bytes, sample.fetchMs, sample.waits)
         if (reconnect != null) finishReconnect(now, firstFrame = true)
         if (levels != null) {
-            // в видео белое в live view — 234, в фото — 255: шкала гистограммы — до белого
-            val white = LumaStats.whiteLevel(levels, video = mode != CaptureMode.photo)
+            // в видео белое в live view — 234, в фото — 255, у картинки с LUT — 255: шкала гистограммы — до белого, того же, что
+            // у помощи (его определил поток кадров)
             histogram = LumaHistogram.binsOf(levels, whiteLevel = white)
             histogramStats = LumaStats.of(levels, white)
         }
@@ -3268,6 +3380,8 @@ class CameraController(private val context: Context, private val scope: Coroutin
         currentCameraId = null
         deviceInfo = null
         properties = emptyMap()
+        // камеры нет — «Авто» не по чему выбирать
+        cameraProfile = CameraProfile.none
         frame = null
         frameBitmap = null
         lastSample = null
@@ -3533,9 +3647,24 @@ private class FramePool {
 private class FrameAnalysis(val overlay: CameraController.AssistOverlay?, val waveform: CameraController.WaveformTrace?)
 
 /**
- * Растр помощи в кадре (зебра, false color, пикинг) и волновая форма по кадру: точки кадра достаются один раз; растр —
- * яркость всего кадра, видимая часть — в размер растра. Растры и следы — в Bitmap по три по кругу, как кадры. Массивы —
- * одни на весь сеанс. Вызывать из одной корутины.
+ * Bitmap кадра для прохода картинки (`PicturePath`): точки читаются и пишутся целиком. Один на цикл кадров, Bitmap
+ * подставляется на каждый кадр — объекта на кадр нет.
+ */
+private class BitmapSurface : FrameSurface {
+    lateinit var bitmap: Bitmap
+    override val width: Int get() = bitmap.width
+    override val height: Int get() = bitmap.height
+
+    override fun read(into: IntArray) = bitmap.getPixels(into, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+
+    override fun write(from: IntArray) = bitmap.setPixels(from, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+}
+
+/**
+ * Растр помощи в кадре (зебра, false color, пикинг) и волновая форма по кадру: растр — яркость всего кадра, видимая часть —
+ * в размер растра. Точки кадра приходят готовыми — их разложил проход картинки (с поворотом и LUT) или [pixelsOf] (кадр как
+ * есть): второго `getPixels` нет. Растры и следы — в Bitmap по три по кругу, как кадры. Массивы — одни на весь сеанс. Вызывать
+ * из одной корутины.
  */
 private class AssistSampler {
     private var pixels = IntArray(0)
@@ -3545,18 +3674,24 @@ private class AssistSampler {
     private val traces = arrayOfNulls<Bitmap>(3)
     private var nextTrace = 0
 
-    fun analyze(frame: Bitmap, levels: IntArray?, assist: MonitorAssist, view: CameraController.AssistView, video: Boolean,
-                waveform: Waveform.Mode?): FrameAnalysis {
+    /** Точки кадра как есть, когда проход картинки их не раскладывал. Массив один на сеанс и может быть больше кадра. */
+    fun pixelsOf(frame: Bitmap): IntArray {
         val w = frame.width
         val h = frame.height
         if (pixels.size < w * h) pixels = IntArray(w * h)
         frame.getPixels(pixels, 0, w, 0, 0, w, h)
-        // шкала — как у гистограммы: от чёрного до белого превью; гистограмма выключена — уровни по самому кадру
-        val luma = AssistRaster.luma(pixels, w * h)
-        val white = LumaStats.whiteLevel(levels ?: IntArray(256).also { counts -> for (v in luma) counts[v]++ }, video)
-        val overlay = if (assist.needsRaster) render(luma, w, h, white, assist, view) else null
+        return pixels
+    }
+
+    /**
+     * @param argb точки кадра, по которым считается помощь: первые [w] · [h] чисел
+     * @param white белый уровень шкалы — тот же, что у гистограммы (`PictureHelp.whiteLevel`)
+     */
+    fun analyze(argb: IntArray, w: Int, h: Int, white: Int, assist: MonitorAssist, view: CameraController.AssistView,
+                waveform: Waveform.Mode?): FrameAnalysis {
+        val overlay = if (assist.needsRaster) render(AssistRaster.luma(argb, w * h), w, h, white, assist, view) else null
         val trace = waveform?.let { mode ->
-            val counts = Waveform.counts(pixels, w, h, mode)
+            val counts = Waveform.counts(argb, w, h, mode)
             val slot = nextTrace
             nextTrace = (nextTrace + 1) % traces.size
             val bitmap = traces[slot]?.takeIf { it.width == counts.columns }
