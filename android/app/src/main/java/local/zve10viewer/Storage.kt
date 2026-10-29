@@ -111,6 +111,20 @@ class Prefs(context: Context) {
             edit.apply()
         }
 
+    /** Где вектороскоп — как у гистограммы; null — на месте по умолчанию, слева сверху под верхней панелью. */
+    var vectorscopePlacement: FloatingPlacement?
+        get() = if (prefs.contains("vectorscopeX") && prefs.contains("vectorscopeY")) {
+            FloatingPlacement.restored(prefs.getFloat("vectorscopeX", 0f), prefs.getFloat("vectorscopeY", 0f))
+        } else {
+            null
+        }
+        set(value) {
+            val edit = prefs.edit()
+            if (value == null) edit.remove("vectorscopeX").remove("vectorscopeY")
+            else edit.putFloat("vectorscopeX", value.x.toFloat()).putFloat("vectorscopeY", value.y.toFloat())
+            edit.apply()
+        }
+
     /** Откуда эталон для наложения: «кадр 12:04:31» или имя снимка; сам эталон — файл в данных программы. */
     var referenceSource: String?
         get() = prefs.getString("referenceSource", null)

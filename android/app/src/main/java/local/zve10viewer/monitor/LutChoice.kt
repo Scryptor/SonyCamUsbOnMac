@@ -20,6 +20,17 @@ object LutChoice {
     fun autoLabel(resolved: BuiltinLut?): String = "Авто: " + (resolved?.label ?: "нет")
 
     /**
+     * Значение на плитке «LUT». У «Авто» — «Авто: S-Log3»: какой LUT выбрана по профилю камеры сейчас ([resolved] — то, что
+     * показывает `CameraController.resolvedLut`). У «Свой» — имя файла, пока он лежит в папке ([ownNames]), иначе «Свой».
+     * Остальное — как у `MonitorAssist.label`.
+     */
+    fun tileValue(assist: MonitorAssist, resolved: BuiltinLut?, ownNames: List<String>): String = when (assist.lut) {
+        LutMode.auto -> autoLabel(resolved)
+        LutMode.file -> assist.lutFile?.takeIf { it in ownNames } ?: "Свой"
+        else -> assist.label(MonitorTool.lut)
+    }
+
+    /**
      * Превью камеры уже приведено к Rec.709 самой камерой (гамма-помощь, Gamma Disp. Assist)? Тогда «Авто» ничего не
      * включает: LUT поверх дал бы двойное преобразование. Пока это не проверено на камере — false, и превью считается
      * логарифмическим. Проверка — в конце работ (`docs/protocol.md`, «Превью в S-Log и HLG»).
@@ -65,4 +76,25 @@ object LutChoice {
             else -> null
         }
     }
+}
+
+/** Тексты полосы под вариантами LUT в меню «Монитор» — те же, что у программы для Mac. */
+object LutTexts {
+    const val SCOPES = "Помощь — по картинке с LUT"
+    const val ADD = "Добавить LUT…"
+    const val DELETE = "Удалить"
+
+    /** Под переключателем: что значит «по картинке с LUT» и что — выключенное (на Mac это подсказка при наведении). */
+    const val SCOPES_HELP = "Гистограмма, волновая форма, вектороскоп, зебра, false color, пикинг и пипетка считаются по картинке " +
+        "с LUT, и белое в них — 255. Выключено — по сигналу камеры, только повёрнутому."
+
+    /** Под кнопками «Добавить LUT…» и «Удалить» у варианта «Свой». */
+    const val FILES_HELP = "Файл 3D LUT в формате .cube, до 12 штук. «Удалить» убирает выбранный из папки программы; " +
+        "исходный файл остаётся где был."
+
+    /** Список своих LUT пуст. */
+    const val EMPTY = "Своих LUT пока нет: нажмите «Добавить LUT…»"
+
+    /** Строка состояния после добавления файла (и после замены). */
+    fun added(name: String): String = "LUT «$name» добавлен"
 }

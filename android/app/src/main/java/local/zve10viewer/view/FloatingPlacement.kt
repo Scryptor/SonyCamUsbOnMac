@@ -1,6 +1,7 @@
 package local.zve10viewer.view
 
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import kotlin.math.max
 
@@ -26,6 +27,19 @@ data class FloatingPlacement(val x: Double, val y: Double) {
             origin.x.coerceIn(0f, max(0f, view.width - panel.width)),
             origin.y.coerceIn(0f, max(0f, view.height - panel.height)),
         )
+
+        /**
+         * Панель с левым верхним углом в [origin] не должна лежать на [obstacle] (колонка кнопок справа, лента камер слева):
+         * если лежит, встаёт рядом на той же высоте, на [gap] от края препятствия, — с той стороны, что дальше от края экрана:
+         * левее препятствия у правого края, правее — у левого. Остаётся между отступами экрана; места нет — у отступа. Единицы
+         * любые, но одни: размер экрана, панели, препятствия, [gap] и [margin] — в точках (dp) или все в пикселях.
+         */
+        fun clear(origin: Offset, panel: Size, obstacle: Rect, view: Size, gap: Float = 12f, margin: Float = MARGIN.toFloat()): Offset {
+            if (!Rect(origin, panel).overlaps(obstacle)) return origin
+            val beside = if (obstacle.center.x > view.width / 2) obstacle.left - gap - panel.width else obstacle.right + gap
+            val rightmost = max(margin, view.width - panel.width - margin)
+            return Offset(beside.coerceIn(margin, rightmost), origin.y)
+        }
 
         /** Из настроек: испорченное — как не сохранено, за пределами — в пределы. */
         fun restored(x: Float, y: Float): FloatingPlacement? {

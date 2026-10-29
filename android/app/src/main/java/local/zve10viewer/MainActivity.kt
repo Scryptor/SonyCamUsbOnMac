@@ -14,6 +14,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
+import local.zve10viewer.monitor.AssistExtras
 import local.zve10viewer.settings.WiFiAddress
 import local.zve10viewer.ui.App
 
@@ -52,7 +53,10 @@ class MainActivity : ComponentActivity() {
      * `… -a local.zve10viewer.DEBUG_ASSIST --es tool zebra --es value 95` (без value — вкл/выкл), `--ez off true` — всё
      * выключить, `--ez menu true|false [--es tool peaking]` — меню, `--es waveform luma|parade|off` — волновая форма,
      * `--ez reference true` — эталон из текущего кадра, `--ei shot 0` — из снимка ленты, `--ez overlayToggle true` — как
-     * касание миниатюры эталона (включить наложение, спрятать или показать эталон). Растр — в logcat с тегом ZVAssist.
+     * касание миниатюры эталона (включить наложение, спрятать или показать эталон). LUT и вектороскоп —
+     * `--es lut off|auto|slog3cine|slog3|slog2|hlg|file`, `--es lutFile Имя` (свой файл из `filesDir/luts`),
+     * `--ez lutScopes false`, `--ez vectorscope true`, `--ei vectorscopeZoom 2` — после остального, в одной команде.
+     * Растр, картинка и вектороскоп — в logcat с тегом ZVAssist.
      */
     private val debugReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -69,10 +73,20 @@ class MainActivity : ComponentActivity() {
                     if (intent.hasExtra("menu")) intent.getBooleanExtra("menu", false) else null,
                     intent.getStringExtra("waveform"), intent.getBooleanExtra("reference", false),
                     if (intent.hasExtra("shot")) intent.getIntExtra("shot", 0) else null,
-                    intent.getBooleanExtra("overlayToggle", false)))
+                    intent.getBooleanExtra("overlayToggle", false), assistExtras(intent)))
             }
         }
     }
+
+    /** Extras про LUT и вектороскоп как их положил adb (`--es`, `--ez`, `--ei`): тип разбирает `AssistExtras`. */
+    private fun assistExtras(intent: Intent) = AssistExtras.Request(
+        lut = extra(intent, "lut"), lutFile = extra(intent, "lutFile"), lutScopes = extra(intent, "lutScopes"),
+        vectorscope = extra(intent, "vectorscope"), vectorscopeZoom = extra(intent, "vectorscopeZoom"),
+    )
+
+    // типизированные getXxxExtra молча подставляют значение по умолчанию, если тип не тот; тут тип нужен как он есть
+    @Suppress("DEPRECATION")
+    private fun extra(intent: Intent, name: String): Any? = intent.extras?.get(name)
 
     /**
      * Фокус и зум с экрана: `… -a local.zve10viewer.DEBUG_LENS --ez touch true|false` — режим «фокус касанием»,

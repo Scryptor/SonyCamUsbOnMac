@@ -3,6 +3,7 @@ package local.zve10viewer
 import local.zve10viewer.monitor.BuiltinLut
 import local.zve10viewer.monitor.CameraProfile
 import local.zve10viewer.monitor.ColorLut
+import local.zve10viewer.monitor.CubeFile
 import local.zve10viewer.monitor.FrameOrientation
 import local.zve10viewer.monitor.LutCache
 import local.zve10viewer.monitor.MonitorAssist
@@ -602,5 +603,117 @@ class LutCacheTest {
         assertEquals(2, queue.tasks.size)
         queue.runAll()
         assertNotSame(cache.file("a"), cache.file("b"))
+    }
+
+    // принятый куб: файл только что добавили, куб уже разобран — читать его второй раз не нужно
+
+    private fun counting(reads: AtomicInteger) = LutCache(lutsFolder(), queue::post, { notes += it }, read = { reads.incrementAndGet(); it.readBytes() })
+
+    @Test fun cacheKnowsItsFolder() {
+        assertEquals(lutsFolder(), cache().folder)
+    }
+
+    @Test fun adoptedCubeIsServedAtOnceWithoutReadingTheFile() {
+        write("look", identity2)
+        val reads = AtomicInteger()
+        val cache = counting(reads)
+        val cube = CubeFile.parse(identity2)
+        cache.adopt("look", cube)
+        assertSame(cube, cache.file("look"))
+        assertEquals(0, queue.tasks.size)
+        queue.runAll()
+        assertEquals(0, reads.get())
+    }
+
+    @Test fun adoptedCubeGivesWayWhenTheFileChanges() {
+        val file = write("look", identity2, stamp = 1_700_000_000_000L)
+        val cache = cache()
+        val adopted = CubeFile.parse(identity2)
+        cache.adopt("look", adopted)
+        assertSame(adopted, cache.file("look"))
+        // файл изменили снаружи: принятый куб больше не отдаётся, новый читается в фоне
+        file.writeText(inverted2)
+        assertTrue(file.setLastModified(1_700_000_005_000L))
+        assertNull(cache.file("look"))
+        assertEquals(1, queue.tasks.size)
+        queue.runAll()
+        val fresh = cache.file("look")
+        assertNotNull(fresh)
+        assertNotSame(adopted, fresh)
+        assertEquals(1f, fresh!!.values[0], 0f)
+    }
+
+    @Test fun adoptingAgainReplacesWhatWasThere() {
+        val file = write("look", identity2, stamp = 1_700_000_000_000L)
+        val cache = cache()
+        cache.file("look")
+        queue.runAll()
+        val read = cache.file("look")
+        assertNotNull(read)
+        // заменили файл и сразу приняли разобранный куб: он и отдаётся, это новый экземпляр
+        file.writeText(inverted2)
+        assertTrue(file.setLastModified(1_700_000_009_000L))
+        val adopted = CubeFile.parse(inverted2)
+        cache.adopt("look", adopted)
+        assertSame(adopted, cache.file("look"))
+        assertEquals(0, queue.tasks.size)
+    }
+
+    @Test fun adoptedCubeOfAMissingFileTakesNoPlace() {
+        val cache = cache()
+        cache.adopt("ghost", CubeFile.parse(identity2))
+        assertNull(cache.file("ghost"))
+        assertEquals(0, queue.tasks.size)
+        // и не вытесняет хорошие
+        for (n in 1..3) write("l$n", identity2)
+        for (n in 1..3) {
+            cache.file("l$n")
+            queue.runAll()
+        }
+        repeat(5) { cache.adopt("нет $it", CubeFile.parse(identity2)) }
+        for (n in 1..3) assertNotNull("l$n", cache.file("l$n"))
+    }
+
+    @Test fun adoptedCubeWithAnUnusableNameIsIgnored() {
+        val cache = cache()
+        // три хороших куба на местах
+        val good = (1..3).map { n ->
+            write("g$n", identity2)
+            CubeFile.parse(identity2).also { cache.adopt("g$n", it) }
+        }
+        // за папкой лежит настоящий файл: имя «../outside» к нему ведёт, но принято быть не может
+        File(lutsFolder().parentFile, "outside.cube").writeText(identity2)
+        File(lutsFolder(), ".hidden.cube").writeText(identity2)
+        for (bad in listOf("../outside", "a/b", ".hidden", "", "x\u0000y", "a\\b")) {
+            cache.adopt(bad, CubeFile.parse(identity2))
+            assertNull(bad, cache.file(bad))
+        }
+        // негодные имена не заняли место в памяти: хорошие кубы никого не вытеснили
+        for (n in 1..3) assertSame("g$n", good[n - 1], cache.file("g$n"))
+        assertEquals(0, queue.tasks.size)
+    }
+
+    @Test fun adoptedCubesCountInTheLimitOfThree() {
+        val cache = cache()
+        val cubes = (1..4).map { CubeFile.parse(identity2) }
+        for (n in 1..4) {
+            write("l$n", identity2)
+            cache.adopt("l$n", cubes[n - 1])
+        }
+        // четвёртый вытеснил первый: тот читается заново, остальные на месте
+        assertSame(cubes[1], cache.file("l2"))
+        assertSame(cubes[2], cache.file("l3"))
+        assertSame(cubes[3], cache.file("l4"))
+        assertNull(cache.file("l1"))
+        assertEquals(1, queue.tasks.size)
+    }
+
+    @Test fun adoptedCubeIsTheOneThePictureGets() {
+        val file = write("look", inverted2)
+        val cache = cache()
+        val adopted = CubeFile.parse(inverted2)
+        cache.adopt("look", adopted)
+        assertTrue(file.exists())
+        assertSame(adopted, cache.cube(assist(LutMode.file, "look"), CameraProfile.none))
     }
 }

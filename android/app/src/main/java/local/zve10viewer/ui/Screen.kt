@@ -156,6 +156,7 @@ class ScreenState {
     var histogramRect: Rect? = null
     var waveformRect: Rect? = null
     var overlayRect: Rect? = null
+    var vectorscopeRect: Rect? = null
     /** Высота ленты снимков (как её разложили) — гистограмма по умолчанию стоит над ней. */
     var stripHeight by mutableStateOf<Float?>(null)
     /** Где меню Fn, пока оно открыто: гистограмма поднимается над ним, а не прячется под ним. */
@@ -165,6 +166,11 @@ class ScreenState {
      * Колонку спрятали вместе с элементами — место остаётся прежним: панели не прыгают туда и обратно.
      */
     var rightColumnRect by mutableStateOf<Rect?>(null)
+    /**
+     * Где лента камер слева (камер на связи две и больше): вектороскоп на неё не ложится — встаёт правее. Как и колонка кнопок,
+     * помнится, когда элементы спрятаны: панель не прыгает туда и обратно. Лента пропала — смотрят на `stripVisible`, не на это.
+     */
+    var stripRect by mutableStateOf<Rect?>(null)
 
     /** Галерея: какой снимок открыт (по id, а не по месту в ленте — новый снимок его не сбивает); null — закрыта. */
     var galleryShot by mutableStateOf<Long?>(null)
@@ -317,6 +323,8 @@ fun App(controller: CameraController) {
                         tool != null && command.value != null -> controller.setAssist(tool, command.value)
                         tool != null -> controller.toggleAssist(tool)
                     }
+                    // LUT и вектороскоп — после остального: `--ez off true --es lut auto` выключает всё и включает LUT
+                    controller.applyAssistExtras(command.extras)
                 }
             }
         }
@@ -459,7 +467,8 @@ private fun LiveScreen(controller: CameraController, screen: ScreenState) {
                         if (event.type == PointerEventType.Press && event.changes.count { it.pressed } == 1) {
                             val at = event.changes.first().position
                             onPanel = screen.histogramRect?.contains(at) == true || screen.waveformRect?.contains(at) == true ||
-                                screen.overlayRect?.contains(at) == true || screen.zoomBadgeRect?.contains(at) == true
+                                screen.overlayRect?.contains(at) == true || screen.vectorscopeRect?.contains(at) == true ||
+                                screen.zoomBadgeRect?.contains(at) == true
                             if (!onPanel) screen.revealTap = screen.controlsHidden
                         }
                         if (!onPanel) screen.noteActivity()
@@ -485,6 +494,8 @@ private fun LiveScreen(controller: CameraController, screen: ScreenState) {
         // гистограмма — над видео, под кнопками и меню; не прячется вместе с элементами
         if (controller.histogramOn) FloatingHistogram(controller, screen, feedback)
         if (controller.waveformOn) FloatingWaveform(controller, screen, feedback)
+        // вектороскоп — тоже не среди элементов; он под просмотром снимка и галереей, как гистограмма: те закрывают весь экран
+        if (controller.assist.vectorscope) FloatingVectorscope(controller, screen, feedback)
         // панель наложения — тоже не среди элементов: касание миниатюры нужно и когда они спрятаны
         if (controller.assist.overlay != MonitorAssist.Overlay.off) FloatingOverlay(controller, screen, feedback)
         // плашка увеличения — видна и при скрытых элементах: увеличенная картинка — не весь кадр
@@ -718,7 +729,8 @@ private fun Controls(controller: CameraController, screen: ScreenState, feedback
             // лента камер — под верхней панелью, когда на связи не одна камера; прячется вместе с элементами. Сообщение —
             // справа от ленты (без ленты — под панелью): ленту не сдвигает, а в ряду панели ему не хватает места
             Row(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                if (controller.stripVisible) CameraStrip(controller)
+                // где лента — для вектороскопа: он встаёт правее неё
+                if (controller.stripVisible) CameraStrip(controller, Modifier.onGloballyPositioned { screen.stripRect = it.boundsInRoot() })
                 controller.statusMessage?.let {
                     Text(it, color = Color.White, fontSize = 15.sp, modifier = Modifier
                         .background(Panel, RoundedCornerShape(10.dp)).padding(horizontal = 12.dp, vertical = 7.dp))
@@ -1037,12 +1049,14 @@ private fun TopBar(controller: CameraController, screen: ScreenState) {
  * Тащат за любое место — она чуть крупнее (1,03) и с тенью; отпустили ближе 24 dp к краю — прилипает к отступу 16 dp;
  * за экран не уходит. Место — доли свободного места: переживает поворот и перезапуск. Размер панели — как её разложили,
  * а не на глаз: с неверным размером у краёв она уходила бы за экран. defaultOrigin — где стоять, пока её не перетаскивали
- * (в пикселях, по размеру панели и экрана); onRect — где она сейчас (касания по ней не возвращают скрытые элементы).
+ * (в пикселях, по размеру панели и экрана); onRect — где она сейчас (касания по ней не возвращают скрытые элементы);
+ * alsoAvoiding — ещё одно место, которое панель не закрывает: лента камер слева (null — не мешает).
  */
 @Composable
 private fun FloatingPanel(
     screen: ScreenState, feedback: FeedbackState, placement: FloatingPlacement?, onPlace: (FloatingPlacement) -> Unit,
-    defaultOrigin: (panel: Size, view: Size) -> Offset, onRect: (Rect?) -> Unit, content: @Composable () -> Unit,
+    defaultOrigin: (panel: Size, view: Size) -> Offset, onRect: (Rect?) -> Unit, alsoAvoiding: Rect? = null,
+    content: @Composable () -> Unit,
 ) {
     val density = LocalDensity.current
     val scope = rememberCoroutineScope()
@@ -1068,14 +1082,18 @@ private fun FloatingPanel(
                 val column = screen.rightColumnRect ?: return at
                 return if (Rect(at, size).overlaps(column)) at.copy(x = maxOf(16.dp.toPx(), column.left - 12.dp.toPx() - size.width)) else at
             }
+            // легла бы на ленту камер слева (вектороскоп) — встаёт правее неё, на той же высоте; место из настроек не меняется:
+            // убрали ленту — панель вернулась
+            fun besideStrip(at: Offset): Offset =
+                alsoAvoiding?.let { FloatingPlacement.clear(at, size, it, view, gap = 12.dp.toPx(), margin = 16.dp.toPx()) } ?: at
             val origin = placement?.let { px(it.origin(dp(size), dp(view))) } ?: defaultOrigin(size, view)
             // меню Fn и плашка увеличения её не закрывают: если легла бы под них — поднимается над ними
-            var placed = besideColumn(origin)
+            var placed = besideColumn(besideStrip(origin))
             for (obstacle in listOfNotNull(screen.fnMenuRect, screen.zoomBadgeRect)) {
                 if (Rect(placed, size).overlaps(obstacle)) placed = placed.copy(y = maxOf(16.dp.toPx(), obstacle.top - 10.dp.toPx() - size.height))
             }
-            // поднялась — могла выйти на колонку
-            besideColumn(placed)
+            // поднялась — могла выйти на ленту или на колонку
+            besideColumn(besideStrip(placed))
         }
     }
 
@@ -1183,6 +1201,25 @@ private fun FloatingWaveform(controller: CameraController, screen: ScreenState, 
         onRect = { screen.waveformRect = it },
     ) {
         WaveformView(trace, controller.waveformMode) { controller.chooseWaveformMode(it) }
+    }
+}
+
+/**
+ * Вектороскоп; по умолчанию — слева сверху, под верхней панелью (внизу слева — гистограмма, справа внизу — волновая форма, справа
+ * вверху — наложение). Касание — масштаб ×2, перетаскивание — место. Когда камер на связи две и больше, слева под верхней панелью
+ * лента камер: панель никогда не лежит под ней (там касание переключило бы камеру) — по умолчанию, после перетаскивания и при
+ * месте из прошлых запусков встаёт правее ленты. Справа она, как остальные, не ложится на колонку кнопок.
+ */
+@Composable
+private fun FloatingVectorscope(controller: CameraController, screen: ScreenState, feedback: FeedbackState) {
+    val trace = controller.vectorscope ?: return
+    val density = LocalDensity.current
+    FloatingPanel(screen, feedback, controller.vectorscopePlacement, controller::placeVectorscope,
+        defaultOrigin = { _, _ -> with(density) { Offset(18.dp.toPx(), 84.dp.toPx()) } },
+        onRect = { screen.vectorscopeRect = it },
+        alsoAvoiding = if (controller.stripVisible) screen.stripRect else null,
+    ) {
+        VectorscopePanel(trace, onZoom = controller::toggleVectorscopeZoom)
     }
 }
 

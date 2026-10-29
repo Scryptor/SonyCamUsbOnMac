@@ -685,4 +685,73 @@ class MonitorAssistTest {
         assertEquals(0.0, Waveform.intensity(0, 100), 1e-9)
         assertTrue(Waveform.intensity(1, 10_000) >= 0.18)
     }
+
+    // свой файл LUT: выбрать и удалить (MonitorAssistTests.swift — choosingAFileSelectsTheOwnLUTMode и дальше)
+
+    @Test fun choosingAFileSelectsTheOwnLutMode() {
+        var assist = MonitorAssist().with(MonitorTool.lut, "slog3")!!
+        assist = assist.lutFileSelected("Тёплый закат")
+        assertEquals(LutMode.file, assist.lut)
+        assertEquals("Тёплый закат", assist.lutFile)
+        assertEquals("Тёплый закат", assist.label(MonitorTool.lut))
+        // выключили и включили снова — вернулись к файлу, а не к «Авто»
+        assist = assist.with(MonitorTool.lut, "off")!!.toggled(MonitorTool.lut)
+        assertEquals(LutMode.file, assist.lut)
+        assertEquals("Тёплый закат", assist.lutFile)
+        // выбрали другой — прежний забыт, режим тот же
+        assist = assist.lutFileSelected("Холод")
+        assertEquals(LutMode.file, assist.lut)
+        assertEquals("Холод", assist.lutFile)
+    }
+
+    @Test fun choosingAFileKeepsTheOtherSettings() {
+        val before = MonitorAssist().with(MonitorTool.zebra, "95")!!.with(MonitorTool.vectorscope, "on")!!.copy(vectorscopeZoom = 2, lutScopes = false)
+        val after = before.lutFileSelected("a")
+        assertEquals(Zebra.above95, after.zebra)
+        assertTrue(after.vectorscope)
+        assertEquals(2, after.vectorscopeZoom)
+        assertFalse(after.lutScopes)
+        assertEquals("file", after.lastOn["lut"])
+    }
+
+    @Test fun deletingTheChosenFileClearsTheChoice() {
+        var assist = MonitorAssist().lutFileSelected("a")
+        // удалили чужой — выбор на месте
+        assist = assist.lutFileDeleted("b")
+        assertEquals(LutMode.file, assist.lut)
+        assertEquals("a", assist.lutFile)
+        // удалили выбранный — файла нет, LUT выключен, и «включить» теперь «Авто», а не «Свой» без файла
+        assist = assist.lutFileDeleted("a")
+        assertNull(assist.lutFile)
+        assertEquals(LutMode.off, assist.lut)
+        assist = assist.toggled(MonitorTool.lut)
+        assertEquals(LutMode.auto, assist.lut)
+    }
+
+    @Test fun deletingTheRememberedFileKeepsAnotherLutOn() {
+        // файл помнится, но на экране встроенный LUT: удаление забывает файл и не трогает то, что включено
+        var assist = MonitorAssist().lutFileSelected("c").with(MonitorTool.lut, "slog3")!!
+        assist = assist.lutFileDeleted("c")
+        assertNull(assist.lutFile)
+        assertEquals(LutMode.slog3, assist.lut)
+        // выключили и включили — вернулся встроенный LUT, а не «Свой» без файла
+        assist = assist.with(MonitorTool.lut, "off")!!.toggled(MonitorTool.lut)
+        assertEquals(LutMode.slog3, assist.lut)
+    }
+
+    @Test fun deletingTheFileDoesNotTouchOtherSettings() {
+        val assist = MonitorAssist().lutFileSelected("a").with(MonitorTool.orientation, "mirror")!!.copy(lutScopes = false, vectorscopeZoom = 2)
+        val after = assist.lutFileDeleted("a")
+        assertEquals(FrameOrientation.mirror, after.orientation)
+        assertFalse(after.lutScopes)
+        assertEquals(2, after.vectorscopeZoom)
+        // нет такого — тот же объект
+        assertEquals(assist, assist.lutFileDeleted("zzz"))
+        assertEquals(MonitorAssist(), MonitorAssist().lutFileDeleted("a"))
+    }
+
+    @Test fun chosenFileSurvivesJson() {
+        val assist = MonitorAssist().lutFileSelected("Тёплый закат").copy(lutScopes = false)
+        assertEquals(assist, MonitorAssist.fromJson(assist.toJson()))
+    }
 }

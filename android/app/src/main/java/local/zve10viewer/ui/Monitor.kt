@@ -1,9 +1,17 @@
 package local.zve10viewer.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
+import androidx.compose.material3.Switch
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
+import androidx.compose.ui.text.TextMeasurer
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.drawscope.clipRect
@@ -50,14 +58,35 @@ import androidx.compose.ui.unit.sp
 import local.zve10viewer.CameraController
 import local.zve10viewer.monitor.AssistRaster
 import local.zve10viewer.monitor.FrameMarkers
+import local.zve10viewer.monitor.LutChoice
+import local.zve10viewer.monitor.LutTexts
 import local.zve10viewer.monitor.MonitorAssist
 import local.zve10viewer.monitor.MonitorTool
 
 /*
- * Монитор: зебра, false color, пикинг и маркеры — как у программы для Mac. Меню — внизу, на месте строки значений, как
- * меню Fn: сверху значения выбранного инструмента и подсказка, ниже — плитки. Касание плитки выбирает её, касание
- * выбранной — включает или выключает.
+ * Монитор: зебра, false color, пикинг, LUT, вектороскоп, пипетка, маркеры и зеркало — как у программы для Mac. Меню — внизу, на
+ * месте строки значений, как меню Fn: сверху значения выбранного инструмента и подсказка, ниже — четырнадцать плиток в две
+ * строки по семь (тринадцать инструментов и «Всё — выключить»). Касание плитки выбирает её, касание выбранной — включает или
+ * выключает.
  */
+
+/** Плиток в ряду меню «Монитор». */
+private const val TILE_COLUMNS = 7
+
+/** Плитки меню по рядам: тринадцать инструментов в порядке `MonitorTool` и «Всё — выключить» (null) последней. */
+internal fun assistTileRows(): List<List<MonitorTool?>> = (MonitorTool.entries + listOf(null)).chunked(TILE_COLUMNS)
+
+/**
+ * Размер шрифта значения на плитке: [base], если текст шириной [natural] (при размере [base]) умещается в [available]; иначе
+ * меньше во столько же раз, но не меньше [floor]. Что и тогда не умещается, обрезается многоточием.
+ */
+internal fun fitFontSize(natural: Float, available: Float, base: Float, floor: Float): Float {
+    if (!(natural > available)) return base
+    return (base * available / natural).coerceIn(floor, base)
+}
+
+private const val TILE_VALUE_SP = 19f
+private const val TILE_VALUE_MIN_SP = 12f
 
 @Composable
 fun AssistMenu(controller: CameraController, screen: ScreenState) {
@@ -98,34 +127,44 @@ fun AssistMenu(controller: CameraController, screen: ScreenState) {
                             .padding(horizontal = 14.dp, vertical = 8.dp))
                 }
             }
+            // LUT: помощь «по картинке с LUT» и — у «Свой» — список своих файлов, «Добавить LUT…» и «Удалить»
+            if (tool == MonitorTool.lut) LutStrip(controller, assist)
             Text(tool.help, color = Secondary, fontSize = 14.sp, lineHeight = 18.sp, textAlign = TextAlign.Center)
         }
         Column(Modifier.background(Panel, RoundedCornerShape(16.dp)).padding(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            val tiles: List<MonitorTool?> = MonitorTool.entries + listOf(null)
-            tiles.chunked(5).forEach { row ->
+            val measurer = rememberTextMeasurer()
+            assistTileRows().forEach { row ->
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     row.forEach { item ->
                         if (item == null) {
-                            AssistTile("Всё", "Выключить", on = false, selected = false, enabled = assist.isActive,
+                            AssistTile("Всё", "Выключить", on = false, selected = false, enabled = assist.isActive, measurer = measurer,
                                 modifier = Modifier.weight(1f)) { controller.assistOff() }
                         } else {
-                            AssistTile(item.title, assist.label(item), on = assist.isOn(item),
-                                selected = item == tool, modifier = Modifier.weight(1f)) {
+                            AssistTile(item.title, tileValue(controller, assist, item), on = assist.isOn(item),
+                                selected = item == tool, measurer = measurer, modifier = Modifier.weight(1f)) {
                                 if (screen.assistSelected == item) controller.toggleAssist(item) else screen.assistSelected = item
                             }
                         }
                     }
                     // неполный ряд — плитки той же ширины, что в полном
-                    repeat(5 - row.size) { Spacer(Modifier.weight(1f)) }
+                    repeat(TILE_COLUMNS - row.size) { Spacer(Modifier.weight(1f)) }
                 }
             }
         }
     }
 }
 
+/**
+ * Значение на плитке. У «Авто» в LUT — «Авто: S-Log3»: какой LUT выбран по профилю камеры сейчас; у «Свой» — имя файла, пока
+ * он лежит в папке. Читает состояние, за которым следит экран (`resolvedLut` идёт по свойствам камеры), поэтому плитка
+ * перерисовывается сама, когда профиль в камере сменили.
+ */
+private fun tileValue(controller: CameraController, assist: MonitorAssist, tool: MonitorTool): String =
+    if (tool == MonitorTool.lut) LutChoice.tileValue(assist, controller.resolvedLut, controller.lutNames) else assist.label(tool)
+
 @Composable
-private fun AssistTile(title: String, value: String, on: Boolean, selected: Boolean, modifier: Modifier, enabled: Boolean = true,
-                       onClick: () -> Unit) {
+private fun AssistTile(title: String, value: String, on: Boolean, selected: Boolean, modifier: Modifier, measurer: TextMeasurer,
+                       enabled: Boolean = true, onClick: () -> Unit) {
     Column(
         modifier.heightIn(min = 72.dp)
             .background(if (selected) Accent else if (on) Color(0x29FFFFFF) else PanelLight, RoundedCornerShape(12.dp))
@@ -136,9 +175,93 @@ private fun AssistTile(title: String, value: String, on: Boolean, selected: Bool
         horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center,
     ) {
         Text(title, color = if (selected) Color.White else Secondary, fontSize = 14.sp, maxLines = 1)
-        Text(value, color = if (on || selected) Color.White else Color.White.copy(alpha = 0.45f), fontSize = 19.sp,
-            fontWeight = FontWeight.SemiBold, maxLines = 1)
+        TileValue(value, if (on || selected) Color.White else Color.White.copy(alpha = 0.45f), measurer)
     }
+}
+
+/**
+ * Значение на плитке: семь плиток в ряду — по ≈126 dp, и «Авто: S-Log3» или имя файла при 19 sp не умещаются. Размер подбирается
+ * по ширине плитки (и по масштабу шрифта системы: меряется настоящий текст), до 12 sp; что и тогда длиннее — многоточие.
+ */
+@Composable
+private fun TileValue(text: String, color: Color, measurer: TextMeasurer) {
+    BoxWithConstraints(Modifier.fillMaxWidth().padding(horizontal = 6.dp), contentAlignment = Alignment.Center) {
+        val available = constraints.maxWidth.toFloat()
+        val natural = remember(text, measurer) {
+            measurer.measure(text, TextStyle(fontSize = TILE_VALUE_SP.sp, fontWeight = FontWeight.SemiBold), softWrap = false, maxLines = 1)
+                .size.width.toFloat()
+        }
+        Text(text, color = color, fontSize = fitFontSize(natural, available, TILE_VALUE_SP, TILE_VALUE_MIN_SP).sp,
+            fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+/**
+ * Под вариантами LUT: «Помощь — по картинке с LUT» и — у «Свой» — список своих файлов, «Добавить LUT…» и «Удалить». Файл выбирается
+ * касанием имени; выбранный — белым. Добавить — через системный выбор файла.
+ */
+@Composable
+private fun LutStrip(controller: CameraController, assist: MonitorAssist) {
+    val names = controller.lutNames
+    // выбранный файл, если он лежит в папке: пропавший из папки не считается выбранным
+    val chosen = assist.lutFile?.takeIf { it in names }
+    val own = assist.lut == MonitorAssist.LutMode.file
+    val pick = rememberLutPicker(controller)
+    // папку могли тронуть руками: список читается заново, когда полоса открывается
+    LaunchedEffect(Unit) { controller.refreshLuts() }
+    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (own) {
+            if (names.isEmpty()) {
+                Text(LutTexts.EMPTY, color = Secondary, fontSize = 16.sp, textAlign = TextAlign.Center)
+            } else {
+                // не больше шести имён в ряду: ряд стоит посередине, как строки над ним и под ним
+                names.chunked(6).forEach { row ->
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        for (name in row) {
+                            val current = name == chosen
+                            Text(name, color = if (current) Color.Black else Color.White, fontSize = 16.sp, maxLines = 1,
+                                overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center,
+                                fontWeight = if (current) FontWeight.Bold else FontWeight.Normal,
+                                modifier = Modifier.width(112.dp).background(if (current) Color.White else PanelLight, RoundedCornerShape(9.dp))
+                                    .semantics { contentDescription = "LUT $name" + if (current) ", выбран" else "" }
+                                    .clickable { controller.selectLutFile(name) }.padding(horizontal = 8.dp, vertical = 8.dp))
+                        }
+                    }
+                }
+            }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+            Row(
+                Modifier.clickable { controller.setLutScopes(!assist.lutScopes) },
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text(LutTexts.SCOPES, color = Color.White, fontSize = 16.sp)
+                Switch(assist.lutScopes, { controller.setLutScopes(it) })
+            }
+            if (own) {
+                Text(LutTexts.ADD, color = Color.White, fontSize = 16.sp,
+                    modifier = Modifier.background(PanelLight, RoundedCornerShape(9.dp)).clickable { pick() }
+                        .padding(horizontal = 14.dp, vertical = 8.dp))
+                Text(LutTexts.DELETE, color = Color.White, fontSize = 16.sp,
+                    modifier = Modifier.alpha(if (chosen != null) 1f else 0.4f).background(PanelLight, RoundedCornerShape(9.dp))
+                        .clickable(enabled = chosen != null) { chosen?.let(controller::deleteLut) }
+                        .padding(horizontal = 14.dp, vertical = 8.dp))
+            }
+        }
+        // подсказки: на планшете нет «всплывающей подсказки при наведении», как на Mac
+        Text(LutTexts.SCOPES_HELP, color = Secondary, fontSize = 13.sp, lineHeight = 17.sp, textAlign = TextAlign.Center)
+        if (own) Text(LutTexts.FILES_HELP, color = Secondary, fontSize = 13.sp, lineHeight = 17.sp, textAlign = TextAlign.Center)
+    }
+}
+
+/**
+ * «Добавить LUT…»: системный выбор файла — любого (у `.cube` в системе часто нет своего типа, и фильтр по типу скрыл бы его);
+ * выбрали — файл проверяется разбором, копируется в папку программы и выбирается.
+ */
+@Composable
+private fun rememberLutPicker(controller: CameraController): () -> Unit {
+    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> if (uri != null) controller.importLut(uri) }
+    return { launcher.launch(arrayOf("*/*")) }
 }
 
 /** Легенда false color — что значит каждый цвет. Видна, пока false color включён. */
@@ -259,7 +382,7 @@ fun DrawScope.drawReference(image: ImageBitmap, rect: Rect, alpha: Float) {
 fun MonitorButton(screen: ScreenState) {
     Box(
         Modifier.size(44.dp).background(if (screen.assistOpen) Accent else PanelLight, RoundedCornerShape(9.dp))
-            .semantics { contentDescription = "Монитор: зебра, false color, пикинг, сетка и рамки" }
+            .semantics { contentDescription = "Монитор: зебра, false color, пикинг, LUT, вектороскоп, пипетка, сетка, рамки и зеркало" }
             .clickable { screen.toggleAssistMenu() },
         contentAlignment = Alignment.Center,
     ) {

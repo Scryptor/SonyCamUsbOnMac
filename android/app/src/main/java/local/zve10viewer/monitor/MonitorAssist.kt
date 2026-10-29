@@ -140,6 +140,22 @@ data class MonitorAssist(
         return if (value != "off") next.copy(lastOn = lastOn + (tool.name to value)) else next
     }
 
+    /** Выбрать свой LUT: режим «Свой» и этот файл. Прежний выбранный файл забывается. */
+    fun lutFileSelected(name: String): MonitorAssist = (with(MonitorTool.lut, LutMode.file.value) ?: this).copy(lutFile = name)
+
+    /**
+     * Свой LUT удалили из папки. Выбранный (или просто помнившийся) файл забывается; если LUT был включён как «Свой», он
+     * выключается, и повторное «включить» даёт «Авто», а не «Свой» без файла. Встроенный LUT, включённый поверх помнившегося
+     * файла, остаётся. Другой файл — ничего не меняется.
+     */
+    fun lutFileDeleted(name: String): MonitorAssist {
+        if (lutFile != name) return this
+        var next = copy(lutFile = null)
+        if (next.lut == LutMode.file) next = next.copy(lut = LutMode.off)
+        if (next.lastOn[MonitorTool.lut.name] == LutMode.file.value) next = next.copy(lastOn = next.lastOn - MonitorTool.lut.name)
+        return next
+    }
+
     /**
      * Выключить, если включён, иначе вернуть последнее включённое значение (или первое после «Выкл»). У цвета пикинга
      * «выкл» нет — он идёт по кругу.

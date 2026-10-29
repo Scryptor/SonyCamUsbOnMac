@@ -60,6 +60,8 @@ object PictureHelp {
      * @param levels уровни картинки помощи
      * @param passAverageMs сколько в среднем и [passMaxMs] сколько самое долгое заняли чтение кадра, зеркало с LUT и запись
      *   обратно за время с прошлой строки, мс; NaN — проход не шёл
+     * @param vectorscope включён ли вектороскоп и в каком он масштабе ([vectorscopeZoom]: 1 или 2; называется и у выключенного —
+     *   это настройка, а не включатель)
      */
     fun report(
         lut: String,
@@ -72,13 +74,17 @@ object PictureHelp {
         height: Int,
         passAverageMs: Double = Double.NaN,
         passMaxMs: Double = Double.NaN,
+        vectorscope: Boolean = false,
+        vectorscopeZoom: Int = 1,
     ): String {
         val low = percentile(levels, 1)
         val high = percentile(levels, 99)
         return String.format(
             Locale.ROOT,
-            "картинка: lut=%s mode=%s orient=%s lutScopes=%b white=%d p1=%d p99=%d spread=%d mean=%.1f pass=%s passMax=%s size=%dx%d",
-            lut, mode, orientation.value, lutScopes, white, low, high, high - low, mean(levels),
+            "картинка: lut=%s mode=%s orient=%s lutScopes=%b vectorscope=%s zoom=%d white=%d p1=%d p99=%d spread=%d mean=%.1f " +
+                "pass=%s passMax=%s size=%dx%d",
+            lut, mode, orientation.value, lutScopes, if (vectorscope) "on" else "off", vectorscopeZoom, white, low, high, high - low,
+            mean(levels),
             milliseconds(passAverageMs), milliseconds(passMaxMs), width, height,
         )
     }

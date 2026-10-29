@@ -91,16 +91,19 @@ import local.zve10viewer.settings.FileNaming
 import local.zve10viewer.settings.GroupFailures
 import local.zve10viewer.settings.LumaHistogram
 import local.zve10viewer.settings.LumaStats
+import local.zve10viewer.monitor.AssistExtras
 import local.zve10viewer.monitor.AssistRaster
 import local.zve10viewer.monitor.BuiltinLut
 import local.zve10viewer.monitor.CameraProfile
 import local.zve10viewer.monitor.FrameSurface
 import local.zve10viewer.monitor.LookWatch
 import local.zve10viewer.monitor.LutCache
+import local.zve10viewer.monitor.LutTexts
 import local.zve10viewer.monitor.MonitorAssist
 import local.zve10viewer.monitor.MonitorTool
 import local.zve10viewer.monitor.PictureHelp
 import local.zve10viewer.monitor.PicturePath
+import local.zve10viewer.monitor.Vectorscope
 import local.zve10viewer.monitor.Waveform
 import local.zve10viewer.monitor.FocusDrive
 import local.zve10viewer.monitor.FocusFrame
@@ -285,6 +288,13 @@ class CameraController(private val context: Context, private val scope: Coroutin
      */
     private val luts = LutCache(java.io.File(context.filesDir, "luts"), { task -> scope.launch(Dispatchers.IO) { task.run() } }, ::journal)
 
+    /** Свои LUT: список, добавление, замена, удаление. Поверх того же [luts]: добавленный файл сразу виден кадровому циклу. */
+    val lutStore = LutStore(luts)
+
+    /** Имена своих LUT (по алфавиту) для меню «Монитор»; обновляются после добавления и удаления и при открытии полосы LUT. */
+    var lutNames by mutableStateOf(lutStore.names)
+        private set
+
     /** Профиль изображения главной камеры — по нему «Авто» выбирает LUT. Ставит каждый снимок её свойств, читает поток кадров. */
     @Volatile private var cameraProfile = CameraProfile.none
 
@@ -309,6 +319,19 @@ class CameraController(private val context: Context, private val scope: Coroutin
 
     /** Волновая форма кадра: картинка следа, что по ней видно и белый уровень превью (на нём — линия 100 %). */
     class WaveformTrace(val image: ImageBitmap, val counts: Waveform.Counts, val white: Int)
+
+    /** Где вектороскоп (доли свободного места); null — на месте по умолчанию, слева сверху под верхней панелью. */
+    var vectorscopePlacement by mutableStateOf(prefs.vectorscopePlacement)
+        private set
+    /** Вектороскоп последнего кадра; null — выключен или кадров ещё нет. */
+    var vectorscope by mutableStateOf<VectorscopeTrace?>(null)
+        private set
+
+    /**
+     * Вектороскоп кадра: картинка 128×128 (сетку рисует панель), масштаб, при котором она посчитана, и сами счётчики корзин —
+     * по ним в logcat пишется, где пик и сколько отсчётов у шести меток (`Vectorscope.report`): проверка без снимка экрана.
+     */
+    class VectorscopeTrace(val image: ImageBitmap, val zoom: Int, val counts: IntArray)
 
     /** Эталонный кадр для наложения: текущий кадр или снимок из галереи. Хранится в файле — переживает перезапуск. */
     var reference by mutableStateOf<Reference?>(null)
@@ -505,7 +528,9 @@ class CameraController(private val context: Context, private val scope: Coroutin
                           /** Эталон — снимок с этим местом в ленте. */
                           val shot: Int? = null,
                           /** Как касание миниатюры эталона: включить наложение, спрятать или показать эталон. */
-                          val overlayToggle: Boolean = false) : DebugCommand()
+                          val overlayToggle: Boolean = false,
+                          /** LUT и вектороскоп: `lut`, `lutFile`, `lutScopes`, `vectorscope`, `vectorscopeZoom` — применяются после остального. */
+                          val extras: AssistExtras.Request = AssistExtras.Request()) : DebugCommand()
     }
 
     private val debugCommandFlow = MutableSharedFlow<DebugCommand>(extraBufferCapacity = 8)
@@ -973,8 +998,9 @@ class CameraController(private val context: Context, private val scope: Coroutin
         assistForFrames = next
         warmLut()
         prefs.monitorAssist = next.toJson()
-        // растровые выключили — старый растр не показываем, даже если новых кадров нет
+        // растровые выключили — старый растр не показываем, даже если новых кадров нет; так же вектороскоп
         if (!next.needsRaster) assistOverlay = null
+        if (!next.vectorscope) vectorscope = null
         // наложение включили — эталон нужен: прошлый из файла или текущий кадр
         if (next.overlay != MonitorAssist.Overlay.off) ensureReference()
     }
@@ -1128,6 +1154,74 @@ class CameraController(private val context: Context, private val scope: Coroutin
         prefs.waveformPlacement = placement
     }
 
+    fun placeVectorscope(placement: FloatingPlacement) {
+        vectorscopePlacement = placement
+        prefs.vectorscopePlacement = placement
+    }
+
+    /** Касание панели вектороскопа: масштаб ×1 ↔ ×2. */
+    fun toggleVectorscopeZoom() = saveAssist(assist.copy(vectorscopeZoom = if (assist.vectorscopeZoom == 1) 2 else 1))
+
+    /** Переключатель «Помощь — по картинке с LUT». */
+    fun setLutScopes(on: Boolean) = saveAssist(assist.copy(lutScopes = on))
+
+    /** Выбрать файл из списка своих LUT: режим «Свой» и этот файл. */
+    fun selectLutFile(name: String) = saveAssist(assist.lutFileSelected(name))
+
+    /** Список своих LUT заново с диска: папку могли тронуть руками. Вызывается, когда меню «Монитор» открывается на LUT. */
+    fun refreshLuts() {
+        val fresh = lutStore.names
+        if (fresh != lutNames) lutNames = fresh
+    }
+
+    /** Убрать свой LUT из папки; выбранный выключается («Выкл»), файл забывается. */
+    fun deleteLut(name: String) {
+        lutStore.delete(name)
+        refreshLuts()
+        saveAssist(assist.lutFileDeleted(name))
+    }
+
+    /**
+     * «Добавить LUT…»: файл из системного выбора проверяется разбором, копируется в папку программы и сразу выбирается («Свой» и
+     * этот файл). Не вышло (не 3D LUT, не те строки, уже 12, не прочитался) — причина в строке состояния, выбор не меняется.
+     */
+    fun importLut(uri: Uri) {
+        scope.launch {
+            val outcome = withContext(Dispatchers.IO) {
+                lutStore.importFile(displayName(uri) ?: "LUT") { context.contentResolver.openInputStream(uri) }
+            }
+            // и при отказе список читается заново: замена могла оборваться на середине
+            refreshLuts()
+            when (outcome) {
+                is LutStore.Outcome.Added -> {
+                    selectLutFile(outcome.name)
+                    showStatus(LutTexts.added(outcome.name))
+                }
+                is LutStore.Outcome.Refused -> showStatus(outcome.failure.message)
+            }
+        }
+    }
+
+    /** Имя файла по адресу от системного выбора файла; null — провайдер его не назвал. */
+    private fun displayName(uri: Uri): String? = runCatching {
+        context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) cursor.getString(0) else null
+        }
+    }.getOrNull()
+
+    /**
+     * Отладка (DEBUG_ASSIST, только debug-сборка): extras про LUT и вектороскоп — `lut`, `lutFile`, `lutScopes`, `vectorscope`,
+     * `vectorscopeZoom` (см. [AssistExtras]). Что не понято, не применяется и называется в logcat; что стало — одной строкой
+     * ZVAssist сразу, не дожидаясь кадров (с камерой или без).
+     */
+    fun applyAssistExtras(request: AssistExtras.Request) {
+        if (request.isEmpty) return
+        val applied = AssistExtras.apply(assist, request)
+        if (applied.rejected.isNotEmpty()) Log.w("ZVAssist", "DEBUG_ASSIST: не понято ${applied.rejected.joinToString()} в $request")
+        if (applied.assist != assist) saveAssist(applied.assist)
+        Log.i("ZVAssist", AssistExtras.describe(applied.assist))
+    }
+
     /** Файл эталона — в данных программы: снимок, из которого его взяли, можно и удалить. */
     private val referenceFile get() = java.io.File(context.filesDir, "reference.jpg")
 
@@ -1188,13 +1282,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
                 showStatus("Эта картинка не открылась как эталон")
                 return@launch
             }
-            val name = withContext(Dispatchers.IO) {
-                runCatching {
-                    context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
-                        if (cursor.moveToFirst()) cursor.getString(0) else null
-                    }
-                }.getOrNull()
-            } ?: "картинка"
+            val name = withContext(Dispatchers.IO) { displayName(uri) } ?: "картинка"
             reference = Reference(image.asImageBitmap(), name)
             prefs.referenceSource = name
             withContext(Dispatchers.IO) {
@@ -2985,7 +3073,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
     private fun noteLook(tools: MonitorAssist, profile: CameraProfile, lutOn: Boolean, white: Int, levels: IntArray, width: Int,
                          height: Int, passAverageMs: Double, passWorstMs: Double) {
         Log.i("ZVAssist", PictureHelp.report(luts.appliedName(tools, profile, lutOn), tools.lut.value, tools.orientation,
-            tools.lutScopes, white, levels, width, height, passAverageMs, passWorstMs))
+            tools.lutScopes, white, levels, width, height, passAverageMs, passWorstMs, tools.vectorscope, tools.vectorscopeZoom))
     }
 
     /** Связь по Wi-Fi: провал — для экрана, время ответа на пробы — для качества превью и журнала. */
@@ -3090,6 +3178,19 @@ class CameraController(private val context: Context, private val scope: Coroutin
             overlay.zebraShare, overlay.peakingShare))
     }
 
+    /**
+     * Вектороскоп в журнале logcat (тег ZVAssist) раз в 2 с, пока он включён: масштаб, где пик и сколько отсчётов у шести меток.
+     * По строке проверяется вектороскоп без снимка экрана: на цветных полосах 75 % при ×1 у всех шести меток отсчёты есть.
+     */
+    private var vectorscopeLoggedAt = 0L
+
+    private fun noteVectorscope(trace: VectorscopeTrace?) {
+        val now = System.currentTimeMillis()
+        if (trace == null || now - vectorscopeLoggedAt < 2000) return
+        vectorscopeLoggedAt = now
+        Log.i("ZVAssist", Vectorscope.report(trace.counts, trace.zoom))
+    }
+
     /** Отпечаток кадра для подсчёта повторов: каждый 16-й байт JPEG — повтор не пропустит, а дешевле полного хеша. */
     private fun fingerprint(sample: LiveViewSample): Int {
         var hash = sample.jpegLength
@@ -3112,7 +3213,9 @@ class CameraController(private val context: Context, private val scope: Coroutin
         noteLens()
         assistOverlay = if (assist.needsRaster) analysis?.overlay else null
         waveform = if (waveformOn) analysis?.waveform else null
+        vectorscope = if (assist.vectorscope) analysis?.vectorscope else null
         noteAssist(analysis?.overlay)
+        noteVectorscope(vectorscope)
         // новая обёртка на каждый кадр: Bitmap из пула тот же, и с прежней обёрткой Compose не перерисовал бы картинку
         frame = bitmap.asImageBitmap()
         lastSample = sample
@@ -3392,6 +3495,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
         histogramStats = null
         assistOverlay = null
         waveform = null
+        vectorscope = null
         controlCodes = emptySet()
         focusFrames = emptyList()
         touchMark = null
@@ -3645,8 +3749,12 @@ private class FramePool {
     }
 }
 
-/** Что посчитано по точкам кадра: растр помощи и волновая форма. */
-private class FrameAnalysis(val overlay: CameraController.AssistOverlay?, val waveform: CameraController.WaveformTrace?)
+/** Что посчитано по точкам кадра: растр помощи, волновая форма и вектороскоп. */
+private class FrameAnalysis(
+    val overlay: CameraController.AssistOverlay?,
+    val waveform: CameraController.WaveformTrace?,
+    val vectorscope: CameraController.VectorscopeTrace?,
+)
 
 /**
  * Bitmap кадра для прохода картинки (`PicturePath`): точки читаются и пишутся целиком. Один на цикл кадров, Bitmap
@@ -3675,6 +3783,8 @@ private class AssistSampler {
     private var next = 0
     private val traces = arrayOfNulls<Bitmap>(3)
     private var nextTrace = 0
+    private val scopes = arrayOfNulls<Bitmap>(3)
+    private var nextScope = 0
 
     /** Точки кадра как есть, когда проход картинки их не раскладывал. Массив один на сеанс и может быть больше кадра. */
     fun pixelsOf(frame: Bitmap): IntArray {
@@ -3701,7 +3811,17 @@ private class AssistSampler {
             bitmap.setPixels(Waveform.image(counts), 0, counts.columns, 0, 0, counts.columns, Waveform.ROWS)
             CameraController.WaveformTrace(bitmap.asImageBitmap(), counts, white)
         }
-        return FrameAnalysis(overlay, trace)
+        return FrameAnalysis(overlay, trace, if (assist.vectorscope) vectorscope(argb, w, h, assist.vectorscopeZoom) else null)
+    }
+
+    /** Вектороскоп: счётчики корзин → картинка 128×128 в Bitmap из кольца (как у следов волновой формы). */
+    private fun vectorscope(argb: IntArray, w: Int, h: Int, zoom: Int): CameraController.VectorscopeTrace {
+        val counts = Vectorscope.counts(argb, w, h, zoom)
+        val slot = nextScope
+        nextScope = (nextScope + 1) % scopes.size
+        val bitmap = scopes[slot] ?: Bitmap.createBitmap(Vectorscope.BINS, Vectorscope.BINS, Bitmap.Config.ARGB_8888).also { scopes[slot] = it }
+        bitmap.setPixels(Vectorscope.image(counts), 0, Vectorscope.BINS, 0, 0, Vectorscope.BINS, Vectorscope.BINS)
+        return CameraController.VectorscopeTrace(bitmap.asImageBitmap(), zoom, counts)
     }
 
     private fun render(luma: IntArray, w: Int, h: Int, white: Int, assist: MonitorAssist,

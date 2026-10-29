@@ -189,8 +189,8 @@ class PictureHelpTest {
             levels = levels, width = 1024, height = 576, passAverageMs = 8.44, passMaxMs = 11.26,
         )
         assertEquals(
-            "картинка: lut=slog3cine mode=auto orient=mirror lutScopes=true white=255 p1=5 p99=100 spread=95 mean=99.1 " +
-                "pass=8.4 passMax=11.3 size=1024x576",
+            "картинка: lut=slog3cine mode=auto orient=mirror lutScopes=true vectorscope=off zoom=1 white=255 p1=5 p99=100 " +
+                "spread=95 mean=99.1 pass=8.4 passMax=11.3 size=1024x576",
             line,
         )
     }
@@ -198,8 +198,20 @@ class PictureHelpTest {
     @Test fun reportLineForNoLutNoMirrorAndNoPass() {
         val line = PictureHelp.report("off", "off", FrameOrientation.off, true, 234, levelsOf(10 to 4, 20 to 4), 640, 360)
         assertEquals(
-            "картинка: lut=off mode=off orient=off lutScopes=true white=234 p1=10 p99=20 spread=10 mean=15.0 pass=- passMax=- size=640x360",
+            "картинка: lut=off mode=off orient=off lutScopes=true vectorscope=off zoom=1 white=234 p1=10 p99=20 spread=10 " +
+                "mean=15.0 pass=- passMax=- size=640x360",
             line,
         )
+    }
+
+    @Test fun reportLineSaysWhetherTheVectorscopeIsOnAndAtWhichZoom() {
+        val levels = levelsOf(10 to 4, 20 to 4)
+        val one = PictureHelp.report("off", "off", FrameOrientation.off, true, 234, levels, 640, 360, vectorscope = true, vectorscopeZoom = 1)
+        assertTrue(one, "lutScopes=true vectorscope=on zoom=1 white=234" in one)
+        val two = PictureHelp.report("off", "off", FrameOrientation.off, false, 255, levels, 640, 360, vectorscope = true, vectorscopeZoom = 2)
+        assertTrue(two, "lutScopes=false vectorscope=on zoom=2 white=255" in two)
+        // масштаб называется и у выключенного вектороскопа: он настройка, а не включатель
+        val off = PictureHelp.report("off", "off", FrameOrientation.off, true, 234, levels, 640, 360, vectorscope = false, vectorscopeZoom = 2)
+        assertTrue(off, "vectorscope=off zoom=2" in off)
     }
 }

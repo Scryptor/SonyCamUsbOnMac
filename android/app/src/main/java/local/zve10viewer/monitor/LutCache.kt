@@ -30,7 +30,8 @@ data class CameraProfile(val pictureProfile: Long? = null, val gamma: Long? = nu
  *
  * К файлу ведёт только имя из одной части: `../чужой`, `a/b` и скрытые файлы не открываются. Вызывать можно из любого потока.
  *
- * @param folder папка своих LUT; её может не быть
+ * @param folder папка своих LUT; её может не быть. Та же папка у `LutStore`: он добавляет и убирает файлы, этот кэш кладёт их
+ *   кубы на картинку
  * @param background где выполнять чтение и сборку: не в потоке вызова
  * @param journal что произошло с файлом: разобран или почему нет (текст — как в окне «Добавить LUT…»)
  * @param maxFileBytes файл тяжелее не читается: куб 65³ текстом — от 7 до 12 МБ, всё, что больше 16, — не LUT
@@ -38,7 +39,7 @@ data class CameraProfile(val pictureProfile: Long? = null, val gamma: Long? = nu
  * @param make как делается встроенный куб; тесты подменяют, чтобы проверить гонки
  */
 class LutCache(
-    private val folder: File,
+    val folder: File,
     private val background: (Runnable) -> Unit = { task -> Thread(task, "LutCache").apply { isDaemon = true }.start() },
     private val journal: (String) -> Unit = {},
     private val maxFileBytes: Long = MAX_FILE_BYTES,
@@ -165,6 +166,32 @@ class LutCache(
         return null
     }
 
+    /**
+     * Принять уже разобранный куб файла `имя.cube`, который только что лёг в папку (добавление через `LutStore`): картинка
+     * получает его сразу, без второго чтения и разбора, и без кадров «без LUT» в промежутке. Куб запоминается под текущими
+     * датой и длиной файла — тронут файл потом, он читается заново, как любой другой. Нет файла или имя не годится — ничего.
+     */
+    fun adopt(name: String, lut: ColorLut) {
+        if (!isPlainName(name)) return
+        synchronized(fileLock) {
+            val known = slots[name]
+            val file = known?.file ?: File(folder, "$name.cube")
+            val modified = file.lastModified()
+            val length = file.length()
+            if (modified == 0L && length == 0L) {
+                if (known != null) slots.remove(name)
+                return
+            }
+            val slot = known ?: Slot(file).also { slots[name] = it }
+            slot.modified = modified
+            slot.length = length
+            slot.lut = lut
+            slot.done = true
+            slot.loading = false
+            trim()
+        }
+    }
+
     /** Забыть куб: файл заменили или удалили — следующий [file] прочитает его заново. */
     fun forget(name: String) {
         synchronized(fileLock) { slots.remove(name) }
@@ -234,6 +261,7 @@ class LutCache(
         /** Файл тяжелее не читается: куб 65³ текстом — от 7 до 12 МБ. */
         const val MAX_FILE_BYTES = 16L shl 20
 
-        private const val TOO_BIG = "Файл слишком большой для LUT"
+        /** Что сказать про файл, который не прочитан из-за размера (или не влез в память). */
+        const val TOO_BIG = "Файл слишком большой для LUT"
     }
 }

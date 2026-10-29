@@ -1,9 +1,13 @@
 package local.zve10viewer.monitor
 
+import java.util.Locale
+import kotlin.math.PI
+import kotlin.math.cos
 import kotlin.math.floor
 import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.sin
 
 /**
  * Вектороскоп: куда ложатся цвета кадра на плоскости цветоразностных Cb и Cr (Rec. 709). Серый — в середине, насыщенный
@@ -31,6 +35,15 @@ object Vectorscope {
 
     /** Метка цвета на плоскости: имя и Cb, Cr. */
     data class Target(val name: String, val cb: Double, val cr: Double)
+
+    /** Точка на панели: доли её ширины и высоты, y вниз. Середина — (0,5; 0,5). */
+    data class PanelPoint(val x: Double, val y: Double)
+
+    /** Метка полосы 75 %, которую видно на панели: сама метка и её место. */
+    data class Mark(val target: Target, val at: PanelPoint)
+
+    /** Насколько корзин от корзины метки вокруг неё считаются «попаданием в метку» (окно 5 × 5). */
+    const val HIT_RADIUS = 2
 
     // Rec. 709: Y = 0,2126R + 0,7152G + 0,0722B; Cb = (B − Y)/1,8556; Cr = (R − Y)/1,5748.
     private const val KR = 0.2126
@@ -95,6 +108,34 @@ object Vectorscope {
         val c = chroma(r, g, b)
         return Target(name, c.cb, c.cr)
     }
+
+    // панель
+
+    /**
+     * Где точка плоскости (Cb, Cr) лежит на панели: доли её ширины и высоты, y вниз. Плоскость — квадрат |Cb|, |Cr| ≤ 0,5/zoom
+     * на всю панель, середина — серый. Это те же числа, что у [bin]: метка на сетке и корзина с таким цветом — одно место.
+     * Что за краем плоскости (метки 75 % при ×2), выходит за 0…1. zoom меньше 1 считается за 1.
+     */
+    fun plane(cb: Double, cr: Double, zoom: Int): PanelPoint {
+        val perUnit = max(zoom, 1).toDouble()
+        return PanelPoint(0.5 + cb * perUnit, 0.5 - cr * perUnit)
+    }
+
+    /**
+     * Конец линии тона кожи на круге панели (радиус 0,5): из середины под углом [SKIN_ANGLE] от +Cb против часовой стрелки.
+     * Круг — край плоскости при любом масштабе, поэтому линия от масштаба не зависит.
+     */
+    val skinLineEnd: PanelPoint = run {
+        val angle = SKIN_ANGLE * PI / 180
+        PanelPoint(0.5 + 0.5 * cos(angle), 0.5 - 0.5 * sin(angle))
+    }
+
+    /**
+     * Метки полос 75 %, которые лежат на панели при этом масштабе, — с местом. При ×2 их нет: полосы 75 % дальше края 0,25, и
+     * метка там была бы вне панели.
+     */
+    fun visibleTargets(zoom: Int): List<Mark> = targets.map { Mark(it, plane(it.cb, it.cr, zoom)) }
+        .filter { it.at.x in 0.0..1.0 && it.at.y in 0.0..1.0 }
 
     // подсчёт по кадру
 
@@ -193,6 +234,37 @@ object Vectorscope {
         val scale = max(zoom, 1).toDouble()
         val n = BINS.toDouble()
         return Chroma(((best % BINS + 0.5) / n - 0.5) / scale, (0.5 - (best / BINS + 0.5) / n) / scale)
+    }
+
+    /**
+     * Сколько отсчётов лежит в пределах [HIT_RADIUS] корзин от каждой из шести меток (в порядке [targets]); метка за краем
+     * плоскости (при ×2) и счётчики не того размера дают 0. Окно обрезается по сетке. По этим числам проверяют вектороскоп без
+     * снимка экрана: на цветных полосах 75 % при ×1 у всех шести метки отсчётов больше нуля.
+     */
+    fun targetHits(counts: IntArray, zoom: Int): IntArray {
+        val hits = IntArray(targets.size)
+        if (counts.size != BINS * BINS) return hits
+        for ((i, target) in targets.withIndex()) {
+            val bin = bin(target.cb, target.cr, zoom) ?: continue
+            var sum = 0
+            for (y in max(0, bin.y - HIT_RADIUS)..min(BINS - 1, bin.y + HIT_RADIUS)) {
+                for (x in max(0, bin.x - HIT_RADIUS)..min(BINS - 1, bin.x + HIT_RADIUS)) sum += counts[y * BINS + x]
+            }
+            hits[i] = sum
+        }
+        return hits
+    }
+
+    /**
+     * Строка для logcat (тег ZVAssist): масштаб, где самая полная корзина и сколько отсчётов у каждой метки. Раз в две секунды,
+     * пока вектороскоп включён.
+     */
+    fun report(counts: IntArray, zoom: Int): String {
+        val peak = peak(counts, zoom)
+        val hits = targetHits(counts, zoom)
+        val where = if (peak == null) "пик —" else String.format(Locale.ROOT, "пик Cb=%.3f Cr=%.3f", peak.cb, peak.cr)
+        val marks = targets.indices.joinToString(" ") { "${targets[it].name}=${hits[it]}" }
+        return "вектороскоп ×${max(zoom, 1)}: $where, метки $marks"
     }
 
     /**
