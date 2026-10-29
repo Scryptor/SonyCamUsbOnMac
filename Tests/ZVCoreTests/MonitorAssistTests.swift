@@ -118,6 +118,369 @@ import Testing
     #expect(assist.peaking == .low)
 }
 
+// MARK: - LUT, вектороскоп, пипетка, картинка
+
+@Test func monitorToolsKeepTheTileOrder() {
+    // 13 плиток; четырнадцатая — «Всё — выключить» — рисуется отдельно. Ряд 1: до «Пипетки», ряд 2: от «Сетки»
+    #expect(MonitorTool.allCases.map(\.rawValue) == [
+        "zebra", "falseColor", "peaking", "peakingColor", "lut", "vectorscope", "probe",
+        "grid", "center", "frameMarker", "safeZone", "overlay", "orientation",
+    ])
+}
+
+@Test func newToolsHaveTheirTitlesOptionsAndHelp() {
+    #expect(MonitorTool.lut.title == "LUT")
+    #expect(MonitorTool.vectorscope.title == "Вектороскоп")
+    #expect(MonitorTool.probe.title == "Пипетка")
+    #expect(MonitorTool.orientation.title == "Картинка")
+
+    #expect(MonitorTool.lut.options.map(\.value) == ["off", "auto", "slog3cine", "slog3", "slog2", "hlg", "file"])
+    #expect(MonitorTool.lut.options.map(\.label) == ["Выкл", "Авто", "S-Log3 Cine", "S-Log3", "S-Log2", "HLG", "Свой"])
+    for tool in [MonitorTool.vectorscope, .probe] {
+        #expect(tool.options.map(\.value) == ["off", "on"])
+        #expect(tool.options.map(\.label) == ["Выкл", "Вкл"])
+    }
+    #expect(MonitorTool.orientation.options.map(\.value) == ["off", "mirror", "180", "mirror180"])
+    #expect(MonitorTool.orientation.options.map(\.label) == ["Как есть", "Зеркально", "Вверх ногами", "Зеркально + 180°"])
+
+    // у каждой плитки есть справка, и у новых она говорит главное
+    for tool in MonitorTool.allCases { #expect(!tool.help.isEmpty, "\(tool)") }
+    // «Авто» — по профилю с заводскими гаммами Sony; перенастроенный профиль — вручную
+    for pp in ["PP7", "S-Log2", "PP8", "PP9", "S-Log3", "PP10", "HLG"] { #expect(MonitorTool.lut.help.contains(pp), "\(pp)") }
+    #expect(MonitorTool.probe.help.contains("Касание кадра ставит пипетку; пока она включена, фокус касанием не ставится."))
+    #expect(MonitorTool.vectorscope.help.contains("×2"))
+    #expect(MonitorTool.orientation.help.contains("Зеркально") && MonitorTool.orientation.help.contains("Вверх ногами"))
+}
+
+@Test func lutIsSetByItsAPIValues() {
+    var assist = MonitorAssist()
+    let took = assist.set(.lut, "auto")
+    #expect(took)
+    #expect(assist.lut == .auto)
+    #expect(assist.value(.lut) == "auto")
+    // все семь значений — в обе стороны
+    for mode in MonitorAssist.LUTMode.allCases {
+        let ok = assist.set(.lut, mode.rawValue)
+        #expect(ok)
+        #expect(assist.lut == mode)
+        #expect(assist.value(.lut) == mode.rawValue)
+    }
+    assist.set(.lut, "slog2")
+    // чужие значения не принимаются и ничего не меняют
+    let bad = ["bogus", "S-Log2", "on", "", "AUTO"].map { assist.set(.lut, $0) }
+    #expect(bad == [false, false, false, false, false])
+    #expect(assist.lut == .slog2)
+    #expect(MonitorAssist.LUTMode.allCases.map(\.rawValue) == ["off", "auto", "slog3cine", "slog3", "slog2", "hlg", "file"])
+}
+
+@Test func orientationIsSetByItsAPIValues() {
+    var assist = MonitorAssist()
+    let took = assist.set(.orientation, "180")
+    #expect(took)
+    #expect(assist.orientation == .rotate180)
+    #expect(assist.value(.orientation) == "180")
+    for o in FrameOrientation.allCases {
+        let ok = assist.set(.orientation, o.rawValue)
+        #expect(ok)
+        #expect(assist.orientation == o)
+        #expect(assist.value(.orientation) == o.rawValue)
+    }
+    assist.set(.orientation, "mirror")
+    // в API — «180», а не имя варианта
+    let bad = ["rotate180", "90", "flip", "on"].map { assist.set(.orientation, $0) }
+    #expect(bad == [false, false, false, false])
+    #expect(assist.orientation == .mirror)
+}
+
+@Test func vectorscopeAndProbeAreOnOffInTheAPI() {
+    var assist = MonitorAssist()
+    #expect(assist.value(.vectorscope) == "off" && assist.value(.probe) == "off")
+    let on = [assist.set(.vectorscope, "on"), assist.set(.probe, "on")]
+    #expect(on == [true, true])
+    #expect(assist.vectorscope && assist.probe)
+    #expect(assist.value(.vectorscope) == "on" && assist.value(.probe) == "on")
+    let off = [assist.set(.vectorscope, "off"), assist.set(.probe, "off")]
+    #expect(off == [true, true])
+    #expect(!assist.vectorscope && !assist.probe)
+    // как у false color: «true» и «1» тоже читаются
+    let words = [assist.set(.vectorscope, "true"), assist.set(.probe, "1")]
+    #expect(words == [true, true])
+    #expect(assist.vectorscope && assist.probe)
+    let bad = [assist.set(.vectorscope, "maybe"), assist.set(.probe, "2"), assist.set(.probe, "")]
+    #expect(bad == [false, false, false])
+    #expect(assist.vectorscope && assist.probe)
+}
+
+@Test func newToolsLightUpTheirTilesWhenOn() {
+    var assist = MonitorAssist()
+    for tool in [MonitorTool.lut, .vectorscope, .probe, .orientation] { #expect(!assist.isOn(tool), "\(tool)") }
+    assist.set(.lut, "hlg")
+    assist.set(.vectorscope, "on")
+    assist.set(.probe, "on")
+    assist.set(.orientation, "mirror180")
+    for tool in [MonitorTool.lut, .vectorscope, .probe, .orientation] { #expect(assist.isOn(tool), "\(tool)") }
+    // «Авто» тоже горит, даже когда профиль не опознан: гасит её сама плитка
+    assist.set(.lut, "auto")
+    #expect(assist.isOn(.lut))
+}
+
+@Test func lutToggleRemembersTheLastValue() {
+    var assist = MonitorAssist()
+    // в первый раз — «Авто», первое значение после «Выкл»
+    assist.toggle(.lut)
+    #expect(assist.lut == .auto)
+    // после «Авто»: выкл, и снова «Авто»
+    assist.set(.lut, "auto")
+    assist.toggle(.lut)
+    #expect(assist.lut == .off)
+    assist.toggle(.lut)
+    #expect(assist.lut == .auto)
+    // запомнился последний выбор, а не первый
+    assist.set(.lut, "slog2")
+    assist.toggle(.lut)
+    #expect(assist.lut == .off)
+    assist.toggle(.lut)
+    #expect(assist.lut == .slog2)
+    assist.set(.lut, "file")
+    assist.toggle(.lut)
+    assist.toggle(.lut)
+    #expect(assist.lut == .file)
+}
+
+@Test func otherNewToolsToggleLikeTheOldOnes() {
+    var assist = MonitorAssist()
+    assist.toggle(.vectorscope)
+    assist.toggle(.probe)
+    assist.toggle(.orientation)
+    #expect(assist.vectorscope && assist.probe)
+    #expect(assist.orientation == .mirror)
+    assist.set(.orientation, "mirror180")
+    assist.toggle(.orientation)
+    #expect(assist.orientation == .off)
+    assist.toggle(.orientation)
+    #expect(assist.orientation == .mirror180)
+    assist.toggle(.vectorscope)
+    assist.toggle(.probe)
+    #expect(!assist.vectorscope && !assist.probe)
+    assist.toggle(.vectorscope)
+    #expect(assist.vectorscope)
+}
+
+@Test func newToolsStepThroughTheirOptions() {
+    var assist = MonitorAssist()
+    #expect(assist.stepped(.lut, by: 1) == "auto")
+    assist.set(.lut, "hlg")
+    #expect(assist.stepped(.lut, by: 1) == "file")
+    #expect(assist.stepped(.lut, by: 5) == "file")
+    #expect(assist.stepped(.lut, by: -1) == "slog2")
+    assist.set(.orientation, "mirror")
+    #expect(assist.stepped(.orientation, by: -1) == "off")
+    #expect(assist.stepped(.orientation, by: 1) == "180")
+    #expect(assist.stepped(.vectorscope, by: 1) == "on")
+    #expect(MonitorAssist.accepts(.lut, "slog3cine"))
+    #expect(!MonitorAssist.accepts(.lut, "slog4"))
+    #expect(MonitorAssist.accepts(.orientation, "180") && !MonitorAssist.accepts(.orientation, "rotate180"))
+    #expect(MonitorAssist.accepts(.probe, "on") && !MonitorAssist.accepts(.probe, "true"))
+}
+
+@Test func lutTileLabelFollowsTheChoice() {
+    var assist = MonitorAssist()
+    #expect(assist.label(.lut) == "Выкл")
+    assist.set(.lut, "auto")
+    // подпись «Авто: S-Log3» решает LUTChoice по профилю камеры; здесь — «Авто»
+    #expect(assist.label(.lut) == "Авто")
+    assist.set(.lut, "slog3cine")
+    #expect(assist.label(.lut) == "S-Log3 Cine")
+    assist.set(.lut, "hlg")
+    #expect(assist.label(.lut) == "HLG")
+    // свой файл: на плитке его имя; файл ещё не выбран — «Свой»
+    assist.set(.lut, "file")
+    #expect(assist.label(.lut) == "Свой")
+    assist.lutFile = "Тёплый закат"
+    #expect(assist.label(.lut) == "Тёплый закат")
+    assist.lutFile = ""
+    #expect(assist.label(.lut) == "Свой")
+    // файл помнится, но при другом выборе не показывается
+    assist.lutFile = "Тёплый закат"
+    assist.set(.lut, "slog2")
+    #expect(assist.label(.lut) == "S-Log2")
+    assist.set(.lut, "off")
+    #expect(assist.label(.lut) == "Выкл")
+}
+
+@Test func pictureTileShowsTheShortLabel() {
+    var assist = MonitorAssist()
+    // на плитке — короткое значение, в полосе вариантов — длинное
+    #expect(assist.label(.orientation) == "—")
+    assist.set(.orientation, "mirror")
+    #expect(assist.label(.orientation) == "Зеркало")
+    assist.set(.orientation, "180")
+    #expect(assist.label(.orientation) == "180°")
+    assist.set(.orientation, "mirror180")
+    #expect(assist.label(.orientation) == "Зеркало 180°")
+    assist.set(.vectorscope, "on")
+    assist.set(.probe, "on")
+    #expect(assist.label(.vectorscope) == "Вкл" && assist.label(.probe) == "Вкл")
+}
+
+@Test func pixelsAndPictureTransformFollowTheTools() {
+    #expect(!MonitorAssist().needsPixels && !MonitorAssist().transformsPicture && !MonitorAssist().isActive)
+    // (инструмент, значение, нужны ли точки кадра, меняет ли картинку, нужен ли растр зебры/пикинга)
+    let cases: [(MonitorTool, String, pixels: Bool, transforms: Bool, raster: Bool)] = [
+        (.zebra, "100", true, false, true), (.falseColor, "on", true, false, true), (.peaking, "low", true, false, true),
+        (.vectorscope, "on", true, false, false), (.probe, "on", true, false, false),
+        (.lut, "auto", false, true, false), (.lut, "slog3", false, true, false), (.lut, "file", false, true, false),
+        (.orientation, "mirror", false, true, false), (.orientation, "180", false, true, false),
+        (.orientation, "mirror180", false, true, false),
+        (.grid, "thirds", false, false, false), (.center, "on", false, false, false),
+        (.frameMarker, "9:16", false, false, false), (.safeZone, "90", false, false, false),
+        (.overlay, "50", false, false, false),
+    ]
+    for (tool, value, pixels, transforms, raster) in cases {
+        var assist = MonitorAssist()
+        assist.set(tool, value)
+        #expect(assist.needsPixels == pixels, "\(tool) \(value)")
+        #expect(assist.transformsPicture == transforms, "\(tool) \(value)")
+        #expect(assist.needsRaster == raster, "\(tool) \(value)")
+        // «Всё — выключить» доступна, пока включено хоть что-то
+        #expect(assist.isActive, "\(tool) \(value)")
+    }
+    // цвет пикинга без пикинга ничего не включает
+    var color = MonitorAssist()
+    color.set(.peakingColor, "blue")
+    #expect(!color.needsPixels && !color.transformsPicture && !color.isActive)
+    // настройки, которые сами ничего не включают
+    var settings = MonitorAssist()
+    settings.lutFile = "Тёплый"
+    settings.lutScopes = false
+    settings.vectorscopeZoom = 2
+    #expect(!settings.needsPixels && !settings.transformsPicture && !settings.isActive)
+}
+
+@Test func turnOffAllSwitchesTheNewToolsOffButKeepsTheirSettings() {
+    var assist = MonitorAssist()
+    assist.set(.lut, "slog3")
+    assist.lutFile = "Тёплый"
+    assist.lutScopes = false
+    assist.set(.vectorscope, "on")
+    assist.vectorscopeZoom = 2
+    assist.set(.probe, "on")
+    assist.set(.orientation, "mirror")
+    assist.set(.zebra, "95")
+    #expect(assist.isActive && assist.needsPixels && assist.transformsPicture)
+    assist.turnOffAll()
+    #expect(assist.lut == .off)
+    #expect(!assist.vectorscope && !assist.probe)
+    #expect(assist.orientation == .off)
+    #expect(assist.zebra == .off)
+    #expect(!assist.isActive && !assist.needsPixels && !assist.transformsPicture)
+    // помощь «по картинке с LUT», масштаб вектороскопа и выбранный файл — не включатели, остаются как были
+    #expect(!assist.lutScopes)
+    #expect(assist.vectorscopeZoom == 2)
+    #expect(assist.lutFile == "Тёплый")
+    // запомненные значения тоже: повторное касание плиток возвращает прежнее
+    assist.toggle(.lut)
+    assist.toggle(.orientation)
+    #expect(assist.lut == .slog3 && assist.orientation == .mirror)
+}
+
+@Test func settingsWithoutTheNewKeysReadAsDefaults() throws {
+    // JSON, записанный версией до LUT, вектороскопа и картинки: только старые ключи
+    let old = try JSONDecoder().decode(
+        MonitorAssist.self, from: Data(#"{"zebra":"95","falseColor":true,"overlay":"40","lastOn":{"zebra":"95"}}"#.utf8))
+    #expect(old.zebra == .above95 && old.falseColor && old.overlay.percent == 40)
+    #expect(old.lut == .off)
+    #expect(old.lutFile == nil)
+    #expect(old.lutScopes)
+    #expect(!old.vectorscope)
+    #expect(old.vectorscopeZoom == 1)
+    #expect(!old.probe)
+    #expect(old.orientation == .off)
+    #expect(old.transformsPicture == false)
+    #expect(try JSONDecoder().decode(MonitorAssist.self, from: Data("{}".utf8)) == MonitorAssist())
+    // в новой настройке без включённого — «по картинке с LUT», масштаб ×1, файла нет
+    let fresh = MonitorAssist()
+    #expect(fresh.lut == .off && fresh.lutFile == nil && fresh.lutScopes && !fresh.vectorscope)
+    #expect(fresh.vectorscopeZoom == 1 && !fresh.probe && fresh.orientation == .off)
+}
+
+@Test func settingsWithTheNewKeysSurviveCoding() throws {
+    var assist = MonitorAssist()
+    assist.set(.lut, "file")
+    assist.lutFile = "Тёплый закат"
+    assist.lutScopes = false
+    assist.set(.vectorscope, "on")
+    assist.vectorscopeZoom = 2
+    assist.set(.probe, "on")
+    assist.set(.orientation, "mirror180")
+    assist.set(.zebra, "70")
+    let data = try JSONEncoder().encode(assist)
+    let decoded = try JSONDecoder().decode(MonitorAssist.self, from: data)
+    #expect(decoded == assist)
+    #expect(decoded.lut == .file && decoded.lutFile == "Тёплый закат" && !decoded.lutScopes)
+    #expect(decoded.vectorscope && decoded.vectorscopeZoom == 2 && decoded.probe)
+    #expect(decoded.orientation == .mirror180)
+    // запомненные значения новых плиток тоже доезжают
+    #expect(decoded.lastOn["lut"] == "file" && decoded.lastOn["orientation"] == "mirror180")
+
+    // как это лежит на диске и читается Android: выбор из нескольких — строкой, вкл/выкл — bool, масштаб — число
+    let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    #expect(json["lut"] as? String == "file")
+    #expect(json["lutFile"] as? String == "Тёплый закат")
+    #expect(json["lutScopes"] as? Bool == false)
+    #expect(json["vectorscope"] as? Bool == true)
+    #expect(json["vectorscopeZoom"] as? Int == 2)
+    #expect(json["probe"] as? Bool == true)
+    #expect(json["orientation"] as? String == "mirror180")
+    #expect(json["falseColor"] as? Bool == false)
+    // «180» лежит строкой, как и все значения плиток
+    var turned = MonitorAssist()
+    turned.set(.orientation, "180")
+    let turnedJSON = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(turned)) as? [String: Any])
+    #expect(turnedJSON["orientation"] as? String == "180")
+    // файла нет — ключа нет
+    let plain = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(MonitorAssist())) as? [String: Any])
+    #expect(plain["lutFile"] == nil)
+}
+
+@Test func settingsWrittenByAnotherPlatformAreRead() throws {
+    // JSON так, как его пишет Android: ключи и значения те же
+    let wire = #"{"zebra":"off","lut":"slog3cine","lutFile":"Look 1","lutScopes":false,"vectorscope":true,"#
+        + #""vectorscopeZoom":2,"probe":true,"orientation":"180","lastOn":{"lut":"slog3cine"}}"#
+    let assist = try JSONDecoder().decode(MonitorAssist.self, from: Data(wire.utf8))
+    #expect(assist.lut == .slog3cine)
+    #expect(assist.lutFile == "Look 1")
+    #expect(!assist.lutScopes)
+    #expect(assist.vectorscope)
+    #expect(assist.vectorscopeZoom == 2)
+    #expect(assist.probe)
+    #expect(assist.orientation == .rotate180)
+    #expect(assist.needsPixels && assist.transformsPicture)
+}
+
+@Test func brokenNewKeysFallBackToDefaults() throws {
+    // неизвестное значение, неверный тип и неверный масштаб — как «не записано»; остальное читается
+    let broken = #"{"zebra":"100","lut":"bogus","lutFile":5,"lutScopes":"no","vectorscope":"on","vectorscopeZoom":3,"#
+        + #""probe":"yes","orientation":"sideways"}"#
+    let assist = try JSONDecoder().decode(MonitorAssist.self, from: Data(broken.utf8))
+    #expect(assist.zebra == .above100)
+    #expect(assist.lut == .off)
+    #expect(assist.lutFile == nil)
+    #expect(assist.lutScopes)
+    #expect(!assist.vectorscope)
+    #expect(assist.vectorscopeZoom == 1)
+    #expect(!assist.probe)
+    #expect(assist.orientation == .off)
+    // масштаб — только 1 и 2
+    for (text, zoom) in [("1", 1), ("2", 2), ("0", 1), ("-2", 1), ("4", 1)] {
+        let decoded = try JSONDecoder().decode(MonitorAssist.self, from: Data(#"{"vectorscopeZoom":\#(text)}"#.utf8))
+        #expect(decoded.vectorscopeZoom == zoom, "\(text)")
+    }
+    // «null» вместо файла — файла нет
+    let none = try JSONDecoder().decode(MonitorAssist.self, from: Data(#"{"lut":"file","lutFile":null}"#.utf8))
+    #expect(none.lut == .file && none.lutFile == nil)
+}
+
 // MARK: - Зебра и false color
 
 @Test func zebraThresholdsFollowTheWhiteLevel() {

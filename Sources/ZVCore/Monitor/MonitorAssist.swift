@@ -82,15 +82,34 @@ public struct MonitorAssist: Codable, Equatable, Sendable {
         public static func steps(_ opacity: Double) -> Overlay { Overlay(percent: Int((opacity * 20).rounded()) * 5) }
     }
 
+    /// LUT для превью: S-Log и HLG на экране выглядят привычно. «Авто» выбирает LUT по профилю изображения камеры
+    /// (какой именно — решает `LUTChoice`), следующие четыре — встроенные, «Свой» — файл .cube из `lutFile`.
+    public enum LUTMode: String, Codable, CaseIterable, Sendable {
+        case off, auto, slog3cine, slog3, slog2, hlg, file
+    }
+
     public var zebra = Zebra.off
     public var falseColor = false
     public var peaking = Peaking.off
     public var peakingColor = PeakingColor.red
+    public var lut = LUTMode.off
+    /// Какой свой LUT выбран — имя файла без расширения; nil — ни один. Остаётся и при другом выборе, и после
+    /// «Всё — выключить».
+    public var lutFile: String?
+    /// Помощь (гистограмма, волновая форма, вектороскоп, зебра, false color, пикинг, пипетка) считать по картинке
+    /// с LUT, а не по сигналу камеры. Не плитка и не включатель: «Всё — выключить» её не трогает.
+    public var lutScopes = true
+    public var vectorscope = false
+    /// Масштаб вектороскопа: 1 или 2. Не плитка: «Всё — выключить» его не трогает.
+    public var vectorscopeZoom = 1
+    public var probe = false
     public var grid = Grid.off
     public var center = false
     public var frameMarker = FrameMarker.off
     public var safeZone = SafeZone.off
     public var overlay = Overlay.off
+    /// Зеркало и переворот картинки на экране — плитка «Картинка».
+    public var orientation = FrameOrientation.off
     /// Последнее включённое значение каждого инструмента — к нему возвращает повторное касание выбранной плитки.
     public var lastOn: [String: String] = [:]
 
@@ -98,42 +117,60 @@ public struct MonitorAssist: Codable, Equatable, Sendable {
 
     public static let none = MonitorAssist()
 
-    /// Что считается по точкам кадра: зебра, false color, пикинг.
+    /// Что рисуется растром поверх кадра: зебра, false color, пикинг.
     public var needsRaster: Bool { zebra != .off || falseColor || peaking != .off }
+
+    /// Нужны ли точки кадра: растр помощи, вектороскоп или пипетка.
+    public var needsPixels: Bool { needsRaster || vectorscope || probe }
 
     /// Что рисуется линиями поверх кадра: сетка, центр, рамка, безопасная зона.
     public var hasMarkers: Bool { grid != .off || center || frameMarker != .off || safeZone != .off }
 
+    /// Меняет ли картинку на экране: LUT и зеркало с переворотом. Без них преобразования нет и оно ничего не стоит.
+    public var transformsPicture: Bool { lut != .off || orientation != .off }
+
     /// Включено хоть что-то.
-    public var isActive: Bool { needsRaster || hasMarkers || overlay != .off }
+    public var isActive: Bool { needsPixels || transformsPicture || hasMarkers || overlay != .off }
 
     public init(from decoder: Decoder) throws {
-        // новые инструменты в старых настройках — выключены
+        // новые инструменты в старых настройках — выключены; чужое значение или неверный тип — как «не записано»
         let c = try decoder.container(keyedBy: CodingKeys.self)
         zebra = (try? c.decode(Zebra.self, forKey: .zebra)) ?? .off
         falseColor = (try? c.decode(Bool.self, forKey: .falseColor)) ?? false
         peaking = (try? c.decode(Peaking.self, forKey: .peaking)) ?? .off
         peakingColor = (try? c.decode(PeakingColor.self, forKey: .peakingColor)) ?? .red
+        lut = (try? c.decode(LUTMode.self, forKey: .lut)) ?? .off
+        lutFile = try? c.decode(String.self, forKey: .lutFile)
+        lutScopes = (try? c.decode(Bool.self, forKey: .lutScopes)) ?? true
+        vectorscope = (try? c.decode(Bool.self, forKey: .vectorscope)) ?? false
+        // масштаб вектороскопа — только 1 и 2
+        vectorscopeZoom = (try? c.decode(Int.self, forKey: .vectorscopeZoom)) == 2 ? 2 : 1
+        probe = (try? c.decode(Bool.self, forKey: .probe)) ?? false
         grid = (try? c.decode(Grid.self, forKey: .grid)) ?? .off
         center = (try? c.decode(Bool.self, forKey: .center)) ?? false
         frameMarker = (try? c.decode(FrameMarker.self, forKey: .frameMarker)) ?? .off
         safeZone = (try? c.decode(SafeZone.self, forKey: .safeZone)) ?? .off
         overlay = (try? c.decode(Overlay.self, forKey: .overlay)) ?? .off
+        orientation = (try? c.decode(FrameOrientation.self, forKey: .orientation)) ?? .off
         lastOn = (try? c.decode([String: String].self, forKey: .lastOn)) ?? [:]
     }
 
-    /// Значение инструмента строкой — как в API: «95», «on», «9:16».
+    /// Значение инструмента строкой — как в API: «95», «on», «9:16», «slog3», «180».
     public func value(_ tool: MonitorTool) -> String {
         switch tool {
         case .zebra: return zebra.rawValue
         case .falseColor: return falseColor ? "on" : "off"
         case .peaking: return peaking.rawValue
         case .peakingColor: return peakingColor.rawValue
+        case .lut: return lut.rawValue
+        case .vectorscope: return vectorscope ? "on" : "off"
+        case .probe: return probe ? "on" : "off"
         case .grid: return grid.rawValue
         case .center: return center ? "on" : "off"
         case .frameMarker: return frameMarker.rawValue
         case .safeZone: return safeZone.rawValue
         case .overlay: return overlay.rawValue
+        case .orientation: return orientation.rawValue
         }
     }
 
@@ -145,11 +182,15 @@ public struct MonitorAssist: Codable, Equatable, Sendable {
         case .falseColor: guard let v = Self.flag(value) else { return false }; falseColor = v
         case .peaking: guard let v = Peaking(rawValue: value) else { return false }; peaking = v
         case .peakingColor: guard let v = PeakingColor(rawValue: value) else { return false }; peakingColor = v
+        case .lut: guard let v = LUTMode(rawValue: value) else { return false }; lut = v
+        case .vectorscope: guard let v = Self.flag(value) else { return false }; vectorscope = v
+        case .probe: guard let v = Self.flag(value) else { return false }; probe = v
         case .grid: guard let v = Grid(rawValue: value) else { return false }; grid = v
         case .center: guard let v = Self.flag(value) else { return false }; center = v
         case .frameMarker: guard let v = FrameMarker(rawValue: value) else { return false }; frameMarker = v
         case .safeZone: guard let v = SafeZone(rawValue: value) else { return false }; safeZone = v
         case .overlay: guard let v = Overlay(rawValue: value) else { return false }; overlay = v
+        case .orientation: guard let v = FrameOrientation(rawValue: value) else { return false }; orientation = v
         }
         if value != "off" { lastOn[tool.rawValue] = value }
         return true
@@ -187,7 +228,8 @@ public struct MonitorAssist: Codable, Equatable, Sendable {
         return steps.last { $0 < percent }.map(String.init) ?? "off"
     }
 
-    /// Всё выключить; запомненные значения остаются.
+    /// Всё выключить, зеркало и LUT тоже: «всё выключено» — картинка такая, какой её даёт камера. Запомненные значения,
+    /// выбранный файл LUT, помощь «по картинке с LUT» и масштаб вектороскопа остаются.
     public mutating func turnOffAll() {
         for tool in MonitorTool.allCases where tool.options.contains(where: { $0.value == "off" }) {
             set(tool, "off")
@@ -199,10 +241,17 @@ public struct MonitorAssist: Codable, Equatable, Sendable {
         tool == .peakingColor ? peaking != .off : value(tool) != "off"
     }
 
-    /// Подпись значения на плитке: «95 %», «Выкл», «Красный»; у наложения с ползунка — «40 %».
+    /// Подпись значения на плитке: «95 %», «Выкл», «Красный»; у наложения с ползунка — «40 %»; у своего LUT — имя файла
+    /// («Свой», пока файл не выбран); у картинки — короткое «Зеркало», «180°». «Авто: S-Log3» на плитке LUT складывает
+    /// `LUTChoice` по профилю камеры, здесь у «Авто» — «Авто».
     public func label(_ tool: MonitorTool) -> String {
-        let v = value(tool)
-        return tool.options.first { $0.value == v }?.label ?? (tool == .overlay ? "\(v) %" : v)
+        switch tool {
+        case .lut where lut == .file: return lutFile.flatMap { $0.isEmpty ? nil : $0 } ?? "Свой"
+        case .orientation: return orientation.label
+        default:
+            let v = value(tool)
+            return tool.options.first { $0.value == v }?.label ?? (tool == .overlay ? "\(v) %" : v)
+        }
     }
 
     private static func flag(_ value: String) -> Bool? {
@@ -214,9 +263,11 @@ public struct MonitorAssist: Codable, Equatable, Sendable {
     }
 }
 
-/// Плитки меню «Монитор» — по порядку на экране.
+/// Плитки меню «Монитор» — по порядку на экране: первая строка до «Пипетки», вторая — от «Сетки»; четырнадцатая плитка
+/// «Всё — выключить» не инструмент.
 public enum MonitorTool: String, CaseIterable, Sendable {
-    case zebra, falseColor, peaking, peakingColor, grid, center, frameMarker, safeZone, overlay
+    case zebra, falseColor, peaking, peakingColor, lut, vectorscope, probe
+    case grid, center, frameMarker, safeZone, overlay, orientation
 
     public var title: String {
         switch self {
@@ -224,11 +275,15 @@ public enum MonitorTool: String, CaseIterable, Sendable {
         case .falseColor: return "False color"
         case .peaking: return "Пикинг"
         case .peakingColor: return "Цвет пикинга"
+        case .lut: return "LUT"
+        case .vectorscope: return "Вектороскоп"
+        case .probe: return "Пипетка"
         case .grid: return "Сетка"
         case .center: return "Центр"
         case .frameMarker: return "Рамка"
         case .safeZone: return "Безоп. зона"
         case .overlay: return "Наложение"
+        case .orientation: return "Картинка"
         }
     }
 
@@ -241,14 +296,18 @@ public enum MonitorTool: String, CaseIterable, Sendable {
         func o(_ value: String, _ label: String) -> Option { Option(value: value, label: label) }
         switch self {
         case .zebra: return [o("off", "Выкл"), o("100", "100 %"), o("95", "95 %"), o("70", "70 % кожа")]
-        case .falseColor, .center: return [o("off", "Выкл"), o("on", "Вкл")]
+        case .falseColor, .center, .vectorscope, .probe: return [o("off", "Выкл"), o("on", "Вкл")]
         case .peaking: return [o("off", "Выкл"), o("low", "Низкий"), o("mid", "Средний"), o("high", "Высокий")]
         case .peakingColor: return [o("red", "Красный"), o("yellow", "Жёлтый"), o("white", "Белый"), o("blue", "Синий")]
+        case .lut:
+            return [o("off", "Выкл"), o("auto", "Авто"), o("slog3cine", "S-Log3 Cine"), o("slog3", "S-Log3"),
+                    o("slog2", "S-Log2"), o("hlg", "HLG"), o("file", "Свой")]
         case .grid: return [o("off", "Выкл"), o("thirds", "Трети"), o("squares", "Квадраты")]
         case .frameMarker:
             return [o("off", "Выкл"), o("9:16", "9:16"), o("4:5", "4:5"), o("1:1", "1:1"), o("4:3", "4:3"), o("2.39:1", "2.39:1")]
         case .safeZone: return [o("off", "Выкл"), o("90", "90 %"), o("80", "80 %")]
         case .overlay: return [o("off", "Выкл"), o("25", "25 %"), o("50", "50 %"), o("75", "75 %"), o("100", "100 %")]
+        case .orientation: return FrameOrientation.allCases.map { o($0.rawValue, $0.title) }
         }
     }
 
@@ -262,6 +321,16 @@ public enum MonitorTool: String, CaseIterable, Sendable {
                 + "розовый — кожа, жёлтый — почти белое, красный — пересвет; остальное — серым."
         case .peaking: return "Подсветка резких краёв — где фокус. С увеличением кадра работает точнее."
         case .peakingColor: return "Цвет подсветки резких краёв."
+        case .lut:
+            return "Превью S-Log и HLG с обычным контрастом и цветом — только на экране. «Авто» берёт LUT по профилю "
+                + "изображения камеры с заводскими гаммами Sony (PP7 — S-Log2, PP8 и PP9 — S-Log3, PP10 — HLG); если "
+                + "профиль перенастроен, выберите LUT вручную. «Свой» — файл .cube."
+        case .vectorscope:
+            return "Цвета кадра на круге: направление — оттенок, расстояние от центра — насыщенность, наклонная "
+                + "линия — тон кожи. Касание панели — масштаб ×2, чтобы разглядеть бледные цвета лога."
+        case .probe:
+            return "Касание кадра ставит пипетку; пока она включена, фокус касанием не ставится. Метка показывает "
+                + "яркость в процентах, R, G, B и зону false color — среднее по квадрату 5×5 точек; её можно тащить."
         case .grid: return "Сетка по третям или квадратами — для композиции."
         case .center: return "Крестик в центре кадра."
         case .frameMarker: return "Рамка другого формата: что войдёт в вертикальное видео (9:16), пост (4:5, 1:1) или кино (2.39:1)."
@@ -269,6 +338,9 @@ public enum MonitorTool: String, CaseIterable, Sendable {
         case .overlay:
             return "Эталонный кадр поверх живого — повторить сцену. Эталон — текущий кадр, картинка из файла или снимок "
                 + "из галереи; прозрачность и «спрятать» — на панели наложения."
+        case .orientation:
+            return "Только на экране: «Зеркально» — как в зеркале, чтобы снимать себя; «Вверх ногами» — камера на риге "
+                + "или подвесе перевёрнута. Снимки, файлы и сама камера остаются как есть."
         }
     }
 }
