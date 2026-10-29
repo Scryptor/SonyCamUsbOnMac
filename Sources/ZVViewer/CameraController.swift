@@ -75,6 +75,9 @@ final class CameraController {
     /// Что камера сообщает о себе сверх свойств: подписи списков, версия кода, данные объектива (0x9215, 0x9216, 0x9223) —
     /// только новые камеры Sony. Экраны видят это через `names(for:)`, `focusDistance` и другие в CameraController+OtherCameras.
     let info = CameraInfo()
+    /// Что у камеры на связи стоит на месте «Творческого стиля»: он сам или Creative Look (новые камеры Sony). Меняется редко —
+    /// следить за ним удобнее, чем за всеми свойствами: выбор в Fn переезжает вместе с камерой (`ScreenState.followSlots`).
+    private(set) var creativeSlot: SettingID = .creativeStyle
     /// Метки фокуса A и B всех камер: у каждой свои, до выхода из программы (в настройки не пишутся).
     private(set) var focusMarkBook = FocusMarkBook()
     /// К какой метке («A» или «B») сейчас едет фокус; nil — не едет.
@@ -1271,6 +1274,7 @@ final class CameraController {
                 guard let self, !Task.isCancelled else { return }
                 self.deviceInfo = await session.deviceInfo
                 self.noteCameraIdentity()
+                self.info.identify(self.currentCameraID)
                 self.phase = .settling
                 self.startStreams(session, onEnded: onFailure)
                 try await session.waitUntilReady()
@@ -1281,7 +1285,7 @@ final class CameraController {
                 self.finishReconnect()
                 self.startQuality(session)
                 // подписи и данные объектива новых камер — после того, как сеанс готов, и не задерживая его
-                self.info.begin(session, properties: self.properties)
+                self.info.begin(session, camera: self.currentCameraID, properties: self.properties)
                 onReady()
             } catch is CancellationError {
                 return
@@ -1538,6 +1542,7 @@ final class CameraController {
         recordingStartedAt = handed.recordingStartedAt
         apply(handed.properties)
         noteCameraIdentity()
+        info.identify(currentCameraID)
         startStreams(session, onEnded: { [weak self] in
             Task { [weak self] in
                 let loss = await transport.loss
@@ -1548,7 +1553,7 @@ final class CameraController {
             for await status in transport.linkStatus { self?.linkChanged(status) }
         })
         phase = .ready
-        info.begin(session, properties: properties)
+        info.begin(session, camera: currentCameraID, properties: properties)
         wifiPolicy.connected()
         wifiPolicy.sessionReady()
         // в ленте превью было низкого качества — на главной сразу высокое, дальше решает политика
@@ -2164,6 +2169,8 @@ final class CameraController {
     private func apply(_ snapshot: [UInt16: SonyProperty]) {
         properties = snapshot
         lastSnapshotAt = Date()
+        let slot = SettingCatalog.resolved(.creativeStyle, available: Set(snapshot.keys))
+        if slot != creativeSlot { creativeSlot = slot }
         // 0xE086 стал 1 (или перестал быть 1) — данные объектива появились (или пропали)
         if let session { info.propertiesChanged(snapshot, session: session) }
         // вышли из ручного фокуса (Near/Far закрылся): перевод к метке кончился, фокусом занимается камера
@@ -2387,6 +2394,7 @@ final class CameraController {
         frameGapMs = 0
         isFrameStale = false
         properties = [:]
+        creativeSlot = .creativeStyle
         // камеры нет — «Авто» не по чему выбирать
         assistInput.setCamera(pictureProfile: nil, gamma: nil, colorMode: nil)
         deviceInfo = nil

@@ -477,6 +477,14 @@ final class ScreenState {
         if fnOpen { closeOverlays() } else { openFn(nil) }
     }
 
+    /// Камера на связи другая (или её нет): на месте «Творческого стиля» у неё стоит Creative Style или Creative Look. Выбор в Fn и
+    /// открытая строка во «Всех настройках» переезжают на то, что стоит на их месте теперь, — иначе лента сказала бы «камера
+    /// сейчас не даёт менять…», а плитка не горела бы. `available` — коды свойств камеры.
+    func followSlots(available: Set<UInt16>) {
+        selected = SettingCatalog.slot(of: selected, available: available)
+        editing = editing.map { SettingCatalog.slot(of: $0, available: available) }
+    }
+
     func openFn(_ id: SettingID?) {
         if let id { selected = id }
         allSettingsOpen = false

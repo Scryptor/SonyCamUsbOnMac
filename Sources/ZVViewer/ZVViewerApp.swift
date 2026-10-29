@@ -73,6 +73,9 @@ struct RootView: View {
         .onAppear { screen.attach(controller.assistInput) }
         // окно пресетов просят открыть список и API, а открыть окно может только вид
         .onChange(of: screen.presetsWindowRequest) { openWindow(id: PresetsWindow.id) }
+        // у камеры на связи на месте «Творческого стиля» — Creative Style (ZV-E10) или Creative Look (новые камеры): выбор в Fn и
+        // открытая строка переезжают вместе с камерой, в какую бы сторону она ни сменилась
+        .onChange(of: controller.creativeSlot) { screen.followSlots(available: Set(controller.properties.keys)) }
         // камера сменила режим — в окне пресетов другой список: выбран его текущий пресет, иначе первый. Здесь, а не в
         // самом окне: закрытое окно узнало бы о смене только при следующем открытии и сбило бы выбор, с которым его открыли
         .onChange(of: controller.presetMode) {

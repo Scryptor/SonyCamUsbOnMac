@@ -763,17 +763,16 @@ private let newOperations: [UInt16] = [SonyOp.getDisplayStringList, SonyOp.getVe
     let cam = try newerCamera(lensEnabled: 0)
     let session = try await readySession(cam)
     #expect(try await session.lensInformation() == nil)
-    // на камере поставили объектив с электроникой: 0xE086 стал 1, камера сообщила об изменении свойств
-    var updates = session.snapshots.makeAsyncIterator()
-    _ = await updates.next()
+    // на камере поставили объектив с электроникой: 0xE086 стал 1, камера сообщила об изменении свойств; ждём перечитывания с
+    // потолком — сломанный код роняет проверку, а не подвешивает тест
     cam.setCurrent(SonyProp.lensInfoEnabled, 1)
     cam.emit(PTPEvent(code: Sony.propertyChangedEvent))
-    #expect(await updates.next()?[SonyProp.lensInfoEnabled]?.current == .int(1))
+    #expect(await eventually { await session.properties[SonyProp.lensInfoEnabled]?.current == .int(1) })
     #expect(try await session.lensInformation()?.pairs.count == 12)
     // и снова снят
     cam.setCurrent(SonyProp.lensInfoEnabled, 0)
     cam.emit(PTPEvent(code: Sony.propertyChangedEvent))
-    #expect(await updates.next()?[SonyProp.lensInfoEnabled]?.current == .int(0))
+    #expect(await eventually { await session.properties[SonyProp.lensInfoEnabled]?.current == .int(0) })
     #expect(try await session.lensInformation() == nil)
 }
 
@@ -848,6 +847,92 @@ private let newOperations: [UInt16] = [SonyOp.getDisplayStringList, SonyOp.getVe
     await #expect(throws: TransportError.disconnected) { try await session.loadDisplayStrings() }
     // обрыв — не повод пробовать другой тип: второй запрос в оборванную связь не уходит
     #expect(cam.sent.filter { $0.op == SonyOp.getDisplayStringList }.count == 1)
+}
+
+// MARK: Камера, которая не отвечает: тайм-аут — не повод спрашивать ещё
+
+@Test func startupDisplayStringsDoNotAskAgainAfterATimeout() async throws {
+    // камера называет 0x9215, но молчит: транспорт ждёт 8 с и бросает тайм-аут. Второй запрос (0x13) ушёл бы в ту же тишину, а
+    // слежение за связью («камера не отвечает» через 15 с без ответа на операцию) закрыло бы сеанс на нём — и тихое
+    // переподключение пошло бы по кругу
+    let cam = try newerCamera()
+    let session = try await readySession(cam)
+    cam.timeoutOn = [SonyOp.getDisplayStringList]
+    await #expect(throws: TransportError.timeout(operation: SonyOp.getDisplayStringList)) {
+        try await session.loadDisplayStrings()
+    }
+    #expect(cam.sent.filter { $0.op == SonyOp.getDisplayStringList }.count == 1)
+}
+
+@Test func aTimeoutOfAnOptionalOperationReachesTheCallerAndLeavesTheSessionAlive() async throws {
+    let cam = try newerCamera()
+    let session = try await readySession(cam)
+    cam.timeoutOn = Set(newOperations)
+    await #expect(throws: TransportError.timeout(operation: SonyOp.getDisplayStringList)) { try await session.displayStrings(type: 0) }
+    await #expect(throws: TransportError.timeout(operation: SonyOp.getVendorCodeVersion)) { try await session.vendorCodeVersion() }
+    await #expect(throws: TransportError.timeout(operation: SonyOp.getLensInformation)) { try await session.lensInformation() }
+    // тайм-аут — не обрыв: сеанс жив, другие операции идут
+    #expect(await session.isReady)
+    cam.timeoutOn = []
+    #expect(try await session.vendorCodeVersion() == 310)
+}
+
+@Test func aCameraThatDoesNotAnswerAnOptionalOperationIsNotAskedAgain() {
+    var silent = SilentCameras()
+    #expect(!silent.skips("cam-1"))
+    // тайм-аут — камера записана; впервые — true: в журнал строка одна
+    let first = silent.note(TransportError.timeout(operation: SonyOp.getDisplayStringList), camera: "cam-1")
+    #expect(first)
+    #expect(silent.skips("cam-1"))
+    let again = silent.note(TransportError.timeout(operation: SonyOp.getLensInformation), camera: "cam-1")
+    #expect(!again)
+    // другая камера не затронута и записывается своим чередом
+    #expect(!silent.skips("cam-2"))
+    let other = silent.note(TransportError.timeout(operation: SonyOp.getVendorCodeVersion), camera: "cam-2")
+    #expect(other)
+    #expect(silent.skips("cam-2"))
+}
+
+@Test func onlyATimeoutMakesACameraSilent() {
+    var silent = SilentCameras()
+    let errors: [any Error] = [TransportError.disconnected, TransportError.failed("отправка"), PTPParseError.truncated(offset: 3),
+                               SessionError.operationFailed(operation: SonyOp.getDisplayStringList, code: 0x2006), CancellationError()]
+    for error in errors {
+        let noted = silent.note(error, camera: "cam")
+        #expect(!noted, "\(error)")
+    }
+    #expect(!silent.skips("cam"))
+}
+
+@Test func aCameraWithoutAnIdCannotBeRemembered() {
+    // id нет — запомнить некого: в следующем сеансе спросим снова
+    var silent = SilentCameras()
+    let noted = silent.note(TransportError.timeout(operation: SonyOp.getDisplayStringList), camera: nil)
+    #expect(!noted)
+    #expect(!silent.skips(nil))
+}
+
+// MARK: Выбор в Fn переезжает вместе с камерой
+
+@Test func creativeSelectionFollowsTheSlotWhenTheCameraChanges() {
+    let zv: Set<UInt16> = [SonyProp.creativeStyle]
+    let newer: Set<UInt16> = [SonyProp.creativeLook, SonyProp.ppGamma]
+    // выбрали «Творческий стиль» на ZV-E10, подключили новую камеру — выбран Creative Look; и обратно
+    #expect(SettingCatalog.slot(of: .creativeStyle, available: newer) == .creativeLook)
+    #expect(SettingCatalog.slot(of: .creativeLook, available: zv) == .creativeStyle)
+    // своё место у камеры остаётся как есть
+    #expect(SettingCatalog.slot(of: .creativeLook, available: newer) == .creativeLook)
+    #expect(SettingCatalog.slot(of: .creativeStyle, available: zv) == .creativeStyle)
+    // есть оба свойства — место за стилем (как в `resolved`); свойств нет (камеры нет) — тоже
+    #expect(SettingCatalog.slot(of: .creativeLook, available: [SonyProp.creativeStyle, SonyProp.creativeLook]) == .creativeStyle)
+    #expect(SettingCatalog.slot(of: .creativeStyle, available: []) == .creativeStyle)
+    #expect(SettingCatalog.slot(of: .creativeLook, available: []) == .creativeStyle)
+    // остальные настройки — как есть
+    for id in SettingID.allCases where id != .creativeStyle && id != .creativeLook {
+        #expect(SettingCatalog.slot(of: id, available: newer) == id, "\(id)")
+        #expect(SettingCatalog.slot(of: id, available: zv) == id, "\(id)")
+        #expect(SettingCatalog.slot(of: id, available: []) == id, "\(id)")
+    }
 }
 
 // MARK: - Фикстуры

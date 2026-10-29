@@ -121,7 +121,9 @@ public actor CameraSession {
     /// Подписи при подключении: сначала все списки (тип 0). Один список с неизвестным типом данных PTP обрывает разбор всего
     /// набора — тогда просим один Creative Look (0x13), единственное, что программа показывает; не вышло и это — подписей нет, и
     /// названия берутся из таблиц Sony. Ошибки не бросаются, а возвращаются: подписи не должны мешать подключению. Исключение —
-    /// обрыв связи и отмена: после них пробовать другой тип незачем.
+    /// обрыв связи, отмена и тайм-аут: после них пробовать другой тип незачем. Тайм-аут значит, что камера не отвечает: второй
+    /// запрос ушёл бы в ту же тишину, а слежение за связью («камера не отвечает» через 15 с без ответа на операцию) закрыло бы
+    /// на нём сеанс. Звать ли подписи снова в следующем сеансе, решает вызывающий (`SilentCameras`).
     public func loadDisplayStrings() async throws -> DisplayStringsLoad {
         var load = DisplayStringsLoad()
         guard supports(SonyOp.getDisplayStringList) else { return load }
@@ -130,11 +132,19 @@ public actor CameraSession {
                 load.strings = try await displayStrings(type: type)
                 return load
             } catch {
-                if error is CancellationError || (error as? TransportError) == .disconnected { throw error }
+                if error is CancellationError || Self.cameraIsGone(error) { throw error }
                 load.failures.append((type, error))
             }
         }
         return load
+    }
+
+    /// Связи с камерой нет или камера не отвечает: пробовать то же или другое дальше бессмысленно.
+    private static func cameraIsGone(_ error: any Error) -> Bool {
+        switch error as? TransportError {
+        case .disconnected?, .timeout?: return true
+        case .failed?, nil: return false
+        }
     }
 
     /// Версия кода производителя (0x9216), ×100: 310 — «3.10». Камера отдаёт её в параметре ответа. nil — камера операцию не

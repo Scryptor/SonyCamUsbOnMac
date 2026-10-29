@@ -18,21 +18,48 @@ final class CameraInfo {
 
     /// Строка в журнал (панель отладки и системный журнал); контроллер подставляет свой `note`.
     @ObservationIgnored var note: (String) -> Void = { _ in }
+    /// Чьи это подписи, версия и таблица: id камеры из списка знакомых. Другая камера в следующем сеансе (по Wi-Fi Direct у всех
+    /// один адрес, тихое переподключение может попасть не на ту) — прежнее ей не принадлежит.
+    @ObservationIgnored private var camera: String?
+    /// Камеры, которые не ответили на необязательную операцию: им новые операции не посылаем до перезапуска программы. Не
+    /// сбрасывается вместе с остальным — следующий сеанс той же камеры должен про это помнить.
+    @ObservationIgnored private var silent = SilentCameras()
+    /// Исходы 0xC218, о которых уже записано в журнал: во время перевода событие приходит на каждую запись цели, раз в 100 мс, и
+    /// журнал в 200 строк оборачивался бы за 20 с, вытесняя строки о подключении.
+    @ObservationIgnored private var focusResultsNoted: Set<Bool> = []
     /// Растёт, когда сеанс уходит: запоздалый ответ прежнего сеанса ничего не перепишет.
     @ObservationIgnored private var generation = 0
     /// Растёт с каждым запросом данных объектива: из двух запросов подряд остаётся ответ на последний.
     @ObservationIgnored private var lensRequest = 0
     /// Сеанс уже опрошен (`begin`) и не оборван: события и свойства принимаются.
     @ObservationIgnored private var active = false
+    /// Камеру можно спрашивать о новых операциях: она на них отвечала или ещё не пробовала.
+    private var asking: Bool { active && !silent.skips(camera) }
     /// 0xE086 в прошлых свойствах был 1: данные объектива просят, только когда он стал 1.
     @ObservationIgnored private var lensEnabled = false
 
-    /// Сеанс готов: подписи и версия кода — один раз, данные объектива — если 0xE086 = 1. `properties` — последние свойства камеры.
-    func begin(_ session: CameraSession, properties: [UInt16: SonyProperty]) {
+    /// Камера на связи названа (её DeviceInfo): если это не та, чьи подписи, версия и таблица здесь лежат, они стираются сразу —
+    /// опрос идёт только через несколько секунд после готовности сеанса, а до него чужие названия подписывали бы значения этой
+    /// камеры. Тихое переподключение по Wi-Fi Direct (у всех камер один адрес) может попасть не на ту.
+    func identify(_ camera: String?) {
+        if camera == nil || camera != self.camera {
+            strings = DisplayStrings()
+            vendorCodeVersion = nil
+            lens = nil
+        }
+        self.camera = camera
+    }
+
+    /// Сеанс готов: подписи и версия кода — один раз, данные объектива — если 0xE086 = 1. `camera` — id камеры, `properties` —
+    /// её последние свойства. Камера, которая раньше не ответила на необязательную операцию, не спрашивается совсем.
+    func begin(_ session: CameraSession, camera: String?, properties: [UInt16: SonyProperty]) {
         generation += 1
         let token = generation
-        active = true
+        identify(camera)
+        focusResultsNoted = []
         lensEnabled = properties[SonyProp.lensInfoEnabled]?.current.intValue == 1
+        active = true
+        guard asking else { return }
         Task { [weak self] in
             do {
                 // все списки; один сломанный список лишил бы остальных — тогда один Creative Look, а там и названия из таблиц
@@ -42,20 +69,21 @@ final class CameraInfo {
                     self.note("подписи камеры (0x9215, тип 0x\(String(failure.type, radix: 16, uppercase: true))): "
                               + Self.describe(failure.error))
                 }
-                if !load.strings.lists.isEmpty {
-                    self.strings = load.strings
-                    self.note("подписи камеры (0x9215): " + Self.summary(load.strings))
-                }
+                // что вышло, то и есть у камеры — и когда ничего: прежние подписи (камеры, которой уже нет) не остаются
+                self.strings = load.strings
+                if !load.strings.lists.isEmpty { self.note("подписи камеры (0x9215): " + Self.summary(load.strings)) }
             } catch {
-                self?.note("подписи камеры (0x9215): \(Self.describe(error))")
+                self?.failed(error, "подписи камеры (0x9215)", token: token)
             }
+            // камера промолчала на подписи — вторую необязательную операцию ей не шлём
+            guard let self, self.generation == token, self.asking else { return }
             do {
                 let version = try await session.vendorCodeVersion()
-                guard let self, self.generation == token else { return }
+                guard self.generation == token else { return }
                 self.vendorCodeVersion = version
                 if let version { self.note("версия кода производителя (0x9216): \(VendorCodeVersion.label(version))") }
             } catch {
-                self?.note("версия кода производителя (0x9216): \(Self.describe(error))")
+                self.failed(error, "версия кода производителя (0x9216)", token: token)
             }
         }
         fetchLens(session)
@@ -72,6 +100,7 @@ final class CameraInfo {
     /// Камеры больше нет: ничего о ней не помним.
     func reset() {
         suspend()
+        camera = nil
         strings = DisplayStrings()
         vendorCodeVersion = nil
         lens = nil
@@ -83,13 +112,18 @@ final class CameraInfo {
         guard active else { return }
         switch event {
         case let .displayListChanged(type):
-            fetchStrings(type: type, session)
+            if asking { fetchStrings(type: type, session) }
         case .lensChanged:
-            // таблица прежнего объектива теперь неверна: пока нет новой, расстояний нет
+            // таблица прежнего объектива теперь неверна: пока нет новой (или совсем — камера не отвечает), расстояний нет
             lens = nil
-            fetchLens(session)
+            if asking { fetchLens(session) }
         case let .focusPositionResult(reached):
-            note("абсолютный фокус (0xC218): " + (reached ? "дошёл до цели" : "до цели не дошёл"))
+            // по одной строке на исход за сеанс: чтобы было видно, что камера шлёт 0xC218 и с каким параметром, но не по строке на
+            // каждую запись цели во время перевода
+            if focusResultsNoted.insert(reached).inserted {
+                note("абсолютный фокус (0xC218): " + (reached ? "дошёл до цели" : "до цели не дошёл")
+                     + " — дальше такие события в журнал не пишу")
+            }
         }
     }
 
@@ -100,7 +134,7 @@ final class CameraInfo {
         guard enabled != lensEnabled else { return }
         lensEnabled = enabled
         if enabled {
-            fetchLens(session)
+            if asking { fetchLens(session) }
         } else {
             lensRequest += 1
             lens = nil
@@ -120,7 +154,7 @@ final class CameraInfo {
                 self.note("подписи камеры (0xC20F, тип 0x\(String(type, radix: 16, uppercase: true))): "
                           + (fresh.lists.isEmpty ? "списка больше нет" : Self.summary(fresh)))
             } catch {
-                self?.note("подписи камеры (0x9215, тип 0x\(String(type, radix: 16, uppercase: true))): \(Self.describe(error))")
+                self?.failed(error, "подписи камеры (0x9215, тип 0x\(String(type, radix: 16, uppercase: true)))", token: token)
             }
         }
     }
@@ -139,8 +173,23 @@ final class CameraInfo {
                 guard let self, self.generation == token, self.lensRequest == request else { return }
                 // лучше без расстояния, чем с неверным
                 self.lens = nil
-                self.note("данные объектива (0x9223): \(Self.describe(error))")
+                self.failed(error, "данные объектива (0x9223)", token: token)
             }
+        }
+    }
+
+    /// Операция не вышла. Тайм-аут — камера не отвечает: она записывается (`SilentCameras`), в этом сеансе и в следующих ей новых
+    /// операций больше не шлём, в журнал одна строка. Остальные ошибки — строка про саму операцию.
+    private func failed(_ error: any Error, _ what: String, token: Int) {
+        guard generation == token else { return }
+        if case let TransportError.timeout(operation)? = error as? TransportError {
+            if silent.note(error, camera: camera) {
+                note(String(format: "камера не ответила на операцию 0x%04X за время ожидания — новые операции Sony (0x9215, 0x9216, "
+                             + "0x9223) ей до перезапуска программы не посылаю: подписи Creative Look — из таблиц Sony, расстояний нет",
+                             operation))
+            }
+        } else {
+            note("\(what): \(Self.describe(error))")
         }
     }
 

@@ -41,4 +41,12 @@ public enum SettingCatalog {
               available.contains(SonyProp.creativeLook) else { return id }
         return .creativeLook
     }
+
+    /// Какая настройка стоит у этой камеры на месте `id` в Fn и во «Всех настройках», когда `id` — Creative Style или Creative
+    /// Look: у них одно место на двоих, и выбор, сделанный на камере с другим из них (в ленте значений, в открытой строке),
+    /// переезжает вместе с камерой — иначе лента сказала бы «камера сейчас не даёт менять…», а плитка не горела бы. Камеры нет
+    /// (свойств нет) — место за Creative Style, как в `resolved`. Остальные настройки — как есть.
+    public static func slot(of id: SettingID, available: Set<UInt16>) -> SettingID {
+        id == .creativeStyle || id == .creativeLook ? resolved(.creativeStyle, available: available) : id
+    }
 }

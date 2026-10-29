@@ -35,6 +35,7 @@ final class FakeCamera: PTPTransport, @unchecked Sendable {
     private var _applyWrites = true
     private var _liveViewReplies: [PTPReply] = []
     private var _disconnectOnNext: UInt16?
+    private var _timeoutOn: Set<UInt16> = []
     private var _busyOnNextPress: UInt16?
     private var _busyOnNextRelease: UInt16?
     private var _capturedFiles: [(String, Data)] = []
@@ -90,6 +91,12 @@ final class FakeCamera: PTPTransport, @unchecked Sendable {
         get { locked { _disconnectOnNext } }
         set { locked { _disconnectOnNext = newValue } }
     }
+    /// На эти операции камера не отвечает: транспорт ждёт ответа до своего тайм-аута и бросает `TransportError.timeout`. Каждый
+    /// запрос записывается в `sent`, как и обычный.
+    var timeoutOn: Set<UInt16> {
+        get { locked { _timeoutOn } }
+        set { locked { _timeoutOn = newValue } }
+    }
     /// Следующее нажатие этой кнопки (0x9207, значение 2) камера отклонит с DeviceBusy.
     var busyOnNextPress: UInt16? {
         get { locked { _busyOnNextPress } }
@@ -124,6 +131,7 @@ final class FakeCamera: PTPTransport, @unchecked Sendable {
                 eventContinuation.finish()
                 throw TransportError.disconnected
             }
+            if _timeoutOn.contains(operation) { throw TransportError.timeout(operation: operation) }
             let ok = PTPResponseCode.ok
             switch operation {
             case SonyOp.getDeviceInfo:
