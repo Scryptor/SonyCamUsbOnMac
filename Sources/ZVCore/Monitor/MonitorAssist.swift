@@ -198,6 +198,22 @@ public struct MonitorAssist: Codable, Equatable, Sendable {
         return true
     }
 
+    /// Выбрать свой LUT: режим «Свой» и этот файл. Прежний выбранный файл забывается.
+    public mutating func selectLUTFile(_ name: String) {
+        set(.lut, "file")
+        lutFile = name
+    }
+
+    /// Свой LUT удалили из папки. Выбранный (или просто помнившийся) файл забывается; если LUT был включён как «Свой»,
+    /// он выключается, и повторное «включить» даёт «Авто», а не «Свой» без файла. Встроенный LUT, включённый поверх
+    /// помнившегося файла, остаётся. Другой файл — ничего не меняется.
+    public mutating func lutFileDeleted(_ name: String) {
+        guard lutFile == name else { return }
+        lutFile = nil
+        if lut == .file { lut = .off }
+        if lastOn[MonitorTool.lut.rawValue] == "file" { lastOn[MonitorTool.lut.rawValue] = nil }
+    }
+
     /// Выключить, если включён, иначе вернуть последнее включённое значение (или первое после «Выкл»).
     /// У цвета пикинга «выкл» нет — он идёт по кругу.
     public mutating func toggle(_ tool: MonitorTool) {

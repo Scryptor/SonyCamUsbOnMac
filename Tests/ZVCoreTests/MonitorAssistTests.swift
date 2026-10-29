@@ -308,6 +308,50 @@ import Testing
     #expect(assist.label(.lut) == "Выкл")
 }
 
+@Test func choosingAFileSelectsTheOwnLUTMode() {
+    var assist = MonitorAssist()
+    assist.set(.lut, "slog3")
+    assist.selectLUTFile("Тёплый закат")
+    #expect(assist.lut == .file)
+    #expect(assist.lutFile == "Тёплый закат")
+    #expect(assist.label(.lut) == "Тёплый закат")
+    // выключили и включили снова — вернулись к файлу, а не к «Авто»
+    assist.set(.lut, "off")
+    assist.toggle(.lut)
+    #expect(assist.lut == .file && assist.lutFile == "Тёплый закат")
+    // выбрали другой — прежний забыт, режим тот же
+    assist.selectLUTFile("Холод")
+    #expect(assist.lut == .file && assist.lutFile == "Холод")
+}
+
+@Test func deletingTheChosenFileClearsTheChoice() {
+    var assist = MonitorAssist()
+    assist.selectLUTFile("a")
+    // удалили чужой — выбор на месте
+    assist.lutFileDeleted("b")
+    #expect(assist.lut == .file && assist.lutFile == "a")
+    // удалили выбранный — файла нет, LUT выключен, и «включить» теперь «Авто», а не «Свой» без файла
+    assist.lutFileDeleted("a")
+    #expect(assist.lutFile == nil)
+    #expect(assist.lut == .off)
+    assist.toggle(.lut)
+    #expect(assist.lut == .auto)
+}
+
+@Test func deletingTheRememberedFileKeepsAnotherLUTOn() {
+    // файл помнится, но на экране встроенный LUT: удаление забывает файл и не трогает то, что включено
+    var assist = MonitorAssist()
+    assist.selectLUTFile("c")
+    assist.set(.lut, "slog3")
+    assist.lutFileDeleted("c")
+    #expect(assist.lutFile == nil)
+    #expect(assist.lut == .slog3)
+    // выключили и включили — вернулся встроенный LUT, а не «Свой» без файла
+    assist.set(.lut, "off")
+    assist.toggle(.lut)
+    #expect(assist.lut == .slog3)
+}
+
 @Test func pictureTileShowsTheShortLabel() {
     var assist = MonitorAssist()
     // на плитке — короткое значение, в полосе вариантов — длинное

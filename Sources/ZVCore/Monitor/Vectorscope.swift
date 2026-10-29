@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 /// Вектороскоп: куда ложатся цвета кадра на плоскости цветоразностных Cb и Cr (Rec. 709). Серый — в середине, насыщенный
@@ -56,6 +57,21 @@ public enum Vectorscope {
     public static func bin(cb: Double, cr: Double, zoom: Int) -> (x: Int, y: Int)? {
         let index = cell(cb: cb, cr: cr, perUnit: binsPerUnit(zoom))
         return index < 0 ? nil : (index % bins, index / bins)
+    }
+
+    /// Где точка плоскости (Cb, Cr) лежит на панели: доли её ширины и высоты, y вниз. Плоскость — квадрат |Cb|, |Cr| ≤ 0,5/zoom
+    /// на всю панель, середина — серый. Это те же числа, что у `bin`: метка на сетке и корзина с таким цветом совпадают.
+    /// Что за краем плоскости (метки 75 % при ×2), выходит за 0…1. zoom меньше 1 считается за 1.
+    public static func plane(cb: Double, cr: Double, zoom: Int) -> CGPoint {
+        let perUnit = Double(max(zoom, 1))
+        return CGPoint(x: 0.5 + cb * perUnit, y: 0.5 - cr * perUnit)
+    }
+
+    /// Конец линии тона кожи на круге панели (радиус 0,5): из середины под углом `skinAngle` от +Cb против часовой стрелки.
+    /// Круг — край плоскости при любом масштабе, поэтому линия от масштаба не зависит.
+    public static var skinLineEnd: CGPoint {
+        let angle = skinAngle * .pi / 180
+        return CGPoint(x: 0.5 + 0.5 * cos(angle), y: 0.5 - 0.5 * sin(angle))
     }
 
     /// Метки цветных полос 75 %: красный, пурпурный, синий, голубой, зелёный, жёлтый — по тем же формулам, что точки кадра.

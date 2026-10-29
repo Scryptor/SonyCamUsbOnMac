@@ -32,8 +32,12 @@ struct LiveScreen: View {
             if !menus, screen.touchFocusOn, let point = framePoint(location) { controller.touchFocus(at: point) }
         }
         .onContinuousHover { _ in screen.noteActivity() }
-        // картинку перетащили на окно — она эталон наложения
+        // файл .cube перетащили на окно — это свой LUT: добавляется и сразу выбирается; картинка — эталон наложения
         .dropDestination(for: URL.self) { urls, _ in
+            if let cube = urls.first(where: isCubeFile) {
+                addLUT(cube, controller: controller, screen: screen)
+                return true
+            }
             guard let url = urls.first(where: isImageFile) else { return false }
             controller.takeReference(fromFile: url)
             screen.showOverlay()
@@ -89,7 +93,7 @@ struct LiveScreen: View {
             screen.noteActivity()
             return .handled
         }
-        // инструменты монитора: M — меню, Z — зебра, P — пикинг, C — false color
+        // инструменты монитора: M — меню, Z — зебра, P — пикинг, C — false color, L — LUT, V — вектороскоп, I — пипетка
         .onKeyPress(characters: CharacterSet(charactersIn: "mMьЬ")) { _ in
             guard screen.galleryShot == nil else { return .ignored }
             screen.toggleAssistMenu()
@@ -106,6 +110,12 @@ struct LiveScreen: View {
             guard screen.galleryShot == nil else { return .ignored }
             let key = press.characters.lowercased()
             screen.toggleAssist("zя".contains(key) ? .zebra : "pз".contains(key) ? .peaking : .falseColor)
+            return .handled
+        }
+        .onKeyPress(characters: CharacterSet(charactersIn: "lLдДvVмМiIшШ")) { press in
+            guard screen.galleryShot == nil else { return .ignored }
+            let key = press.characters.lowercased()
+            screen.toggleAssist("lд".contains(key) ? .lut : "vм".contains(key) ? .vectorscope : .probe)
             return .handled
         }
         // окно или программа ушли из фокуса, пока держали T или W, — отпускание клавиши сюда уже не придёт: стоп
@@ -180,6 +190,10 @@ struct LiveScreen: View {
             }
             if screen.waveformOn, let trace = controller.waveform, controller.review == nil, screen.galleryShot == nil {
                 FloatingWaveform(controller: controller, screen: screen, trace: trace, view: size)
+            }
+            // вектороскоп — тоже не среди элементов; прячется вместе с гистограммой: в просмотре снимка и в галерее
+            if screen.assist.vectorscope, let trace = controller.vectorscope, controller.review == nil, screen.galleryShot == nil {
+                FloatingVectorscope(screen: screen, trace: trace, view: size)
             }
             // подсказка к фокусу касанием — левее кнопок справа, на высоте колонки
             if screen.touchFocusHelpOpen {

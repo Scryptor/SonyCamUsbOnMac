@@ -298,13 +298,38 @@ struct FalseColorLegend: View {
     }
 }
 
-/// Меню «Монитор»: лента значений выбранного инструмента и под ней подсказка, ниже — плитки инструментов, как в меню Fn.
+/// Меню «Монитор»: лента значений выбранного инструмента и под ней подсказка, ниже — плитки инструментов, как в меню Fn:
+/// четырнадцать плиток в две строки по семь (тринадцать инструментов и «Всё — выключить»).
 /// Касание плитки выбирает её, касание выбранной — включает или выключает.
 struct AssistMenu: View {
     let controller: CameraController
     let screen: ScreenState
+    /// Список своих LUT меняется (добавили, удалили) — плитка «LUT» и её полоса перерисовываются.
+    @ObservedObject private var luts: LUTStore
 
-    private let columns = Array(repeating: GridItem(.flexible(), spacing: 6), count: 5)
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 6), count: 7)
+
+    init(controller: CameraController, screen: ScreenState) {
+        self.controller = controller
+        self.screen = screen
+        _luts = ObservedObject(wrappedValue: screen.luts)
+    }
+
+    /// Значение на плитке. У «Авто» в LUT — «Авто: S-Log3»: какой LUT выбран по профилю камеры сейчас. Считается по свойствам,
+    /// за которыми следит экран (`autoLUT`), — а не по тому, что лежит в замке потока кадров: тот вид не обновил бы. У «Свой» —
+    /// имя файла, пока он лежит в папке, иначе «Свой».
+    private func tileValue(_ tool: MonitorTool) -> String {
+        guard tool == .lut else { return screen.assist.label(tool) }
+        switch screen.assist.lut {
+        case .auto:
+            return LUTChoice.autoLabel(controller.autoLUT)
+        case .file:
+            if let name = screen.assist.lutFile, luts.names.contains(name) { return name }
+            return "Свой"
+        default:
+            return screen.assist.label(tool)
+        }
+    }
 
     var body: some View {
         let tool = screen.assistSelected
@@ -338,6 +363,9 @@ struct AssistMenu: View {
                             .help("Эталон — картинка из файла: JPEG, PNG, HEIC… Её можно и просто перетащить на окно")
                     }
                 }
+                if tool == .lut {
+                    LUTStrip(controller: controller, screen: screen, luts: luts)
+                }
                 Text(tool.help)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -350,7 +378,7 @@ struct AssistMenu: View {
             LazyVGrid(columns: columns, spacing: 6) {
                 ForEach(MonitorTool.allCases, id: \.self) { tool in
                     Button { screen.tapAssistTile(tool) } label: {
-                        AssistTile(title: tool.title, value: screen.assist.label(tool),
+                        AssistTile(title: tool.title, value: tileValue(tool),
                                    isOn: screen.assist.isOn(tool), isSelected: tool == screen.assistSelected)
                     }
                     .buttonStyle(.plain)
@@ -372,6 +400,65 @@ struct AssistMenu: View {
         .contentShape(Rectangle())
         .onTapGesture {}
         .onScrollWheelStep { screen.stepAssist($0) }
+    }
+}
+
+/// Под вариантами LUT: «Помощь — по картинке с LUT» и — у «Свой» — список своих файлов, «Добавить LUT…» и «Удалить».
+private struct LUTStrip: View {
+    let controller: CameraController
+    let screen: ScreenState
+    @ObservedObject var luts: LUTStore
+
+    var body: some View {
+        let assist = screen.assist
+        // выбранный файл, если он лежит в папке: пропавший из папки не считается выбранным
+        let chosen = assist.lutFile.flatMap { luts.names.contains($0) ? $0 : nil }
+        VStack(spacing: 6) {
+            if assist.lut == .file {
+                if luts.names.isEmpty {
+                    Text("Своих LUT пока нет: «Добавить LUT…» или перетащите файл .cube на окно")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                } else {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 100, maximum: 190), spacing: 4)], spacing: 4) {
+                        ForEach(luts.names, id: \.self) { name in
+                            let current = name == chosen
+                            Button { screen.selectLUTFile(name) } label: {
+                                Text(name)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 5)
+                                    .foregroundStyle(current ? Color.black : Color.white)
+                                    .background(current ? Color.white : Color.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 7))
+                                    .contentShape(RoundedRectangle(cornerRadius: 7))
+                            }
+                            .buttonStyle(.plain)
+                            .font(.body.weight(current ? .bold : .regular))
+                            .help(name)
+                        }
+                    }
+                    // ширина — по числу имён (не больше шести в ряду): ряд стоит посередине, как строки над ним и под ним
+                    .frame(maxWidth: CGFloat(min(luts.names.count, 6)) * 114)
+                }
+            }
+            HStack(spacing: 10) {
+                Toggle("Помощь — по картинке с LUT", isOn: Binding(get: { screen.assist.lutScopes }, set: { screen.setLUTScopes($0) }))
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .help("Гистограмма, волновая форма, вектороскоп, зебра, false color, пикинг и пипетка считаются по картинке "
+                        + "с LUT, и белое в них — 255. Выключено — по сигналу камеры, только повёрнутому.")
+                if assist.lut == .file {
+                    Button("Добавить LUT…") { chooseLUTFile(controller: controller, screen: screen) }
+                        .help("Файл 3D LUT в формате .cube (до 12 штук). Его можно и просто перетащить на окно")
+                    Button("Удалить") { if let chosen { screen.deleteLUT(chosen) } }
+                        .disabled(chosen == nil)
+                        .help("Убрать выбранный LUT из папки программы; исходный файл остаётся где был")
+                }
+            }
+        }
+        .onAppear { luts.refresh() }
     }
 }
 

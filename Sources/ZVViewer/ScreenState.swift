@@ -65,6 +65,16 @@ final class ScreenState {
     private(set) var waveformMode: Waveform.Mode
     private(set) var waveformPlacement: FloatingPlacement?
 
+    /// Где вектороскоп: доли свободного места; nil — на месте по умолчанию, слева вверху под верхней панелью. Включён ли
+    /// он и в каком масштабе — в `assist`.
+    private(set) var vectorscopePlacement: FloatingPlacement?
+
+    /// Свои LUT: папка в Application Support. Куб выбранного файла уходит потоку кадров вместе с остальной помощью.
+    let luts = LUTStore()
+    /// Чей куб сейчас у потока кадров (или грузится) и при какой версии папки; nil — своего LUT у потока нет.
+    @ObservationIgnored private var fileLUTKey: (name: String, revision: Int)?
+    @ObservationIgnored private var fileLUTLoad: Task<Void, Never>?
+
     /// Наложение спрятано щелчком по миниатюре на панели наложения (или клавишей O): эталон не рисуется, а наложение
     /// остаётся включённым. Не настройка — после включения наложения и нового эталона эталон снова виден.
     private(set) var overlayHidden = false
@@ -220,6 +230,47 @@ final class ScreenState {
         saveAssist(next)
     }
 
+    /// Щелчок по панели вектороскопа: масштаб ×1 ↔ ×2.
+    func toggleVectorscopeZoom() {
+        var next = assist
+        next.vectorscopeZoom = next.vectorscopeZoom == 1 ? 2 : 1
+        saveAssist(next)
+    }
+
+    func placeVectorscope(_ placement: FloatingPlacement) {
+        vectorscopePlacement = placement
+        if let data = try? JSONEncoder().encode(placement) { defaults.set(data, forKey: "vectorscopePlacement") }
+    }
+
+    /// Переключатель «Помощь — по картинке с LUT».
+    func setLUTScopes(_ on: Bool) {
+        var next = assist
+        next.lutScopes = on
+        saveAssist(next)
+    }
+
+    /// Выбрать файл из списка своих LUT: режим «Свой» и этот файл.
+    func selectLUTFile(_ name: String) {
+        var next = assist
+        next.selectLUTFile(name)
+        saveAssist(next)
+    }
+
+    /// Добавить `.cube` в свои LUT и выбрать его. Бросает `LUTLibrary.Failure` — с текстом для строки состояния.
+    func importLUT(_ url: URL) throws -> String {
+        let name = try luts.importFile(url)
+        selectLUTFile(name)
+        return name
+    }
+
+    /// Удалить свой LUT: выбранный выключается, LUT гаснет.
+    func deleteLUT(_ name: String) {
+        luts.delete(name)
+        var next = assist
+        next.lutFileDeleted(name)
+        saveAssist(next)
+    }
+
     private func saveAssist(_ next: MonitorAssist) {
         // включили или выключили наложение — «спрятано» больше не действует
         if (next.overlay == .off) != (assist.overlay == .off) { overlayHidden = false }
@@ -240,6 +291,36 @@ final class ScreenState {
     private func pushToFrames() {
         frameInput?.setAssist(assist)
         frameInput?.setWaveform(waveformOn ? waveformMode : nil)
+        pushFileLUT()
+    }
+
+    /// Куб своего LUT — потоку кадров, пока выбрано «Свой» и файл; иначе поток остаётся без него. Куб из памяти ложится сразу, а
+    /// большой `.cube` читается в фоне (до секунды): пока его нет, картинка идёт без LUT, а не со старым. Тот же файл при той
+    /// же версии папки второй раз не берётся — ни при смене зебры, ни при масштабе вектороскопа.
+    private func pushFileLUT() {
+        guard let input = frameInput else { return }
+        guard assist.lut == .file, let name = assist.lutFile, !name.isEmpty else {
+            fileLUTLoad?.cancel()
+            fileLUTLoad = nil
+            fileLUTKey = nil
+            input.setFileLUT(nil)
+            return
+        }
+        let key = (name: name, revision: luts.revision)
+        if let current = fileLUTKey, current == key { return }
+        fileLUTKey = key
+        fileLUTLoad?.cancel()
+        fileLUTLoad = nil
+        if let cached = luts.cachedLUT(named: name) {
+            input.setFileLUT(cached)
+            return
+        }
+        input.setFileLUT(nil)
+        fileLUTLoad = Task { [weak self, luts] in
+            let lut = await luts.loadInBackground(name)
+            guard !Task.isCancelled, let self, let current = self.fileLUTKey, current == key else { return }
+            self.frameInput?.setFileLUT(lut)
+        }
     }
 
     func toggleTouchFocus() {
@@ -345,6 +426,7 @@ final class ScreenState {
         waveformMode = defaults.string(forKey: "waveformMode").flatMap(Waveform.Mode.init(rawValue:)) ?? .luma
         waveformPlacement = defaults.data(forKey: "waveformPlacement").flatMap { try? JSONDecoder().decode(FloatingPlacement.self, from: $0) }
         overlayPlacement = defaults.data(forKey: "overlayPlacement").flatMap { try? JSONDecoder().decode(FloatingPlacement.self, from: $0) }
+        vectorscopePlacement = defaults.data(forKey: "vectorscopePlacement").flatMap { try? JSONDecoder().decode(FloatingPlacement.self, from: $0) }
     }
 
     func toggleFn() {

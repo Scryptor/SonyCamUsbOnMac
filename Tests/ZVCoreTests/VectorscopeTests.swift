@@ -571,6 +571,63 @@ private func naiveCounts(_ rgba: [UInt8], width: Int, height: Int, bytesPerRow: 
     }
 }
 
+// MARK: - Сетка панели
+
+@Test func planePutsGreyInTheMiddleOfThePanelAndCrUp() {
+    let middle = Vectorscope.plane(cb: 0, cr: 0, zoom: 1)
+    #expect(near(Double(middle.x), 0.5, 1e-12) && near(Double(middle.y), 0.5, 1e-12))
+    // Cb — вправо, Cr — вверх (у экрана y растёт вниз)
+    let right = Vectorscope.plane(cb: 0.25, cr: 0, zoom: 1)
+    #expect(near(Double(right.x), 0.75, 1e-12) && near(Double(right.y), 0.5, 1e-12))
+    let up = Vectorscope.plane(cb: 0, cr: 0.25, zoom: 1)
+    #expect(near(Double(up.x), 0.5, 1e-12) && near(Double(up.y), 0.25, 1e-12))
+    // край плоскости: ×1 — 0,5, ×2 — 0,25
+    #expect(near(Double(Vectorscope.plane(cb: 0.5, cr: 0, zoom: 1).x), 1, 1e-12))
+    #expect(near(Double(Vectorscope.plane(cb: 0.25, cr: 0, zoom: 2).x), 1, 1e-12))
+    #expect(near(Double(Vectorscope.plane(cb: 0, cr: -0.25, zoom: 2).y), 1, 1e-12))
+}
+
+@Test func planeAgreesWithTheBinsThePointsFallInto() {
+    // метка на панели и корзина с таким цветом — одно и то же место, при любом масштабе
+    let n = Double(Vectorscope.bins)
+    for zoom in [1, 2] {
+        for target in Vectorscope.targets {
+            guard let bin = Vectorscope.bin(cb: target.cb, cr: target.cr, zoom: zoom) else { continue }
+            let point = Vectorscope.plane(cb: target.cb, cr: target.cr, zoom: zoom)
+            #expect(Int(Double(point.x) * n) == bin.x && Int(Double(point.y) * n) == bin.y, "\(target.name) ×\(zoom)")
+        }
+    }
+    // при ×1 все шесть меток внутри панели, при ×2 — ни одной (75 % полосы лежат дальше 0,25)
+    let inside: (CGPoint) -> Bool = { (0...1).contains(Double($0.x)) && (0...1).contains(Double($0.y)) }
+    #expect(Vectorscope.targets.allSatisfy { inside(Vectorscope.plane(cb: $0.cb, cr: $0.cr, zoom: 1)) })
+    #expect(Vectorscope.targets.allSatisfy { !inside(Vectorscope.plane(cb: $0.cb, cr: $0.cr, zoom: 2)) })
+}
+
+@Test func targetMarksSitWhereTheColoursAre() {
+    // красный выше всех, голубой ниже всех; синий правее всех, жёлтый левее всех
+    let points = Dictionary(uniqueKeysWithValues: Vectorscope.targets.map {
+        ($0.name, Vectorscope.plane(cb: $0.cb, cr: $0.cr, zoom: 1))
+    })
+    #expect(points["R"]!.y < 0.2 && points["Cy"]!.y > 0.8)
+    #expect(points["B"]!.x > 0.8 && points["Yl"]!.x < 0.2)
+    // красный чуть левее середины (у него Cb < 0), пурпурный правее (Cb > 0), оба над серединой
+    #expect(points["R"]!.x < 0.5 && points["Mg"]!.x > 0.5)
+    #expect(points["R"]!.y < 0.5 && points["Mg"]!.y < 0.5)
+}
+
+@Test func skinLineRunsFromTheCentreAt123DegreesCounterClockwise() {
+    let end = Vectorscope.skinLineEnd
+    // конец — на круге панели (радиус 0,5 от середины)
+    let dx = Double(end.x) - 0.5, dy = Double(end.y) - 0.5
+    #expect(near((dx * dx + dy * dy).squareRoot(), 0.5, 1e-12))
+    // угол от +Cb против часовой стрелки: y экрана — вниз, поэтому «вверх» — это минус dy
+    var degrees = atan2(-dy, dx) * 180 / .pi
+    if degrees < 0 { degrees += 360 }
+    #expect(near(degrees, 123, 1e-9))
+    #expect(end.x < 0.5 && end.y < 0.5)
+    #expect(Vectorscope.skinAngle == 123)
+}
+
 // MARK: - Цена
 
 /// Сколько стоит вектороскоп на кадре 1024×576: ZV_BENCH=1 swift test -c release -Xswiftc -enable-testing --filter vectorscopeBenchmark

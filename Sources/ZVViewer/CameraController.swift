@@ -43,6 +43,14 @@ final class CameraController {
     /// Встроенный LUT, который сейчас на картинке: выбранный в «Мониторе» рукой, а у «Авто» — по профилю изображения главной
     /// камеры (следует за ним с ближайшего кадра); nil — встроенного нет («Выкл», «Свой», «Авто» без профиля).
     var resolvedLUT: BuiltinLUT? { assistInput.current.builtinLUT }
+    /// Какой LUT выберет «Авто» по профилю изображения главной камеры — для подписи на плитке «Авто: S-Log3». Считается по
+    /// `properties`, за которыми следит SwiftUI: `resolvedLUT` лежит в замке потока кадров, и вид, который его прочитал,
+    /// не узнал бы о смене профиля.
+    var autoLUT: BuiltinLUT? {
+        LUTChoice.resolve(.auto, pictureProfile: properties[SonyProp.pictureProfile]?.current.intValue,
+                          ppGamma: properties[SonyProp.ppGamma]?.current.intValue,
+                          colorMode: properties[SonyProp.ppColorMode]?.current.intValue)
+    }
     /// Эталонный кадр для наложения: текущий кадр или снимок из галереи. Хранится в файле — переживает перезапуск.
     private(set) var reference: ReferenceFrame?
     /// Команды 0x9207, которые знает камера на связи: по ним видно, есть ли фокус касанием, зум, Near/Far.
@@ -1128,7 +1136,8 @@ final class CameraController {
         UserDefaults.standard.data(forKey: key).map(PresetLibrary.decode) ?? []
     }
 
-    private func showStatus(_ text: String) {
+    /// Короткое сообщение в строке состояния сверху — на пять секунд.
+    func showStatus(_ text: String) {
         statusMessage = text
         statusTask?.cancel()
         statusTask = Task { [weak self] in

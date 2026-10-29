@@ -39,7 +39,7 @@ struct TopBar: View {
                 .help("Волновая форма: яркость или RGB-парад")
                 .accessibilityLabel("Волновая форма")
 
-                // зебра, false color, пикинг и маркеры — меню внизу, на месте строки значений
+                // зебра, false color, пикинг, LUT, вектороскоп, пипетка, маркеры и зеркало — меню внизу, на месте строки значений
                 Button(action: screen.toggleAssistMenu) {
                     TopBarIconView(icon: .monitor)
                         .frame(width: 30, height: 26)
@@ -47,7 +47,7 @@ struct TopBar: View {
                                     in: RoundedRectangle(cornerRadius: 7))
                 }
                 .buttonStyle(.plain)
-                .help("Монитор: зебра, false color, пикинг, сетка и рамки (M)")
+                .help("Монитор: зебра, false color, пикинг, LUT, вектороскоп, пипетка, сетка, рамки и зеркало (M)")
                 .accessibilityLabel("Монитор")
 
                 // строка состояния видна вместе с элементами; кнопка закрепляет её — тогда остаётся и без них
@@ -336,6 +336,23 @@ struct FloatingWaveform: View {
             return CGPoint(x: max(margin, view.width - panel.width - margin), y: max(margin, view.height - panel.height - 134))
         } content: {
             WaveformView(trace: trace, mode: screen.waveformMode, onMode: screen.setWaveformMode)
+        }
+    }
+}
+
+/// Вектороскоп поверх кадра; по умолчанию — слева вверху, под верхней панелью (внизу слева — гистограмма, справа внизу — волновая
+/// форма, справа вверху — наложение). Щелчок — масштаб ×2, перетаскивание — место.
+struct FloatingVectorscope: View {
+    let screen: ScreenState
+    let trace: VectorscopeTrace
+    let view: CGSize
+
+    var body: some View {
+        FloatingPanel(view: view, placement: screen.vectorscopePlacement, place: screen.placeVectorscope,
+                      avoiding: screen.rightColumnRect) { (_: CGSize) -> CGPoint in
+            CGPoint(x: CGFloat(FloatingPlacement.margin), y: 64)
+        } content: {
+            VectorscopeView(trace: trace, onZoom: screen.toggleVectorscopeZoom)
         }
     }
 }
