@@ -628,6 +628,99 @@ private func naiveCounts(_ rgba: [UInt8], width: Int, height: Int, bytesPerRow: 
     #expect(Vectorscope.skinAngle == 123)
 }
 
+// MARK: - Отсчёты у меток 75 %
+
+/// Кадр из восьми вертикальных полос 75 % подряд (белая, жёлтая, голубая, зелёная, пурпурная, красная, синяя, чёрная), каждая
+/// шириной `bar` точек, высотой `height`.
+private func bars(bar: Int = 16, height: Int = 8) -> [UInt8] {
+    let colours: [(UInt8, UInt8, UInt8)] = [(191, 191, 191), (191, 191, 0), (0, 191, 191), (0, 191, 0), (191, 0, 191), (191, 0, 0),
+                                            (0, 0, 191), (0, 0, 0)]
+    var pixels: [UInt8] = []
+    for _ in 0..<height {
+        for colour in colours {
+            for _ in 0..<bar { pixels += [colour.0, colour.1, colour.2, 255] }
+        }
+    }
+    return pixels
+}
+
+private let markNames = ["R", "Mg", "B", "Cy", "G", "Yl"]
+
+/// Корзина метки по тем же формулам, что у точек кадра.
+private func markBin(_ name: String, zoom: Int = 1) -> (x: Int, y: Int) {
+    guard let target = Vectorscope.targets.first(where: { $0.name == name }),
+          let bin = Vectorscope.bin(cb: target.cb, cr: target.cr, zoom: zoom) else {
+        Issue.record("у метки \(name) нет корзины")
+        return (0, 0)
+    }
+    return bin
+}
+
+@Test func targetCountsListTheSixMarksInTheOrderOfTargets() {
+    let result = Vectorscope.targetCounts(counts: [UInt32](repeating: 0, count: Vectorscope.bins * Vectorscope.bins), zoom: 1)
+    #expect(result.map(\.name) == markNames)
+    #expect(result.map(\.name) == Vectorscope.targets.map(\.name))
+    #expect(result.allSatisfy { $0.count == 0 })
+}
+
+@Test func targetCountsTakeTheBinOfTheMarkAndTwoBinsAroundIt() {
+    // в корзине метки и в окне 5×5 вокруг неё считается, в третьей корзине от неё — уже нет
+    for (index, name) in markNames.enumerated() {
+        let at = markBin(name)
+        var filled: [(x: Int, y: Int, n: UInt32)] = [(at.x, at.y, 5)]
+        // углы окна и середины его сторон
+        for (dx, dy) in [(-2, -2), (2, -2), (-2, 2), (2, 2), (2, 0), (0, -2)] { filled.append((at.x + dx, at.y + dy, 3)) }
+        // за окном: третья корзина по каждой оси
+        for (dx, dy) in [(-3, 0), (3, 0), (0, -3), (0, 3), (3, 3), (-3, -3)] { filled.append((at.x + dx, at.y + dy, 1000)) }
+        let result = Vectorscope.targetCounts(counts: counts(filled), zoom: 1)
+        #expect(result[index].name == name)
+        #expect(result[index].count == 5 + 6 * 3, "\(name): окно ±2 корзины, ничего снаружи")
+    }
+}
+
+@Test func targetCountsOfSolidSeventyFivePercentRedAreOnlyAtRed() {
+    let result = Vectorscope.targetCounts(counts: Vectorscope.counts(rgba: flat(191, 0, 0), width: 64, height: 36,
+                                                                      bytesPerRow: 256, zoom: 1), zoom: 1)
+    // каждая вторая точка по обеим осям: 32 × 18 отсчётов, и все — у красной метки
+    #expect(result.first { $0.name == "R" }?.count == 32 * 18)
+    #expect(result.filter { $0.name != "R" }.allSatisfy { $0.count == 0 })
+}
+
+@Test func targetCountsOfEightBarsHitEveryMarkAndTheCentreIsTheFullest() {
+    let frame = bars()
+    let counts = Vectorscope.counts(rgba: frame, width: 128, height: 8, bytesPerRow: 512, zoom: 1)
+    let result = Vectorscope.targetCounts(counts: counts, zoom: 1)
+    // каждая цветная полоса — 16 × 8 точек, отсчитывается каждая вторая по обеим осям: 8 × 4
+    for item in result { #expect(item.count == 8 * 4, "метка \(item.name)") }
+    // белая и чёрная полосы вместе — середина плоскости: самая полная корзина, не метка
+    let peak = Vectorscope.peak(counts: counts, zoom: 1)
+    #expect(peak.map { near($0.cb, 0.5 / 128, 1e-9) && near($0.cr, -0.5 / 128, 1e-9) } == true)
+    #expect(counts[64 * Vectorscope.bins + 64] == 2 * 8 * 4, "белая и чёрная — в одной корзине в середине плоскости")
+}
+
+@Test func targetCountsAreZeroAtZoomTwoWhereTheMarksLieBeyondTheEdge() {
+    // при ×2 край плоскости — 0,25, а все шесть меток дальше: у цветных полос в такой плоскости нет ни одного отсчёта у меток
+    let counts = Vectorscope.counts(rgba: bars(), width: 128, height: 8, bytesPerRow: 512, zoom: 2)
+    #expect(Vectorscope.targetCounts(counts: counts, zoom: 2).allSatisfy { $0.count == 0 })
+}
+
+@Test func targetCountsFollowTheZoomNotWhatTheCountsHoldAtTheMarkBins() {
+    // счётчики ×2, в которых у корзин меток ×1 лежат отсчёты (других цветов): при ×1 они у меток, при ×2 меток на плоскости нет
+    let filled = markNames.map { (x: markBin($0).x, y: markBin($0).y, n: UInt32(7)) }
+    let marked = counts(filled)
+    #expect(Vectorscope.targetCounts(counts: marked, zoom: 1).map(\.count) == [7, 7, 7, 7, 7, 7])
+    #expect(Vectorscope.targetCounts(counts: marked, zoom: 2).map(\.count) == [0, 0, 0, 0, 0, 0])
+}
+
+@Test func targetCountsOfWrongSizedCountsAreZeroAndSafe() {
+    #expect(Vectorscope.targetCounts(counts: [], zoom: 1).map(\.count) == [0, 0, 0, 0, 0, 0])
+    #expect(Vectorscope.targetCounts(counts: [1, 2, 3], zoom: 1).map(\.name) == markNames)
+    // масштаб меньше единицы — как единица
+    let one = Vectorscope.targetCounts(counts: Vectorscope.counts(rgba: flat(191, 0, 0), width: 8, height: 8, bytesPerRow: 32, zoom: 1), zoom: 1)
+    let zero = Vectorscope.targetCounts(counts: Vectorscope.counts(rgba: flat(191, 0, 0), width: 8, height: 8, bytesPerRow: 32, zoom: 1), zoom: 0)
+    #expect(one.map(\.count) == zero.map(\.count))
+}
+
 // MARK: - Цена
 
 /// Сколько стоит вектороскоп на кадре 1024×576: ZV_BENCH=1 swift test -c release -Xswiftc -enable-testing --filter vectorscopeBenchmark

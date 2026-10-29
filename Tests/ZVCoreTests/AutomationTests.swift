@@ -174,3 +174,34 @@ import Testing
     #expect(throws: (any Error).self) { try decode(#"{"action":"focusPullTime","seconds":"4"}"#) }
     #expect(try decode(#"{"action":"focusPullStop"}"#) == .focusPullStop)
 }
+
+@Test func decodesLUTVectorscopeAndProbeActions() throws {
+    func decode(_ json: String) throws -> AutomationAction {
+        try JSONDecoder().decode(AutomationAction.self, from: Data(json.utf8))
+    }
+    // свои LUT: добавить файл по пути (~ раскрывает программа), удалить и выбрать по имени, «помощь — по картинке с LUT»
+    #expect(try decode(#"{"action":"lutImport","path":"/tmp/Warm.cube"}"#) == .lutImport("/tmp/Warm.cube"))
+    #expect(try decode(#"{"action":"lutImport","path":"~/Looks/Teal Orange.cube"}"#) == .lutImport("~/Looks/Teal Orange.cube"))
+    #expect(try decode(#"{"action":"lutDelete","name":"Warm"}"#) == .lutDelete("Warm"))
+    #expect(try decode(#"{"action":"lutFile","name":"Warm"}"#) == .lutFile("Warm"))
+    #expect(try decode(#"{"action":"lutScopes","on":false}"#) == .lutScopes(false))
+    #expect(try decode(#"{"action":"lutScopes","on":true}"#) == .lutScopes(true))
+    // вектороскоп: масштаб и место панели (доли свободного места, как у гистограммы и волновой формы)
+    #expect(try decode(#"{"action":"vectorscopeZoom","zoom":2}"#) == .vectorscopeZoom(2))
+    #expect(try decode(#"{"action":"vectorscopeZoom","zoom":1}"#) == .vectorscopeZoom(1))
+    #expect(try decode(#"{"action":"moveVectorscope","x":0,"y":0.5}"#) == .moveVectorscope(x: 0, y: 0.5))
+    // пипетка: точка кадра, каким он виден (доли)
+    #expect(try decode(#"{"action":"setProbe","x":0.6875,"y":0.3}"#) == .setProbe(x: 0.6875, y: 0.3))
+    #expect(try decode(#"{"action":"setProbe","x":1,"y":0}"#) == .setProbe(x: 1, y: 0))
+    // без параметра или с параметром не того типа — не разобрано (400)
+    #expect(throws: (any Error).self) { try decode(#"{"action":"lutImport"}"#) }
+    #expect(throws: (any Error).self) { try decode(#"{"action":"lutDelete"}"#) }
+    #expect(throws: (any Error).self) { try decode(#"{"action":"lutFile"}"#) }
+    #expect(throws: (any Error).self) { try decode(#"{"action":"lutScopes"}"#) }
+    #expect(throws: (any Error).self) { try decode(#"{"action":"lutScopes","on":"yes"}"#) }
+    #expect(throws: (any Error).self) { try decode(#"{"action":"vectorscopeZoom"}"#) }
+    #expect(throws: (any Error).self) { try decode(#"{"action":"moveVectorscope","x":0.5}"#) }
+    #expect(throws: (any Error).self) { try decode(#"{"action":"setProbe","y":0.5}"#) }
+    // любой масштаб разбирается; что допустимы только 1 и 2, решает программа (409 с подсказкой)
+    #expect(try decode(#"{"action":"vectorscopeZoom","zoom":3}"#) == .vectorscopeZoom(3))
+}

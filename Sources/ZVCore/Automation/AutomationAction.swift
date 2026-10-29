@@ -116,10 +116,21 @@ public enum AutomationAction: Equatable, Sendable, Decodable {
     case focusMark(mark: String, op: String)
     case focusPullTime(Double)
     case focusPullStop
+    /// Свои LUT: добавить файл `.cube` по пути (как «Добавить LUT…» или перетаскивание на окно: копия в папку программы, он же
+    /// выбирается), удалить и выбрать по имени (имя файла без расширения), считать ли помощь по картинке с LUT.
+    case lutImport(String)
+    case lutDelete(String)
+    case lutFile(String)
+    case lutScopes(Bool)
+    /// Вектороскоп: масштаб (1 или 2) — как щелчок по панели, но сразу нужный; куда поставить панель (доли свободного места).
+    case vectorscopeZoom(Int)
+    case moveVectorscope(x: Double, y: Double)
+    /// Пипетка: поставить в точку кадра (доли, каким он виден) — как щелчок по кадру при включённой пипетке.
+    case setProbe(x: Double, y: Double)
 
     private enum Keys: String, CodingKey {
         case action, key, setting, offset, value, group, name, index, confirm, mode, x, y, factor, included, from, to, id, linked, onto
-        case path, mark, op, seconds
+        case path, mark, op, seconds, on, zoom
     }
 
     public init(from decoder: Decoder) throws {
@@ -218,6 +229,13 @@ public enum AutomationAction: Equatable, Sendable, Decodable {
         case "focusMark": self = .focusMark(mark: try c.decode(String.self, forKey: .mark), op: try c.decode(String.self, forKey: .op))
         case "focusPullTime": self = .focusPullTime(try c.decode(Double.self, forKey: .seconds))
         case "focusPullStop": self = .focusPullStop
+        case "lutImport": self = .lutImport(try c.decode(String.self, forKey: .path))
+        case "lutDelete": self = .lutDelete(try c.decode(String.self, forKey: .name))
+        case "lutFile": self = .lutFile(try c.decode(String.self, forKey: .name))
+        case "lutScopes": self = .lutScopes(try c.decode(Bool.self, forKey: .on))
+        case "vectorscopeZoom": self = .vectorscopeZoom(try c.decode(Int.self, forKey: .zoom))
+        case "moveVectorscope": self = .moveVectorscope(x: try c.decode(Double.self, forKey: .x), y: try c.decode(Double.self, forKey: .y))
+        case "setProbe": self = .setProbe(x: try c.decode(Double.self, forKey: .x), y: try c.decode(Double.self, forKey: .y))
         default:
             throw DecodingError.dataCorruptedError(forKey: .action, in: c, debugDescription: "неизвестная команда \(action)")
         }

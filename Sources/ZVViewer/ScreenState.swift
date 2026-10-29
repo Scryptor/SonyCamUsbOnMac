@@ -247,6 +247,13 @@ final class ScreenState {
         saveAssist(next)
     }
 
+    /// Масштаб вектороскопа сразу нужный (из API): 1 или 2, другое — как 1.
+    func setVectorscopeZoom(_ zoom: Int) {
+        var next = assist
+        next.vectorscopeZoom = zoom == 2 ? 2 : 1
+        saveAssist(next)
+    }
+
     func placeVectorscope(_ placement: FloatingPlacement) {
         vectorscopePlacement = placement
         if let data = try? JSONEncoder().encode(placement) { defaults.set(data, forKey: "vectorscopePlacement") }

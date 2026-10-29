@@ -35,6 +35,11 @@ Creative Look 0xD0FA, гамма и цвет профиля 0xD0E1 и 0xD0E9 (S-
 абсолютный фокус: запись 0xE042 двигает 0xE043 к цели со скоростью 40 000 единиц/с (раз в 50 мс, каждый раз с событием 0xC203),
 в конце — событие 0xC218 с параметром 1; шаг Near/Far сдвигает 0xE043 на 655 (1 % шкалы), 0xD24C идёт следом.
 
+Посреди прогона камера делает то, что ей скажут по управляющему порту (--control, scripts/fake_control.py; по умолчанию порта нет):
+сменить объектив (событие 0xC21B), переименовать подписи Creative Look (0xC20F), поставить 0xE086 или положение фокуса 0xE043,
+прислать любое событие. Один механизм на все проверки: команды — в справке (--help) и в fake_control.COMMANDS. --broken ломает
+ответы новой камеры на 0x9215, 0x9216 и 0x9223: type0, garbage, refuse, hang (см. fake_newer.BROKEN).
+
 Несколько камер сразу (scripts/fake_cameras.py) различаются: --name, --serial (по нему программа отличает камеры),
 --mark (другой план сцены — zoom, pan — или кадр отражён и повёрнут), --battery, --mode, --format. --ssdp — отвечает на поиск в сети, как камера Sony, с портом
 в X-PTPIP-Port; --busy — не отвечает на приветствие; --pairing — незнакомому GUID отвечает через 3 с, как будто на
@@ -45,6 +50,7 @@ Creative Look 0xD0FA, гамма и цвет профиля 0xD0E1 и 0xD0E9 (S-
                          [--battery 0–100] [--mode photo|video] [--format jpeg|raw+jpeg] [--ssdp] [--busy] [--pairing]
                          [--reject iso,…] [--record-delay с] [--record сценарий]
                          [--focus-gain G] [--focus-step-ms T] [--focus-deadband D] [--model zv-e10|newer]
+                         [--broken type0|garbage|refuse|hang] [--control [127.0.0.1:]15742]
   ZV_PTPIP_HOST=127.0.0.1 …/ZVViewer --automation        # Mac
   am start … --es ptpipHost <IP Mac>                       # планшет: --listen <IP Mac>:15740
   scripts/badnet.py --camera 127.0.0.1:25740 …             # или через прокси: --listen 127.0.0.1:25740
@@ -52,6 +58,7 @@ Creative Look 0xD0FA, гамма и цвет профиля 0xD0E1 и 0xD0E9 (S-
 import argparse, asyncio, os, socket, struct, subprocess, sys, tempfile, threading, time, uuid
 from decimal import Decimal, ROUND_HALF_UP
 
+import fake_control                                        # управляющий порт (--control), лежит рядом
 import fake_newer                                          # профиль новой камеры (--model newer), лежит рядом
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -352,6 +359,8 @@ class Camera:
         self.last_frame = 0.0
         self.conn = 0
         self.newer = args.model == "newer"                  # новая камера Sony: fake_newer.py
+        self.tables = fake_newer.Tables()                   # что она отдаёт в 0x9215 и 0x9223 сейчас (меняется по --control)
+        self.broken = args.broken                           # как ломаются её ответы на эти операции (fake_newer.BROKEN)
         self.device_info = fixture("deviceinfo.bin")
         if self.newer:
             self.device_info = fake_newer.device_info(self.device_info)
@@ -825,12 +834,18 @@ def respond(cam, code, params, out):
     if code == 0x9209:
         return bytes(cam.props.blob), OK
     # три операции новой камеры (--model newer): у ZV-E10 их нет в DeviceInfo, и до этого места дело не доходит
+    if code in (0x9215, 0x9216, 0x9223) and cam.broken == "hang":
+        # камера называет операции, а отвечать на них не умеет: ответ — через час, командное соединение ждёт, а пробы на канале
+        # событий отвечают, как у зависшей камеры
+        cam.reply_delay = 3600
+        cam.log(f"операция 0x{code:04X}: ответа не будет (--broken hang)")
     if code == 0x9215:                                          # подписи списков от камеры; параметр — тип списка, 0 — все
         list_type = params[0] if params else 0
-        data = fake_newer.display_strings(list_type)
+        broken = fake_newer.broken_display_strings(cam.broken, list_type)
+        data, response = broken or (cam.tables.display_strings(list_type), OK)
         cam.reply_params = [fake_newer.DISPLAY_LIST_VERSION]
-        cam.log(f"подписи списков (0x9215): тип 0x{list_type:X}, {len(data)} байт")
-        return data, OK
+        cam.log(f"подписи списков (0x9215): тип 0x{list_type:X}, {len(data or b'')} байт" + (f" (--broken {cam.broken})" if broken else ""))
+        return data, response
     if code == 0x9216:                                          # версия кода производителя: в параметре ответа, данных нет
         cam.reply_params = [fake_newer.VENDOR_CODE_VERSION]
         cam.log(f"версия кода производителя (0x9216): 0x{fake_newer.VENDOR_CODE_VERSION:04X}")
@@ -839,8 +854,8 @@ def respond(cam, code, params, out):
         if params[:1] != [fake_newer.LENS_METERS]:
             cam.log(f"данные объектива (0x9223): параметр {params[:1]} не поддерживается, нужен {fake_newer.LENS_METERS}")
             return None, PARAMETER_NOT_SUPPORTED
-        cam.log(f"данные объектива (0x9223): метры, {len(fake_newer.LENS_PAIRS)} пар")
-        return fake_newer.LENS_INFORMATION, OK
+        cam.log(f"данные объектива (0x9223): метры, {cam.tables.pairs()} пар")
+        return cam.tables.lens, OK
     if code == 0x9205 and params and out:
         if params[0] == 0xD26A:
             cam.quality = 1 if out[0] == 1 else 2
@@ -914,10 +929,16 @@ async def main():
                     help="камера: zv-e10 — как в дампах; newer — новая Sony (fake_newer.py): модель " + fake_newer.MODEL
                          + ", подписи списков 0x9215, версия кода 0x9216, данные объектива 0x9223, Creative Look 0xD0FA, "
                          "абсолютный фокус 0xE042 и 0xE043")
+    ap.add_argument("--broken", choices=sorted(fake_newer.BROKEN), metavar="|".join(sorted(fake_newer.BROKEN)),
+                    help="новая камера отвечает на 0x9215, 0x9216 и 0x9223 плохо: " + "; ".join(f"{k} — {v}" for k, v in fake_newer.BROKEN.items()))
+    ap.add_argument("--control", metavar="[ХОСТ:]ПОРТ",
+                    help="управляющий порт (по умолчанию его нет): одна строка — одна команда, ответ ok / unknown / error. Команды: "
+                         + "; ".join(f"{k} — {v}" for k, v in fake_control.COMMANDS.items()))
     a = ap.parse_args()
     cam = Camera(a)
     host, port = a.listen.rsplit(":", 1)
     server = await asyncio.start_server(lambda r, w: serve(cam, r, w), host, int(port))
+    control = await fake_control.serve(cam, a.control) if a.control else None     # ссылка — чтобы порт жил, пока живёт камера
     if a.ssdp:
         await asyncio.get_running_loop().create_datagram_endpoint(lambda: SSDPResponder(cam, host, int(port)),
                                                                   sock=ssdp_socket())
@@ -927,7 +948,8 @@ async def main():
               f"усиление фокуса ×{a.focus_gain:g}" if a.focus_gain != 1 else "",
               f"шаг фокуса {a.focus_step_ms:g} мс" if a.focus_step_ms else "",
               f"мёртвая зона фокуса {a.focus_deadband:g}" if a.focus_deadband else "",
-              f"новая камера: в DeviceInfo {fake_newer.MODEL}" if cam.newer else ""]
+              f"новая камера: в DeviceInfo {fake_newer.MODEL}" if cam.newer else "",
+              f"ломается: {a.broken}" if a.broken else "", f"управление: {a.control}" if a.control else ""]
     plain = cam.sets[None].frames
     print(f"поддельная {cam.name}: {a.listen}, кадр {len(plain[2]) // 1024} / {len(plain[1]) // 1024} КБ, "
           f"снимок {len(cam.photo) // 1024} КБ" + "".join(f", {e}" for e in extras if e), flush=True)

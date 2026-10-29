@@ -80,6 +80,26 @@ public struct LumaStats: Equatable, Sendable {
         return total > 0 && Double(above) / Double(total) > 0.001 ? 255 : 234
     }
 
+    /// Наименьший уровень, до которого (включительно) набралось `percent` % точек; 0 — точек нет. По тем же 256 уровням, что и
+    /// всё остальное здесь; то же определение у Android (`PictureHelp.percentile`).
+    public static func percentile(levels: [Int], percent: Int) -> Int {
+        let total = levels.reduce(0, +)
+        guard total > 0 else { return 0 }
+        var cumulative = 0
+        for (level, points) in levels.enumerated() {
+            cumulative += points
+            if cumulative * 100 >= percent * total { return level }
+        }
+        return max(levels.count - 1, 0)
+    }
+
+    /// Размах яркости p99 − p1: насколько широко картинка лежит по шкале. У плоского лога он мал, с LUT — шире; среднюю яркость
+    /// LUT почти не двигает (в S-Log3 серый остаётся серым), поэтому «LUT работает» проверяют по размаху. Один-два выброса из
+    /// тысячи его не раздувают.
+    public static func spread(levels: [Int]) -> Int {
+        percentile(levels: levels, percent: 99) - percentile(levels: levels, percent: 1)
+    }
+
     /// С какой доли точек на краю шкалы выделяем провалы или пересвет.
     public static func isClipped(_ percent: Double) -> Bool { percent >= 1 }
 

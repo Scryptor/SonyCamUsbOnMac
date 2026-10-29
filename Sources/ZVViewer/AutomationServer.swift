@@ -120,6 +120,9 @@ final class AutomationServer {
             case "z": screen.toggleAssist(.zebra)
             case "p": screen.toggleAssist(.peaking)
             case "c": screen.toggleAssist(.falseColor)
+            case "l": screen.toggleAssist(.lut)
+            case "v": screen.toggleAssist(.vectorscope)
+            case "i": screen.toggleAssist(.probe)
             case "left", "right":
                 let offset = key.lowercased() == "left" ? -1 : 1
                 if screen.assistOpen {
@@ -402,9 +405,12 @@ final class AutomationServer {
             guard mark.count == 1, let letter = mark.first, FocusMarkBook.letters.contains(letter) else { return "mark: A | B" }
             switch op {
             case "save":
+                // не готова — связи нет или она переустанавливается: свойства прежние, положение устарело
+                guard controller.phase == .ready else { return "camera not ready" }
                 guard controller.focusDriveAvailable else { return "focus marks need manual focus (Near/Far is closed)" }
                 guard controller.focusMarkSave(letter) else { return "the camera gives no focus position" }
             case "go":
+                guard controller.phase == .ready else { return "camera not ready" }
                 guard controller.focusDriveAvailable else { return "focus marks need manual focus (Near/Far is closed)" }
                 guard controller.focusMarks[letter] != nil else { return "mark \(mark) is empty" }
                 guard controller.focusMarkGo(letter) else { return "the camera gives no focus position" }
@@ -420,6 +426,32 @@ final class AutomationServer {
             guard controller.setFocusPullTime(seconds) else { return "no camera" }
         case .focusPullStop:
             controller.focusPullStop()
+        case let .lutImport(path):
+            // как «Добавить LUT…» и перетаскивание на окно: копия в папку программы, она же выбирается; отказ — с текстом окна
+            let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+            do {
+                controller.showStatus("LUT «\(try screen.importLUT(url))» добавлен")
+            } catch {
+                return error.localizedDescription
+            }
+        case let .lutDelete(name):
+            screen.luts.refresh()
+            guard screen.luts.names.contains(name) else { return "no LUT \(name)" }
+            screen.deleteLUT(name)
+        case let .lutFile(name):
+            screen.luts.refresh()
+            guard screen.luts.names.contains(name) else { return "no LUT \(name)" }
+            screen.selectLUTFile(name)
+        case let .lutScopes(on):
+            screen.setLUTScopes(on)
+        case let .vectorscopeZoom(zoom):
+            guard zoom == 1 || zoom == 2 else { return "zoom: 1 | 2" }
+            screen.setVectorscopeZoom(zoom)
+        case let .moveVectorscope(x, y):
+            screen.placeVectorscope(FloatingPlacement(x: min(max(x, 0), 1), y: min(max(y, 0), 1)))
+        case let .setProbe(x, y):
+            // как щелчок по кадру при включённой пипетке; за кадр — к его краю
+            screen.placeProbe(CGPoint(x: x, y: y))
         }
         return nil
     }
@@ -564,6 +596,9 @@ final class AutomationServer {
         ui["touchFocus"] = screen.touchFocusOn
         ui["touchFocusHelp"] = screen.touchFocusHelpOpen
         ui["focusMarksHelp"] = screen.focusMarksHelpOpen
+        ui["vectorscope"] = [
+            "position": screen.vectorscopePlacement.map { ["x": $0.x, "y": $0.y] } ?? NSNull(),
+        ] as [String: Any]
         ui["waveform"] = [
             "on": screen.waveformOn,
             "mode": screen.waveformMode.rawValue,
@@ -590,6 +625,7 @@ final class AutomationServer {
                         "low": range?.low ?? NSNull(), "high": range?.high ?? NSNull()]
             } ?? NSNull(),
             "picture": pictureState(),
+            "luts": screen.luts.names,
             "vectorscope": vectorscopeState(),
             "probe": probeState(),
             "lens": [
@@ -715,7 +751,8 @@ final class AutomationServer {
 
     /// Картинка на экране: зеркало; LUT — что выбрано (`mode`), какой встроенный на самом деле (`resolved`: у «Авто» по профилю
     /// камеры, у «Выкл» и «Свой» — null), выбранный свой файл и считается ли помощь по картинке с LUT (`scopes`); белый уровень
-    /// помощи (255 с LUT и `scopes`, иначе 234 в видео и 255 в фото) и средняя яркость кадра помощи 0…255.
+    /// помощи (255 с LUT и `scopes`, иначе 234 в видео и 255 в фото), средняя яркость кадра помощи 0…255 и её размах p99 − p1
+    /// (`lumaSpread`; в S-Log3 средняя с LUT почти та же, а размах вдвое шире).
     private func pictureState() -> [String: Any] {
         let assist = screen.assist
         return [
@@ -724,6 +761,7 @@ final class AutomationServer {
                     "file": assist.lutFile ?? NSNull(), "scopes": assist.lutScopes] as [String: Any],
             "whiteLevel": controller.whiteLevel ?? NSNull(),
             "meanLuma": controller.meanLuma.map { ($0 * 10).rounded() / 10 } ?? NSNull(),
+            "lumaSpread": controller.lumaSpread ?? NSNull(),
         ]
     }
 
@@ -758,12 +796,16 @@ final class AutomationServer {
                 "caption": caption ?? NSNull()] as [String: Any]
     }
 
-    /// Вектороскоп: включён ли, масштаб (1 или 2) и центр самой полной корзины в Cb и Cr (null — выключен или кадра нет).
+    /// Вектороскоп: включён ли, масштаб (1 или 2), центр самой полной корзины в Cb и Cr и отсчёты у шести меток 75 %
+    /// (`targets`: R, Mg, B, Cy, G, Yl — сколько отсчётов в пределах двух корзин от метки). Пик и метки — null, если вектороскоп
+    /// выключен или кадра нет.
     private func vectorscopeState() -> [String: Any] {
-        let peak = controller.vectorscope?.peak
+        let trace = controller.vectorscope
+        let peak = trace?.peak
         return ["on": screen.assist.vectorscope, "zoom": screen.assist.vectorscopeZoom,
                 "peakCb": peak.map { ($0.cb * 10000).rounded() / 10000 } ?? NSNull(),
-                "peakCr": peak.map { ($0.cr * 10000).rounded() / 10000 } ?? NSNull()]
+                "peakCr": peak.map { ($0.cr * 10000).rounded() / 10000 } ?? NSNull(),
+                "targets": trace.map { Dictionary(uniqueKeysWithValues: $0.targets.map { ($0.name, $0.count) }) } ?? NSNull()]
     }
 
     /// Пипетка: включена ли, где стоит (доли кадра, каким он виден; по умолчанию центр) и что показала — яркость в процентах

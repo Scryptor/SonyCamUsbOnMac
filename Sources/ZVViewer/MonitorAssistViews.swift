@@ -90,9 +90,13 @@ enum FrameTools {
         /// Средняя яркость кадра помощи, 0…255 (Rec. 709, как у гистограммы): по той же картинке, по которой считается
         /// помощь — с LUT или без.
         var meanLuma = 0.0
-        /// Картинка вектороскопа 128×128 RGBA и середина самой полной корзины (Cb, Cr); nil — вектороскоп выключен.
+        /// Размах яркости p99 − p1 по тем же уровням (см. `LumaStats.spread`): у плоского лога мал, с LUT шире.
+        var lumaSpread = 0
+        /// Картинка вектороскопа 128×128 RGBA, середина самой полной корзины (Cb, Cr) и отсчёты у шести меток 75 %; nil —
+        /// вектороскоп выключен.
         var vectorscope: [UInt8]?
         var vectorscopePeak: (cb: Double, cr: Double)?
+        var vectorscopeTargets: [(name: String, count: Int)] = []
         /// С каким масштабом (1 или 2) посчитан вектороскоп.
         var vectorscopeZoom = 1
         /// Что показала пипетка; nil — выключена.
@@ -119,7 +123,7 @@ enum FrameTools {
     nonisolated static func analyze(_ frame: CGImage, levels: [Int], input: AssistInput.State) -> Result {
         // шкала — как у гистограммы: от чёрного до белого превью
         let white = whiteLevel(levels: levels, input: input)
-        var result = Result(white: white, meanLuma: meanLuma(levels: levels))
+        var result = Result(white: white, meanLuma: meanLuma(levels: levels), lumaSpread: LumaStats.spread(levels: levels))
         guard input.needsPixels else { return result }
         let width = frame.width, height = frame.height, bytesPerRow = width * 4
         var rgba = [UInt8](repeating: 0, count: bytesPerRow * height)
@@ -144,6 +148,7 @@ enum FrameTools {
             let counts = Vectorscope.counts(rgba: rgba, width: width, height: height, bytesPerRow: bytesPerRow, zoom: zoom)
             result.vectorscope = Vectorscope.image(counts: counts)
             result.vectorscopePeak = Vectorscope.peak(counts: counts, zoom: zoom)
+            result.vectorscopeTargets = Vectorscope.targetCounts(counts: counts, zoom: zoom)
             result.vectorscopeZoom = zoom
         }
         if input.assist.probe {
@@ -171,11 +176,14 @@ struct VectorscopeTrace {
     let zoom: Int
     /// Середина самой полной корзины в единицах Cb и Cr (при ×2 — с поправкой на масштаб); nil — кадр пуст.
     let peak: (cb: Double, cr: Double)?
+    /// Сколько отсчётов у каждой из шести меток 75 % (R, Mg, B, Cy, G, Yl) — для API и проверок.
+    let targets: [(name: String, count: Int)]
 
-    init(pixels: [UInt8], zoom: Int, peak: (cb: Double, cr: Double)?) {
+    init(pixels: [UInt8], zoom: Int, peak: (cb: Double, cr: Double)?, targets: [(name: String, count: Int)] = []) {
         image = FrameTools.image(rgba: pixels, width: Vectorscope.bins, height: Vectorscope.bins)
         self.zoom = zoom
         self.peak = peak
+        self.targets = targets
     }
 }
 

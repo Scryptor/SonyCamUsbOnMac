@@ -38,6 +38,9 @@ final class CameraController {
     /// Белый уровень и средняя яркость (0…255) кадра, по которому считается помощь, — для API и отладки; кадра нет — nil.
     @ObservationIgnored private(set) var whiteLevel: Int?
     @ObservationIgnored private(set) var meanLuma: Double?
+    /// Размах яркости p99 − p1 по уровням того же кадра (см. `LumaStats.spread`) — для API: в S-Log3 средняя яркость с LUT почти
+    /// не меняется, а размах растёт.
+    @ObservationIgnored private(set) var lumaSpread: Int?
     /// Зеркало, переворот и LUT картинки: один объект на программу, считает в потоке кадров.
     @ObservationIgnored private let pictureTransform = PictureTransform()
     /// Зеркало и переворот картинки на экране — как выбрано в «Мониторе» (экран кладёт выбор в `assistInput` сразу, при
@@ -2198,12 +2201,14 @@ final class CameraController {
         assistOverlay = tools.overlay
         waveform = tools.waveform
         if let pixels = tools.vectorscope {
-            vectorscope = VectorscopeTrace(pixels: pixels, zoom: tools.vectorscopeZoom, peak: tools.vectorscopePeak)
+            vectorscope = VectorscopeTrace(pixels: pixels, zoom: tools.vectorscopeZoom, peak: tools.vectorscopePeak,
+                                           targets: tools.vectorscopeTargets)
         } else if vectorscope != nil {
             vectorscope = nil
         }
         if probeReading != tools.probe { probeReading = tools.probe }
         meanLuma = tools.meanLuma
+        lumaSpread = tools.lumaSpread
         if !hasFrame { hasFrame = true }
         lastJPEG = sample.jpeg
         let now = Date()
@@ -2384,6 +2389,7 @@ final class CameraController {
         probeReading = nil
         whiteLevel = nil
         meanLuma = nil
+        lumaSpread = nil
         controlCodes = []
         focusFrames = []
         touchMark = nil
@@ -2665,10 +2671,11 @@ final class CameraController {
     }
 
     /// «Запомнить здесь»: положение фокуса сейчас — в метку. Фокус едет к этой метке — перевод кончается: цель сменилась.
-    /// false — запомнить нечего (камеры или положения нет).
+    /// false — запомнить нечего (камера не готова, положения нет).
     @discardableResult
     func focusMarkSave(_ mark: Character) -> Bool {
-        guard let camera = currentCameraID, let mode = focusPullMode, let position = focusPosition,
+        // пока камера не готова (тихое переподключение), свойства прежние: положение устарело и метка легла бы не туда
+        guard phase == .ready, let camera = currentCameraID, let mode = focusPullMode, let position = focusPosition,
               FocusMarkBook.letters.contains(mark) else { return false }
         if focusPullMark == mark { focusPullStop() }
         focusMarkBook.save(mark, at: position, for: camera, mode: mode)

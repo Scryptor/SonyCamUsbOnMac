@@ -33,7 +33,6 @@ SIZES = {1: 1, 2: 1, 3: 2, 4: 2, 5: 4, 6: 4, 7: 8, 8: 8, 9: 16, 10: 16}
 CREATIVE_LOOKS = [(1, "ST"), (2, "PT"), (3, "NT"), (4, "VV"), (5, "VV2"), (6, "FL"), (7, "IN"), (8, "SH"), (9, "BW"),
                   (10, "SE"), (11, "FL2"), (12, "FL3")] + [(0x100 + n, f"Custom Look {n}") for n in range(1, 7)]
 SUBJECTS = [(1, "Человек"), (2, "Животное")]               # числа выдуманы стендом: настоящая камера нумерует по-своему
-DISPLAY_LISTS = [(CREATIVE_LOOK_LIST, UINT16, CREATIVE_LOOKS), (SUBJECT_LIST, UINT16, SUBJECTS)]
 # значения 0xD0E1 и 0xD0E9 из справочника: от Movie до HLG3 (S-Log3 — 0x0303), от Movie до 709tone (S-Gamut3.Cine — 0x0008)
 PP_GAMMAS = [0x0001, 0x0002, 0x0003, 0x0101, 0x0102, 0x0103, 0x0104, 0x0201, 0x0202, 0x0302, 0x0303, 0x0401, 0x0402,
              0x0403, 0x0404]
@@ -61,12 +60,6 @@ def display_string_list(lists):
     return dataset(body)
 
 
-def display_strings(list_type):
-    """Ответ 0x9215 на тип списка: 0 — все списки камеры, 0x13 — только Creative Look, любой другой тип — пустой набор."""
-    lists = {0: DISPLAY_LISTS, CREATIVE_LOOK_LIST: DISPLAY_LISTS[:1]}.get(list_type, [])
-    return display_string_list(lists)
-
-
 def lens_information(version, tables):
     """Набор 0x9223 (SDILensInformation): версия ×100, число таблиц; у таблицы — число пар и два байта резерва, затем пары
     (нормированное положение фокуса, расстояние ×100)."""
@@ -77,6 +70,82 @@ def lens_information(version, tables):
 
 
 LENS_INFORMATION = lens_information(LENS_INFO_VERSION, [LENS_PAIRS])
+# другие таблицы объектива, на которые камера «переходит» по управляющему порту (fake_control.py): телеобъектив (5 пар, от 1,2 м
+# до «∞») и две таблицы в одном ответе (программа расстояний не показывает)
+TELE_PAIRS = [(0, 120), (20000, 200), (40000, 500), (50000, 2000), (FOCUS_MAX, 100_000_000)]
+SECOND_PAIRS = [(0, 30), (FOCUS_MAX, 5000)]
+
+
+class Tables:
+    """Что новая камера отдаёт в 0x9215 и 0x9223 сейчас. У каждой камеры свои и меняются по ходу прогона (управляющий порт,
+    fake_control.py): подписи Creative Look переименовывают, список пропадает, объектив меняют."""
+
+    def __init__(self):
+        self.looks = list(CREATIVE_LOOKS)
+        self.subjects = list(SUBJECTS)
+        self.lists = self.all_lists()
+        self.lens = LENS_INFORMATION
+
+    def all_lists(self):
+        return [(CREATIVE_LOOK_LIST, UINT16, self.looks), (SUBJECT_LIST, UINT16, self.subjects)]
+
+    def display_strings(self, list_type):
+        """Ответ 0x9215 на тип списка: 0 — все списки камеры, другой тип — только он, если он у камеры есть, иначе пустой набор."""
+        lists = self.lists if list_type == 0 else [item for item in self.lists if item[0] == list_type]
+        return display_string_list(lists)
+
+    def rename_look(self, value=6, name="FLM"):
+        """В списке Creative Look значение получает другое название."""
+        self.looks[:] = [(v, name if v == value else text) for v, text in self.looks]
+
+    def drop_list(self, list_type=CREATIVE_LOOK_LIST):
+        """Список пропал у камеры: на запрос этого типа она отвечает пустым набором."""
+        self.lists = [item for item in self.lists if item[0] != list_type]
+
+    def restore_lists(self):
+        self.looks[:] = CREATIVE_LOOKS
+        self.subjects[:] = SUBJECTS
+        self.lists = self.all_lists()
+
+    def pairs(self):
+        """Сколько пар в таблицах, которые камера отдаёт сейчас (для журнала): «12» или «12 + 2»."""
+        try:
+            count, pos, sizes = struct.unpack_from("<HH", self.lens, 8)[1], 12, []
+            for _ in range(count):
+                sizes.append(struct.unpack_from("<H", self.lens, pos)[0])
+                pos += 4 + 8 * sizes[-1]
+            return " + ".join(map(str, sizes)) or "0"
+        except struct.error:
+            return "?"
+
+    def set_lens(self, tables):
+        """Объектив другой: таблицы (список таблиц пар) или готовые байты ответа 0x9223."""
+        self.lens = tables if isinstance(tables, bytes) else lens_information(LENS_INFO_VERSION, tables)
+
+
+# как «ломается» новая камера (--broken): что именно она отвечает на 0x9215, 0x9216 и 0x9223 вместо нормального
+BROKEN = {
+    "type0": "на 0x9215 с типом 0 отдаёт набор, где у списка 0x15 неизвестный тип данных (тип 0x13 отдаёт правильно)",
+    "garbage": "на любой 0x9215 отдаёт мусор",
+    "refuse": "на любой 0x9215 отвечает 0x2006 (параметр не поддерживается)",
+    "hang": "на 0x9215, 0x9216 и 0x9223 не отвечает совсем (ответ через час; пробы на канале событий отвечают)",
+}
+OK, PARAMETER_NOT_SUPPORTED = 0x2001, 0x2006               # коды ответа PTP
+
+
+def broken_display_strings(mode, list_type):
+    """Ответ 0x9215 сломанной камеры: (данные, код ответа); None — этот запрос камера отдаёт как обычно."""
+    if mode == "type0" and list_type == 0:
+        # два списка: Creative Look в порядке, у «Человек/Животное» тип данных PTP 0 — такого нет, разбор набора рвётся целиком
+        body = struct.pack("<H2x", 2)
+        body += struct.pack("<IHH", CREATIVE_LOOK_LIST, UINT16, 1) + struct.pack("<H", 1) + struct.pack("<H", 3) + b"ST\0"
+        body += struct.pack("<IHH", SUBJECT_LIST, 0, 1) + b"\0\0\0"
+        return dataset(body), OK
+    if mode == "garbage":
+        return b"\x01\x02\x03", OK
+    if mode == "refuse":
+        return None, PARAMETER_NOT_SUPPORTED
+    return None
 
 
 def prop_desc(code, ptype, current, settable=True, enabled=1, values=None, span=None):

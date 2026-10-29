@@ -12,7 +12,7 @@ import argparse, os, signal, subprocess, sys, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
-from e2e_monitor import CAMERA, act, check, restore_prefs, save_prefs, shot, state, wait  # noqa: E402
+from e2e_monitor import CAMERA, act, check, restore_prefs, save_prefs, shot, state, terminate_on_signals, wait  # noqa: E402
 import e2e_monitor  # noqa: E402
 
 
@@ -84,6 +84,7 @@ def main():
     ap.add_argument("--app", default=os.path.join(ROOT, "build/Sony Cam Viewer.app"))
     ap.add_argument("--out", default="/tmp/quality")
     args = ap.parse_args()
+    terminate_on_signals()                              # сигнал (в том числе `perl -e 'alarm N'`) — тоже через `finally`
     os.makedirs(args.out, exist_ok=True)
     before = save_prefs()
     camera_log = os.path.join(args.out, "camera.log")

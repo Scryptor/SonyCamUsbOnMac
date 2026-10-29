@@ -83,3 +83,56 @@ private func levels(_ counts: [Int: Int]) -> [Int] {
     #expect(LumaStats.clipping(12.6) == "13%")
     #expect(LumaStats.isClipped(1.0) && !LumaStats.isClipped(0.9))
 }
+
+// MARK: - Размах яркости p1–p99
+
+@Test func percentileIsTheSmallestLevelThatReachesTheShare() {
+    // 100 точек: одна на 10, 98 на 100, одна на 200
+    let spread = levels([10: 1, 100: 98, 200: 1])
+    #expect(LumaStats.percentile(levels: spread, percent: 1) == 10)
+    // 99-я точка лежит ещё на уровне 100: на 200 ложится только сотая
+    #expect(LumaStats.percentile(levels: spread, percent: 99) == 100)
+    #expect(LumaStats.percentile(levels: spread, percent: 100) == 200)
+    // ровно на границе: 50 из 100 точек набраны на уровне 0 — 50 % уже там, 51 % — на следующем
+    let halves = levels([0: 50, 255: 50])
+    #expect(LumaStats.percentile(levels: halves, percent: 50) == 0)
+    #expect(LumaStats.percentile(levels: halves, percent: 51) == 255)
+}
+
+@Test func spreadIsTheWidthBetweenTheFirstAndTheNinetyNinthPercent() {
+    #expect(LumaStats.spread(levels: levels([10: 1, 100: 98, 200: 1])) == 90)
+    // выбросы по одной точке из тысячи (0,1 %) размах не раздувают: берутся 1-й и 99-й проценты, а не наименьший и наибольший
+    #expect(LumaStats.spread(levels: levels([0: 1, 100: 499, 140: 499, 255: 1])) == 40)
+    // плоский лог уже: вся картинка в 106 уровнях, после LUT — в 219
+    let flat = levels([45: 10, 100: 80, 151: 10])
+    let graded = levels([14: 10, 100: 80, 233: 10])
+    #expect(LumaStats.spread(levels: flat) == 106)
+    #expect(LumaStats.spread(levels: graded) == 219)
+    #expect(LumaStats.spread(levels: graded) > LumaStats.spread(levels: flat))
+}
+
+@Test func spreadOfOneLevelOrNoPointsIsZero() {
+    #expect(LumaStats.spread(levels: levels([128: 5000])) == 0)
+    #expect(LumaStats.spread(levels: [Int](repeating: 0, count: 256)) == 0)
+    #expect(LumaStats.percentile(levels: [Int](repeating: 0, count: 256), percent: 99) == 0)
+    #expect(LumaStats.spread(levels: []) == 0)
+}
+
+@Test func spreadAgreesWithAFullSortOfThePoints() {
+    // независимая проверка: уровни раскладываются в список точек, и берётся точка с номером ⌈p · n / 100⌉ (с единицы)
+    var seed: UInt32 = 7
+    func next() -> Int {
+        seed = seed &* 1_664_525 &+ 1_013_904_223
+        return Int(seed >> 16)
+    }
+    for round in 0..<20 {
+        var counts = [Int](repeating: 0, count: 256)
+        let lo = next() % 120, hi = 120 + next() % 136
+        for _ in 0..<(300 + round * 37) { counts[lo + next() % (hi - lo + 1)] += 1 }
+        let points = counts.enumerated().flatMap { Array(repeating: $0.offset, count: $0.element) }
+        func nth(_ percent: Int) -> Int { points[Int((Double(percent) * Double(points.count) / 100).rounded(.up)) - 1] }
+        #expect(LumaStats.percentile(levels: counts, percent: 1) == nth(1), "p1, круг \(round)")
+        #expect(LumaStats.percentile(levels: counts, percent: 99) == nth(99), "p99, круг \(round)")
+        #expect(LumaStats.spread(levels: counts) == nth(99) - nth(1), "размах, круг \(round)")
+    }
+}

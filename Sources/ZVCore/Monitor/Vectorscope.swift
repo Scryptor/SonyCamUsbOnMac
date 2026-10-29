@@ -119,6 +119,32 @@ public enum Vectorscope {
         return counts
     }
 
+    // MARK: - Отсчёты у меток
+
+    /// Сколько отсчётов лежит у каждой из шести меток 75 % — по порядку `targets` (R, Mg, B, Cy, G, Yl): в корзине метки и в
+    /// пределах двух корзин от неё по каждой оси (окно 5×5). Окно нужно, потому что полоса 75 % в кадре — не ровно 0,75: JPEG и
+    /// округление до 8 бит сдвигают цвет на долю корзины, а метка может лежать на границе двух. Метка за краем плоскости (при ×2
+    /// это все шесть: край — 0,25, а метки дальше) отсчётов не имеет — что лежит в её корзине по счётчикам ×2, принадлежит другим
+    /// цветам. Счётчики не того размера дают нули.
+    ///
+    /// Для проверки кадра цветных полос: все шесть больше нуля — цвета на месте; самая полная корзина при этом — середина
+    /// (в неё ложатся белая и чёрная полосы), а не метка.
+    public static func targetCounts(counts: [UInt32], zoom: Int) -> [(name: String, count: Int)] {
+        let reach = 2
+        return targets.map { target in
+            guard counts.count == bins * bins, let centre = bin(cb: target.cb, cr: target.cr, zoom: zoom) else {
+                return (target.name, 0)
+            }
+            var total = 0
+            for y in max(centre.y - reach, 0)...min(centre.y + reach, bins - 1) {
+                for x in max(centre.x - reach, 0)...min(centre.x + reach, bins - 1) {
+                    total += Int(counts[y * bins + x])
+                }
+            }
+            return (target.name, total)
+        }
+    }
+
     // MARK: - Картинка и пик
 
     /// Картинка точек: RGBA, `bins²` точек, строки сверху вниз, как корзины. Пустая корзина — прозрачная (альфа 0), самая
