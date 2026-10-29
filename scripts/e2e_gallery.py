@@ -9,11 +9,12 @@
 
   scripts/e2e_gallery.py [--app "build/Sony Cam Viewer.app"] [--out /tmp/gallery]
 """
-import argparse, os, signal, subprocess, sys, time
+import argparse, os, subprocess, sys, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
-from e2e_monitor import CAMERA, act, check, restore_prefs, save_prefs, shot, state, terminate_on_signals, wait  # noqa: E402
+from e2e_monitor import (CAMERA, act, check, refuse_unsafe_roster, restore_prefs, save_prefs, shot, state, stop_process,  # noqa: E402
+                         terminate_on_signals, wait)
 import e2e_monitor  # noqa: E402
 
 TRASH = os.path.expanduser("~/.Trash")
@@ -142,28 +143,26 @@ def main():
     folder = os.path.join(out, "Загрузки")
     os.makedirs(folder, exist_ok=True)
     before = save_prefs()
+    refuse_unsafe_roster(before)
     log = open(os.path.join(out, "camera.log"), "a")
-    cam = subprocess.Popen([sys.executable, os.path.join(ROOT, "scripts/fake_camera.py"), "--listen", CAMERA, "--mode", "photo", "--format", "raw+jpeg"],
-                           stdout=log, stderr=subprocess.STDOUT)
-    time.sleep(0.5)
-    env = dict(os.environ, ZV_AUTOMATION="1", ZV_PTPIP_HOST=CAMERA)
-    proc = subprocess.Popen([os.path.join(args.app, "Contents/MacOS/ZVViewer"), "-ApplePersistenceIgnoreState", "YES"], env=env,
-                            stdout=open(os.path.join(out, "app.log"), "a"), stderr=subprocess.STDOUT, start_new_session=True)
+    cam = proc = None
     trashed = set()
     try:
+        # запуск — внутри try: сигнал между запуском камеры и программой тоже доходит до finally
+        cam = subprocess.Popen([sys.executable, os.path.join(ROOT, "scripts/fake_camera.py"), "--listen", CAMERA, "--mode", "photo", "--format", "raw+jpeg"],
+                               stdout=log, stderr=subprocess.STDOUT)
+        time.sleep(0.5)
+        env = dict(os.environ, ZV_AUTOMATION="1", ZV_PTPIP_HOST=CAMERA)
+        proc = subprocess.Popen([os.path.join(args.app, "Contents/MacOS/ZVViewer"), "-ApplePersistenceIgnoreState", "YES"], env=env,
+                                stdout=open(os.path.join(out, "app.log"), "a"), stderr=subprocess.STDOUT, start_new_session=True)
         s = wait(lambda s: s.get("phase") == "ready" and s.get("fps", 0) > 3, 40)
         if not s or s.get("phase") != "ready":
             print(f"программа не дошла до ready: {s and s.get('phase')}")
             return 1
         run(out, folder, trashed)
     finally:
-        proc.send_signal(signal.SIGTERM)
-        try:
-            proc.wait(timeout=8)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-        cam.terminate()
-        cam.wait()
+        stop_process(proc)
+        stop_process(cam)
         restore_prefs(before)
         # в Корзине — только файлы этого теста, по путям, которые назвала программа
         for path in trashed:

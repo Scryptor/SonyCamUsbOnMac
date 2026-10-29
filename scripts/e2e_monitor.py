@@ -95,15 +95,35 @@ def shot(out, name, window=None):
         f.write(png)
 
 
+class PrefsError(RuntimeError):
+    """Настройки программы не прочитались."""
+
+
 def save_prefs():
-    """Все настройки программы — общие с установленной программой (тот же bundle id)."""
-    data = subprocess.run(["defaults", "export", DOMAIN, "-"], capture_output=True).stdout
-    return plistlib.loads(data) if data else {}
+    """Все настройки программы — общие с установленной программой (тот же bundle id). Не прочиталось (команда упала, вывод пуст
+    или не разобран) — PrefsError, и прогон не начинается: без снимка нечего возвращать, а `restore_prefs({})` стёр бы все ключи
+    общего домена — знакомые камеры, GUID сопряжения, пресеты. Домена ещё нет — это пустой словарь: `defaults export` печатает
+    `<dict/>`."""
+    done = subprocess.run(["defaults", "export", DOMAIN, "-"], capture_output=True)
+    if done.returncode != 0 or not done.stdout.strip():
+        raise PrefsError(f"`defaults export {DOMAIN}` не дал настроек (код {done.returncode}, {len(done.stdout)} байт): "
+                         + done.stderr.decode(errors="replace").strip())
+    try:
+        prefs = plistlib.loads(done.stdout)
+    except Exception as error:
+        raise PrefsError(f"вывод `defaults export {DOMAIN}` не разобран: {error}") from error
+    if not isinstance(prefs, dict):
+        raise PrefsError(f"`defaults export {DOMAIN}` дал не словарь настроек, а {type(prefs).__name__}")
+    return prefs
 
 
 def restore_prefs(before):
     """Настройки — как были: и инструменты, и то, что программа запомнила о поддельной камере (`cameras`), и окно."""
-    now = save_prefs()
+    try:
+        now = save_prefs()
+    except PrefsError as error:
+        print(f"  ! настройки программы не вернуть, они остались как после прогона: {error}")
+        raise
     for key in set(now) | set(before):
         value = before.get(key)
         if now.get(key) == value:
@@ -173,6 +193,16 @@ def stop_process(proc, seconds=8):
         proc.wait()
 
 
+def listening(address):
+    """Кто-то слушает `хост:порт`."""
+    host, port = address.rsplit(":", 1)
+    try:
+        with socket.create_connection((host, int(port)), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
 class FakeCamera:
     """Поддельная камера (scripts/fake_camera.py) на CAMERA с управляющим портом CONTROL. Одна за раз: `start` с другими
     параметрами после `stop` — другая камера на том же адресе, программа тихо переподключается, а поиска в сети не нужно."""
@@ -182,11 +212,23 @@ class FakeCamera:
         self.proc = None
 
     def start(self, *args):
+        """Запускает камеру и ждёт, пока она слушает оба порта. Порт уже занят (забытая камера прошлого прогона — отвечал бы ей, а
+        не этой, и с другими параметрами) или камера не дожила до готовности — RuntimeError, а не тихий прогон не с той камерой."""
         self.stop()
+        for address in (CAMERA, CONTROL):
+            if listening(address):
+                raise RuntimeError(f"на {address} уже кто-то слушает — забытая поддельная камера? Остановите её и запустите снова")
         self.mark("камера: " + " ".join(args))
         self.proc = subprocess.Popen([sys.executable, FAKE_CAMERA, "--listen", CAMERA, "--control", CONTROL, *args],
                                      stdout=open(self.log_path, "a"), stderr=subprocess.STDOUT)
-        time.sleep(0.6)
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            if not self.alive():
+                raise RuntimeError(f"поддельная камера не запустилась (код {self.proc.returncode}): …{self.log()[-400:]}")
+            if listening(CAMERA) and listening(CONTROL):
+                return
+            time.sleep(0.1)
+        raise RuntimeError("поддельная камера не начала слушать за 20 с")
 
     def stop(self):
         stop_process(self.proc)
@@ -243,6 +285,28 @@ class App:
         stop_process(self.proc)
 
 
+def strip_cameras_off_loopback(prefs):
+    """Камеры ленты из списка знакомых камер программы (ключ `cameras`), чей адрес не loopback: лента стучится к своим камерам сама
+    (CameraController.stripTick), и ZV_PTPIP_HOST этого не отменяет — прогон дозвонился бы до настоящей камеры."""
+    try:
+        roster = json.loads(prefs.get("cameras") or b"[]")
+    except (ValueError, TypeError):
+        return []
+    return [f"«{camera.get('name', '?')}» ({camera['host']})" for camera in roster if isinstance(camera, dict)
+            and camera.get("strip") and camera.get("host") and not str(camera["host"]).startswith("127.")
+            and camera["host"] not in ("localhost", "::1")]
+
+
+def refuse_unsafe_roster(prefs):
+    """Прогон не начинается, если в ленте камер программы есть камера не на 127.0.0.1 (см. `strip_cameras_off_loopback`)."""
+    unsafe = strip_cameras_off_loopback(prefs)
+    if unsafe:
+        raise SystemExit(
+            "прогон не начат: в ленте камер программы есть камера не на 127.0.0.1 — " + ", ".join(unsafe) + ". Лента стучится к своим "
+            "камерам сама, и ZV_PTPIP_HOST этого не отменяет: прогон дозвонился бы до настоящей камеры. Уберите её из ленты "
+            "(«Убрать из ленты» в списке камер) и запустите снова.")
+
+
 class Stand:
     """Прогон целиком: камера, программа, настройки и папка своих LUT, какими они были до него. На выходе — при любом исходе —
     программа и камера остановлены, настройки и папка возвращены:
@@ -264,6 +328,7 @@ class Stand:
     def __enter__(self):
         terminate_on_signals()
         self.prefs = save_prefs()
+        refuse_unsafe_roster(self.prefs)
         self.luts = lut_folder()
         return self
 
@@ -277,14 +342,17 @@ class Stand:
     def __exit__(self, *exc):
         self.app.stop()
         self.camera.stop()
-        restore_prefs(self.prefs)
-        restore_lut_folder(self.luts)
+        try:
+            restore_prefs(self.prefs)
+        finally:
+            restore_lut_folder(self.luts)
         return False
 
 
 def real_cameras_touched():
-    """Соединения PTP/IP (порт 15740) с чужими адресами: настоящая камера в сети. Проверки ходят только к 127.0.0.1, так что
-    быть их не должно."""
+    """Соединения PTP/IP (порт 15740) с чужими адресами, какие есть сию минуту. Проверки ходят только к 127.0.0.1 (программа
+    запущена с ZV_PTPIP_HOST, а `Stand` не пускает прогон, если в ленте знакомых камер программы есть камера не на loopback), так
+    что быть их не должно. Это снимок в момент вызова, а не доказательство, что их не было за весь прогон."""
     out = subprocess.run(["netstat", "-an", "-p", "tcp"], capture_output=True, text=True).stdout
     return [line for line in out.splitlines()
             if (line.split() + [""] * 6)[4].endswith(".15740") and not line.split()[4].startswith("127.")]
@@ -417,18 +485,23 @@ def run(out):
     s = wait(lambda s: not s["ui"]["assist"]["open"])
     check("M — закрывает", not s["ui"]["assist"]["open"])
 
-    # всё сразу — частота кадров не падает
+    # всё сразу — частота кадров не падает. Обычную меряем здесь же, перед сравнением, в тех же условиях: нагрузка на Mac меняется,
+    # и сравнивать со значением минутной давности нельзя
+    act("assistOff")
+    wait(lambda s: overlay(s) is None)
+    base_now = fps_over(3)
+    print(f"  обычная частота (всё выключено) прямо перед сравнением: {base_now:.1f} к/с")
     for name, value in (("zebra", "95"), ("falseColor", "on"), ("peaking", "mid")):
         act("setAssist", name=name, value=value)
     wait(lambda s: overlay(s) is not None)
     full = fps_over(4)
     print(f"  частота со всеми инструментами: {full:.1f} к/с")
-    check("со всеми инструментами кадров не меньше 90 % от обычного", full >= base_fps * 0.9, f"{full:.1f} против {base_fps:.1f}")
+    check("со всеми инструментами кадров не меньше 90 % от обычного", full >= base_now * 0.9, f"{full:.1f} против {base_now:.1f}")
     act("setZoom", factor=8, x=0.5, y=0.5)
     time.sleep(1)
     zoomed = fps_over(4)
     print(f"  …и при 8×: {zoomed:.1f} к/с")
-    check("при 8× тоже", zoomed >= base_fps * 0.9, f"{zoomed:.1f} против {base_fps:.1f}")
+    check("при 8× тоже", zoomed >= base_now * 0.9, f"{zoomed:.1f} против {base_now:.1f}")
     shot(out, "9-all-zoom-8x")
     act("resetZoom")
 
@@ -511,7 +584,6 @@ def run(out):
     act("setAssist", name="overlay", value="off")
     s = wait(lambda s: values(s)["overlay"] == "off")
     check("наложение выключено", values(s)["overlay"] == "off", values(s))
-    return base_fps
 
 
 # ---------------------------------------------------------------------------------------------------------------------------
@@ -715,14 +787,40 @@ def run_mirror(out):
     wait(lambda s: setting(s, "focusArea").get("value") == area, 4)
 
 
-def run_picture_fps(out, base_fps):
-    """Частота кадров с LUT, зеркалом и всей помощью сразу — не меньше 90 % от обычной."""
+def run_lut_with_mirror():
+    """«Авто» и зеркало вместе — картинка идёт через оба: профиль камеры PP8 → PP0 → PP8, LUT следует за ним не дольше секунды
+    каждый раз, а зеркало остаётся."""
+    act("assistOff")
+    act("setAssist", name="lut", value="auto")
+    act("setAssist", name="orientation", value="mirror")
+    act("request", setting="pictureProfile", value=8)
+    s = wait(lambda s: picture(s)["lut"]["resolved"] == "slog3cine", 4)
+    check("«Авто» + зеркало, PP8: resolved slog3cine, зеркало", picture(s)["lut"]["resolved"] == "slog3cine"
+          and picture(s)["orientation"] == "mirror", picture(s))
+    for profile, resolved in ((0, None), (8, "slog3cine")):
+        t0 = time.monotonic()
+        act("request", setting="pictureProfile", value=profile)
+        s = wait(lambda s: picture(s)["lut"]["resolved"] == resolved, 3)
+        took = time.monotonic() - t0
+        check(f"«Авто» + зеркало: PP{profile} → resolved {resolved} за {took:.2f} с (≤ 1 с)",
+              picture(s)["lut"]["resolved"] == resolved and took <= 1.0, (picture(s)["lut"], took))
+        check("…и зеркало осталось (picture.orientation и плитка «Картинка»), кадры идут",
+              picture(s)["orientation"] == "mirror" and values(s)["orientation"] == "mirror" and s["fps"] > 3,
+              (picture(s)["orientation"], values(s)["orientation"], s["fps"]))
+    act("assistOff")
+
+
+def run_picture_fps(out):
+    """Частота кадров с LUT, зеркалом и всей помощью сразу — не меньше 90 % от обычной. Обычную меряем тут же, перед этим, на тех же
+    кадрах (лог PP8, всё выключено), а не берём из начала прогона."""
     act("assistOff")
     act("request", setting="pictureProfile", value=8)
     wait(log_frames_arrived, 12)
     s = state()
     if s["ui"]["waveform"]["on"]:
         act("toggleWaveform")
+    wait(lambda s: overlay(s) is None and s["waveform"] is None and s["vectorscope"]["targets"] is None, 4)
+    base_fps = fps_over(3)
     act("waveformMode", mode="luma")
     act("toggleWaveform")
     for name, value in (("lut", "auto"), ("orientation", "mirror"), ("zebra", "95"), ("falseColor", "on"), ("peaking", "mid"),
@@ -735,7 +833,7 @@ def run_picture_fps(out, base_fps):
           and s["waveform"] is not None and s["vectorscope"]["targets"] is not None and s["probe"]["percent"] is not None,
           (picture(s), s["vectorscope"], s["probe"]))
     full = fps_over(4)
-    print(f"  частота с LUT, зеркалом и всей помощью: {full:.1f} к/с (обычная {base_fps:.1f})")
+    print(f"  частота с LUT, зеркалом и всей помощью: {full:.1f} к/с (обычная, замер перед этим: {base_fps:.1f})")
     check("с LUT, зеркалом и всей помощью кадров не меньше 90 % от обычного", full >= base_fps * 0.9, f"{full:.1f} против {base_fps:.1f}")
     shot(out, "20-lut-mirror-all-tools")
     act("assistOff")
@@ -745,7 +843,7 @@ def run_picture_fps(out, base_fps):
     wait(lambda s: s["vectorscope"]["targets"] is None and s["waveform"] is None, 4)
 
 
-def run_picture(out, base_fps):
+def run_picture(out):
     """Картинка: LUT, свой .cube, клавиши, зеркало с фокусом касанием, частота кадров. Профиль изображения камеры — как был."""
     act("assistOff")
     act("resetZoom")
@@ -758,7 +856,8 @@ def run_picture(out, base_fps):
         run_cube(out, log_spread)
         run_keys()
         run_mirror(out)
-        run_picture_fps(out, base_fps)
+        run_lut_with_mirror()
+        run_picture_fps(out)
     finally:
         act("assistOff")
         act("resetZoom")
@@ -878,11 +977,11 @@ def main():
             time.sleep(2)
             autohide = s["prefs"]["autoHide"]
             try:
-                base_fps = run(args.out)
-                run_picture(args.out, base_fps)
+                run(args.out)
+                run_picture(args.out)
                 run_bars(args.out, stand)
                 touched = real_cameras_touched()
-                check("к настоящей камере (PTP/IP, порт 15740) не подключались", not touched, touched)
+                check("сейчас нет соединений PTP/IP (порт 15740) с чужими адресами", not touched, touched)
             finally:
                 act("setPreference", key="autoHide", value="true" if autohide else "false")
     except KeyboardInterrupt as stop:

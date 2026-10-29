@@ -12,7 +12,8 @@ import argparse, os, signal, subprocess, sys, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
-from e2e_monitor import CAMERA, act, check, restore_prefs, save_prefs, shot, state, terminate_on_signals, wait  # noqa: E402
+from e2e_monitor import (CAMERA, act, check, refuse_unsafe_roster, restore_prefs, save_prefs, shot, state, stop_process,  # noqa: E402
+                         terminate_on_signals, wait)
 import e2e_monitor  # noqa: E402
 
 
@@ -87,13 +88,16 @@ def main():
     terminate_on_signals()                              # сигнал (в том числе `perl -e 'alarm N'`) — тоже через `finally`
     os.makedirs(args.out, exist_ok=True)
     before = save_prefs()
+    refuse_unsafe_roster(before)
     camera_log = os.path.join(args.out, "camera.log")
     log = open(camera_log, "a")
-    cam = subprocess.Popen([sys.executable, os.path.join(ROOT, "scripts/fake_camera.py"), "--listen", CAMERA], stdout=log,
-                           stderr=subprocess.STDOUT)
-    time.sleep(0.5)
-    proc = launch(args.app, args.out)
+    cam = proc = None
     try:
+        # запуск — внутри try: сигнал между запуском камеры и программой тоже доходит до finally
+        cam = subprocess.Popen([sys.executable, os.path.join(ROOT, "scripts/fake_camera.py"), "--listen", CAMERA], stdout=log,
+                               stderr=subprocess.STDOUT)
+        time.sleep(0.5)
+        proc = launch(args.app, args.out)
         s = ready()
         if not s or s.get("phase") != "ready":
             print(f"программа не дошла до ready: {s and s.get('phase')}")
@@ -114,9 +118,8 @@ def main():
         s = wait(lambda s: width(s) == 1024, 30)
         check("авто — вернулось полное, канал тянет", width(s) == 1024, s.get("frameSize"))
     finally:
-        quit(proc)
-        cam.terminate()
-        cam.wait()
+        stop_process(proc)
+        stop_process(cam)
         restore_prefs(before)
     print(f"\n{e2e_monitor.passed} из {e2e_monitor.passed + e2e_monitor.failed} проверок прошли; скриншоты — {args.out}")
     return 0 if e2e_monitor.failed == 0 else 1

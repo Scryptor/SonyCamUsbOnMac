@@ -10,7 +10,7 @@
 
   scripts/e2e_lens.py [--app "build/Sony Cam Viewer.app"] [--out /tmp/lens]
 """
-import argparse, os, sys, time
+import argparse, os, re, sys, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
@@ -108,11 +108,13 @@ def run(out, stand):
     # шкала фокуса — только в MF
     r = act("focusStep", offset=-3)
     check("в AF шкалы фокуса нет — 409", r.get("status") == 409, r)
+    # карточка «Метки фокуса» сама открывается, когда шкала с метками появилась впервые за запуск, — но только пока не отмечено
+    # «Больше не показывать»; эта отметка живёт в настройках программы и могла остаться от пользователя, поэтому её сбрасываем
+    # (настройки в конце вернёт Stand)
+    act("setPreference", key="focusMarksHelpShown", value="false")
     act("request", setting="focusMode", value=FOCUS_MODE_MF)
     s = wait(lambda s: lens(s)["focusScale"], 4)
     check("MF — шкала фокуса", lens(s)["focusScale"], lens(s))
-    # карточка «Метки фокуса» сама открывается, когда шкала с метками появилась впервые за запуск (пока не отмечено «Больше не
-    # показывать»)
     time.sleep(1.0)
     check("карточка «Метки фокуса» открылась сама при первом показе шкалы", state()["ui"]["focusMarksHelp"], state()["ui"])
     shot(out, "3b-focus-marks-help")
@@ -188,19 +190,27 @@ def pulling(s):
 
 
 def run_pull(mark, seconds, limit=None):
-    """«Перевести к метке» и опрос раз в 50 мс, пока не появится подпись. Отдаёт (сколько секунд, подпись, положения по пути)."""
+    """«Перевести к метке» и опрос раз в 50 мс, пока не появится подпись. Отдаёт (сколько секунд, подпись, положения по пути, в
+    скольких опросах перевод шёл: метка и доля пути без подписи — у «уже у метки» таких нет)."""
     act("focusPullTime", seconds=seconds)
     t0 = time.monotonic()
     act("focusMark", mark=mark, op="go")
-    path = []
+    path, ticks = [], 0
     while time.monotonic() - t0 < (limit or seconds + 6):
         s = state()
         path.append(position(s))
+        ticks += pulling(s)
         pull = lens(s)["pull"]
         if pull and pull["caption"]:
-            return time.monotonic() - t0, pull["caption"], path
+            return time.monotonic() - t0, pull["caption"], path, ticks
         time.sleep(0.05)
-    return None, None, path
+    return None, None, path, ticks
+
+
+def near_far_commands(stand):
+    """Сколько команд Near/Far получила камера, запущенная последней, — и отработанных («фокус ближе на …»), и тех, что она не
+    отработала («Near/Far … не двигаю»: не MF, мёртвая зона). Каждая команда — одна строка её журнала."""
+    return len(re.findall(r"Near/Far [+-]\d+|фокус (?:ближе|дальше) на", stand.camera.session_log()))
 
 
 def stands_still(seconds=1.2, settle=0.6):
@@ -247,7 +257,7 @@ def run_marks(out, stand):
     shot(out, "5-marks-scale")
 
     # перевод к A за 4 с
-    took, caption, path = run_pull("A", 4)
+    took, caption, path, _ = run_pull("A", 4)
     print(f"  перевод к A за 4 с: {took and round(took, 2)} с, «{caption}», фокус {position()}")
     check("перевод к A за 4 с кончился за 3,5–5 с", took is not None and 3.5 <= took <= 5.0, took)
     check("подпись «Фокус у метки A»", caption == "Фокус у метки A", caption)
@@ -280,12 +290,20 @@ def run_marks(out, stand):
     act("request", setting="focusMode", value=FOCUS_MODE_AFC)
     s = wait(lambda s: lens(s)["pull"] is None, 3)
     check("фокус на AF: перевод отменён, lens.pull пуст, шкалы нет", lens(s)["pull"] is None and not lens(s)["focusScale"], lens(s))
-    still, seen = stands_still()
-    check("в AF после отмены движения нет", still, seen)
+    # в AF камера Near/Far не отрабатывает, так что покой фокуса там ничего не доказывает: считаем команды, которые она получила.
+    # Команда, что была в пути в миг переключения, ещё дойдёт — ей полсекунды; потом новых быть не должно
+    time.sleep(0.5)
+    sent = near_far_commands(stand)
+    time.sleep(1.5)
+    check("в AF после отмены перевод больше не шлёт камере Near/Far", near_far_commands(stand) == sent, (sent, near_far_commands(stand)))
     check("метки пережили AF", lens(state())["marks"]["A"] is not None and lens(state())["marks"]["B"] is not None, lens(state())["marks"])
     act("request", setting="focusMode", value=FOCUS_MODE_MF)
     wait(lambda s: lens(s)["focusScale"], 4)
     check("в MF метки на месте", lens(state())["marks"]["A"] == a and lens(state())["marks"]["B"] == b, lens(state())["marks"])
+    # вернулись в MF — здесь отмену и видно: ожившему переводу ничто не мешало бы ехать к A
+    still, seen = stands_still()
+    check("в MF после AF фокус стоит и Near/Far так и не пришло", still and near_far_commands(stand) == sent,
+          (seen, sent, near_far_commands(stand)))
 
     # ручной шаг посреди перевода
     act("focusMark", mark="A", op="go")
@@ -356,9 +374,18 @@ def run_marks(out, stand):
     pull = lens(state())["pull"]
     check("уже у метки: сразу подпись, а не 8 с ожидания", pull is not None and pull["caption"] == "Фокус у метки B" and pull["progress"] is None, pull)
     time.sleep(3.3)
-    took, caption, _ = run_pull("A", 0, limit=6)
-    check("время 0: «Фокус у метки A» меньше чем за 1,5 с", caption == "Фокус у метки A" and took is not None and took < 1.5, (took, caption))
-    check("…и фокус у A (±2)", abs(position() - lens(state())["marks"]["A"]) <= 2, (position(), lens(state())["marks"]))
+    # время 0 — как можно быстрее. Фокус сейчас у A (B сохранена на нём же), и «уже у метки» мерить нечего, — уходим на ~40 единиц
+    # и едем к A по-настоящему. Замер на камере с физикой объектива (×3,5, ответ 80 мс): два шага Near/Far, 0,23–0,24 с (шесть
+    # переводов туда и обратно); самый короткий перевод по времени — 1 с, так что граница 1 с отличает «как можно быстрее» от него
+    far = go_to(20)
+    a_mark = lens(state())["marks"]["A"]
+    check(f"перед нулевым переводом фокус ушёл от A ({far} против {a_mark})", far is not None and a_mark - far >= 30, (far, a_mark))
+    took, caption, path, ticks = run_pull("A", 0, limit=6)
+    print(f"  время 0: {far} → {position()} (метка A {a_mark}) за {took and round(took, 2)} с, «{caption}», перевод виден в {ticks} опросах")
+    check("время 0: перевод шёл по-настоящему (метка и доля пути в опросах, фокус сдвинулся на ≥ 30), а не «уже у метки»",
+          ticks >= 1 and max(path) - far >= 30, (ticks, far, max(path)))
+    check("…и кончился «Фокус у метки A» меньше чем за 1 с", caption == "Фокус у метки A" and took is not None and took < 1.0, (took, caption))
+    check("…с фокусом у A (±2)", abs(position() - a_mark) <= 2, (position(), a_mark))
     time.sleep(3.3)
     act("focusMark", mark="B", op="clear")
     check("B стёрта, A осталась", lens(state())["marks"]["B"] is None and lens(state())["marks"]["A"] is not None, lens(state())["marks"])
@@ -375,14 +402,38 @@ def run_marks(out, stand):
     check("перевод идёт", pulling(state()), lens(state())["pull"])
     t0 = time.monotonic()
     stand.camera.stop()
-    s = wait(lambda s: s["phase"] != "ready", 20)
+    # пока программа не признала обрыв (фаза ещё ready), перевод может числиться идущим; подписи об успехе у него быть не должно
+    captions = []
+    s = state()
+    while time.monotonic() - t0 < 20 and (s is None or s["phase"] == "ready"):
+        pull = s and lens(s)["pull"]
+        if pull and pull["caption"]:
+            captions.append(pull["caption"])
+        time.sleep(0.05)
+        s = state()
+    noticed = time.monotonic() - t0
     r_save, r_go = act("focusMark", mark="B", op="save"), act("focusMark", mark="A", op="go")
-    check(f"камера не готова ({s['phase']}): запомнить метку нельзя — 409 «camera not ready»",
-          r_save.get("status") == 409 and "not ready" in (r_save.get("error") or ""), (r_save, s["phase"]))
+    phase = s["phase"] if s else "нет ответа"
+    check(f"камера не готова ({phase}): запомнить метку нельзя — 409 «camera not ready»",
+          r_save.get("status") == 409 and "not ready" in (r_save.get("error") or ""), (r_save, phase))
     check("…и перевести к метке нельзя — 409 «camera not ready»", r_go.get("status") == 409 and "not ready" in (r_go.get("error") or ""), r_go)
-    s = wait(lambda s: lens(s)["pull"] is None, 20)
-    print(f"  lens.pull пуст через {time.monotonic() - t0:.1f} с после обрыва; фаза {s['phase']}")
-    check("обрыв связи: перевод кончился, подписи об успехе нет", lens(s)["pull"] is None, lens(s)["pull"])
+    # перевод кончается вместе с сеансом: не позже ~2 с после того, как фаза сменилась. Смотрим все эти 2 с, даже когда он уже пуст:
+    # подпись об успехе, если бы обрыв кончал перевод «успехом», появилась бы позже и жила 3 с
+    t1 = time.monotonic()
+    empty_after = None
+    while time.monotonic() - t1 < 2.0:
+        pull = s and lens(s)["pull"]
+        if pull and pull["caption"]:
+            captions.append(pull["caption"])
+        if s is not None and pull is None and empty_after is None:
+            empty_after = time.monotonic() - t1
+        time.sleep(0.05)
+        s = state()
+    print(f"  обрыв признан через {noticed:.1f} с, lens.pull пуст через {empty_after if empty_after is None else round(empty_after, 2)} с "
+          f"после этого; фаза {s['phase'] if s else '?'}")
+    check("обрыв связи: не позже чем через 2 с после смены фазы lens.pull пуст и остаётся пустым",
+          empty_after is not None and s is not None and lens(s)["pull"] is None, (empty_after, s and lens(s)["pull"]))
+    check("…и подписи («Фокус у метки …», любой) за эти 2 с не было", not captions, captions)
     stand.camera.start(*PHYSICS)
     s = wait(lambda s: s["phase"] == "ready" and s["fps"] > 3 and s["currentCamera"], 45)
     time.sleep(3)
@@ -433,7 +484,7 @@ def main():
                 run(args.out, stand)
                 run_marks(args.out, stand)
                 touched = real_cameras_touched()
-                check("к настоящей камере (PTP/IP, порт 15740) не подключались", not touched, touched)
+                check("сейчас нет соединений PTP/IP (порт 15740) с чужими адресами", not touched, touched)
             finally:
                 act("zoomStop")
                 act("focusPullStop")

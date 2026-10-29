@@ -50,7 +50,7 @@ Creative Look 0xD0FA, гамма и цвет профиля 0xD0E1 и 0xD0E9 (S-
                          [--battery 0–100] [--mode photo|video] [--format jpeg|raw+jpeg] [--ssdp] [--busy] [--pairing]
                          [--reject iso,…] [--record-delay с] [--record сценарий]
                          [--focus-gain G] [--focus-step-ms T] [--focus-deadband D] [--model zv-e10|newer]
-                         [--broken type0|garbage|refuse|hang] [--control [127.0.0.1:]15742]
+                         [--broken type0|garbage|refuse|hang] [--control [127.0.0.1:]15751]
   ZV_PTPIP_HOST=127.0.0.1 …/ZVViewer --automation        # Mac
   am start … --es ptpipHost <IP Mac>                       # планшет: --listen <IP Mac>:15740
   scripts/badnet.py --camera 127.0.0.1:25740 …             # или через прокси: --listen 127.0.0.1:25740
@@ -931,14 +931,18 @@ async def main():
                          "абсолютный фокус 0xE042 и 0xE043")
     ap.add_argument("--broken", choices=sorted(fake_newer.BROKEN), metavar="|".join(sorted(fake_newer.BROKEN)),
                     help="новая камера отвечает на 0x9215, 0x9216 и 0x9223 плохо: " + "; ".join(f"{k} — {v}" for k, v in fake_newer.BROKEN.items()))
-    ap.add_argument("--control", metavar="[ХОСТ:]ПОРТ",
-                    help="управляющий порт (по умолчанию его нет): одна строка — одна команда, ответ ok / unknown / error. Команды: "
+    ap.add_argument("--control", metavar="[ХОСТ:]ПОРТ", type=fake_control.parse_address,
+                    help="управляющий порт (по умолчанию его нет; слушает только loopback, без хоста — 127.0.0.1): одна строка — "
+                         "одна команда, ответ ok / unknown / error. Команды: "
                          + "; ".join(f"{k} — {v}" for k, v in fake_control.COMMANDS.items()))
     a = ap.parse_args()
+    if a.broken and a.model != "newer":
+        print(f"ВНИМАНИЕ: --broken {a.broken} действует только у --model newer: у ZV-E10 операций 0x9215, 0x9216 и 0x9223 нет, "
+              "и ломать нечего", file=sys.stderr, flush=True)
     cam = Camera(a)
     host, port = a.listen.rsplit(":", 1)
     server = await asyncio.start_server(lambda r, w: serve(cam, r, w), host, int(port))
-    control = await fake_control.serve(cam, a.control) if a.control else None     # ссылка — чтобы порт жил, пока живёт камера
+    control = await fake_control.serve(cam, "%s:%d" % a.control) if a.control else None   # ссылка — чтобы порт жил, пока живёт камера
     if a.ssdp:
         await asyncio.get_running_loop().create_datagram_endpoint(lambda: SSDPResponder(cam, host, int(port)),
                                                                   sock=ssdp_socket())
@@ -949,7 +953,7 @@ async def main():
               f"шаг фокуса {a.focus_step_ms:g} мс" if a.focus_step_ms else "",
               f"мёртвая зона фокуса {a.focus_deadband:g}" if a.focus_deadband else "",
               f"новая камера: в DeviceInfo {fake_newer.MODEL}" if cam.newer else "",
-              f"ломается: {a.broken}" if a.broken else "", f"управление: {a.control}" if a.control else ""]
+              f"ломается: {a.broken}" if a.broken else "", f"управление: {a.control[0]}:{a.control[1]}" if a.control else ""]
     plain = cam.sets[None].frames
     print(f"поддельная {cam.name}: {a.listen}, кадр {len(plain[2]) // 1024} / {len(plain[1]) // 1024} КБ, "
           f"снимок {len(cam.photo) // 1024} КБ" + "".join(f", {e}" for e in extras if e), flush=True)

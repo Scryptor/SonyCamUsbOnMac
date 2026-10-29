@@ -1,10 +1,12 @@
-"""fake_control.py — управляющий порт поддельной камеры: scripts/fake_camera.py --control 127.0.0.1:15742.
+"""fake_control.py — управляющий порт поддельной камеры: scripts/fake_camera.py --control 127.0.0.1:15751.
 
 Проверкам нужно, чтобы камера сама что-то сделала посреди прогона: сменила объектив, переименовала подписи, прислала событие.
-Для этого один механизм на все скрипты: TCP-порт, только на 127.0.0.1 (по умолчанию его нет — включается флагом), одна строка —
-одна команда, в ответ одна строка. Сигналов и обёрток нет.
+Для этого один механизм на все скрипты: TCP-порт (по умолчанию его нет — включается флагом), одна строка — одна команда, в
+ответ одна строка. Сигналов и обёрток нет. Порт слушает только loopback (127.0.0.1, localhost, ::1; без хоста — 127.0.0.1): у него
+нет ни пароля, ни проверки, кто пишет, а команды меняют камеру, так что в сеть он не выходит, и другой адрес не принимается.
+(15742 — порт камеры C у scripts/fake_cameras.py; скрипты проверок берут 15751.)
 
-  printf 'lens-changed\n' | nc 127.0.0.1 15742        # → ok
+  printf 'lens-changed\n' | nc 127.0.0.1 15751        # → ok
   e2e_monitor.FakeCamera.control("e043", "30165")      # из скриптов проверок
 
 Ответ: `ok` (у запроса — `ok значение`); `unknown` — такой команды нет; `error: …` — команда есть, а выполнить её нельзя (плохие
@@ -12,9 +14,11 @@
 Команды — в COMMANDS; те же строки печатает `fake_camera.py --help`. Шесть из них действуют только у новой камеры
 (`--model newer`): у ZV-E10 операций 0x9215 и 0x9223 нет, она их не слышит, но событие уйдёт и ей.
 """
-import asyncio
+import argparse, asyncio, struct
 
 import fake_newer
+
+LOOPBACK = ("127.0.0.1", "localhost", "::1")
 
 # команда → что делает; порядок — как в справке
 COMMANDS = {
@@ -83,19 +87,36 @@ def run(cam, words):
     return "ok"
 
 
-async def serve(cam, address):
-    """Слушает `хост:порт` (или просто порт — тогда 127.0.0.1) и выполняет команды по строке на соединение."""
-    host, _, port = address.rpartition(":")
+def parse_address(text):
+    """`хост:порт` или просто `порт` → (хост, порт). Хост — только loopback (по умолчанию 127.0.0.1), порт — число 1…65535; иное —
+    argparse.ArgumentTypeError (так флаг `--control` отвечает сам, до запуска камеры)."""
+    host, _, port = str(text).rpartition(":")
     host = host or "127.0.0.1"
+    if host not in LOOPBACK and not host.startswith("127."):
+        raise argparse.ArgumentTypeError(f"управляющий порт слушает только loopback (127.0.0.1, localhost, ::1), а не {host}: у него нет "
+                                         "пароля, и команды меняют камеру")
+    if not port.isdigit() or not 0 < int(port) < 65536:
+        raise argparse.ArgumentTypeError(f"порт управления — число 1…65535, а не «{port}»")
+    return host, int(port)
+
+
+async def serve(cam, address):
+    """Слушает `хост:порт` (только loopback; просто порт — 127.0.0.1) и выполняет команды по строке на соединение."""
+    host, port = parse_address(address)
 
     async def handle(reader, writer):
         try:
             words = (await asyncio.wait_for(reader.readline(), 5)).decode().split()
-            writer.write(((run(cam, words) if words else "unknown") + "\n").encode())
+            try:
+                reply = run(cam, words) if words else "unknown"
+            except (ValueError, OverflowError, struct.error) as error:
+                # команда есть, а числа ей не по размеру (код события больше 0xFFFF и т. п.): ответ, а не оборванное соединение
+                reply = f"error: {error}"
+            writer.write((reply + "\n").encode())
             await writer.drain()
         except (asyncio.TimeoutError, ConnectionError, UnicodeDecodeError):
             pass
         finally:
             writer.close()
 
-    return await asyncio.start_server(handle, host, int(port))
+    return await asyncio.start_server(handle, host, port)

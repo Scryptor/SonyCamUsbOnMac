@@ -293,8 +293,9 @@ def run_newer(out, stand):
         time.sleep(0.6)
         still, seen = stands_at(stand)
         final = e043(stand)
-        # шаг вниз по шкале — ещё 4 единицы ×655 назад; до метки A фокусу осталось много, так что «доехал» он бы дальше
-        allowed = 0.05 * FOCUS_MAX + (4 * 655 if what == "focusStep" else 0)
+        # остановка пишет камере положение, прочитанное чуть раньше, и линза успевает проехать ещё немного (нагрузка на Mac его растит):
+        # допуск — 10 % шкалы; шаг вниз по шкале — ещё 4 единицы ×655 назад. До метки A остаётся 12–17 %, так что «доехал» бы фокус дальше
+        allowed = 0.10 * FOCUS_MAX + (4 * 655 if what == "focusStep" else 0)
         print(f"  {what}: в миг остановки {here}, итог {final}, метка A {a}")
         check(f"{what}: после остановки фокус не движется (0xE043 один и тот же)", still, seen)
         check(f"{what}: итог 0xE043 — там, где остановили (в пределах {int(allowed)}), а не у метки A",
@@ -526,6 +527,8 @@ def main():
     unknown = [name for name in chosen if name not in SCENARIOS]
     if unknown:
         ap.error(f"нет таких сценариев: {', '.join(unknown)}")
+    if not chosen:
+        ap.error("не выбран ни один сценарий: прогон без проверок не может считаться пройденным")
     try:
         with Stand(args.app, args.out) as stand:
             # окно «Пресеты» повыше, чтобы на снимке были все группы (ключа до запуска не было — настройки его уберут)
@@ -551,7 +554,7 @@ def main():
                     elif name == "hang":
                         run_hang(args.out, stand)
                 touched = real_cameras_touched()
-                check("к настоящей камере (PTP/IP, порт 15740) не подключались", not touched, touched)
+                check("сейчас нет соединений PTP/IP (порт 15740) с чужими адресами", not touched, touched)
             finally:
                 act("focusPullStop")
                 act("setPreference", key="autoHide", value="true" if autohide else "false")
@@ -559,7 +562,7 @@ def main():
         print(f"\nпрервано: {stop}")
         return 2
     print(f"\n{e2e_monitor.passed} из {e2e_monitor.passed + e2e_monitor.failed} проверок прошли; скриншоты — {args.out}")
-    return 0 if e2e_monitor.failed == 0 else 1
+    return 0 if e2e_monitor.failed == 0 and e2e_monitor.passed > 0 else 1
 
 
 if __name__ == "__main__":
