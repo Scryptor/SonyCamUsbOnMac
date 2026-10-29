@@ -79,6 +79,39 @@ private func runSteps(from start: Double, to target: Double, duration: Double, l
     return run
 }
 
+/// Прогон с медленной камерой. Контроллер тикает каждые 0,1 с и зовёт `next` с тем положением, которое видит; шаг объектив
+/// исполняет только через `delay` секунд после команды — до тех пор ответ камеры и свежий 0xD24C не пришли и положение
+/// прежнее. `again` — сразу после команды, в тот же момент, `next` зовут ещё раз (как «после ответа камеры»): положение
+/// при этом тоже ещё старое.
+private func runSlow(from start: Double, to target: Double, duration: Double, lens: Lens, delay: Double, again: Bool,
+                     gain: Double = 3.5, horizon: Double = 12) -> Run {
+    var run = Run(pull: FocusPull(mode: .steps, from: start, to: target, duration: duration, gain: gain), lens: lens)
+    var due: [(time: Double, steps: Int64)] = []
+    for index in 0...Int((horizon / FocusPull.tick).rounded()) {
+        let time = Double(index) * FocusPull.tick
+        while let next = due.first, next.time <= time + 1e-9 {          // шаги, которые объектив уже исполнил
+            due.removeFirst()
+            let before = run.lens.position
+            run.lens.move(next.steps)
+            run.moves.append(Move(time: next.time, steps: next.steps, before: before, after: run.lens.position))
+        }
+        var action = run.pull.next(elapsed: time, position: run.lens.position)
+        var repeats = 0
+        while case let .nearFar(steps) = action, again, repeats < 50 {
+            due.append((time + delay, steps))
+            action = run.pull.next(elapsed: time, position: run.lens.position)
+            repeats += 1
+        }
+        if case let .nearFar(steps) = action { due.append((time + delay, steps)) }
+        if case let .finish(outcome) = action {
+            run.outcome = outcome
+            run.finishedAt = time
+            return run
+        }
+    }
+    return run
+}
+
 /// Что запись `.write` кладёт в регистр; nil — это не запись.
 private func written(_ action: FocusPull.Action) -> Int? {
     if case let .write(value) = action { return Int(value) }
@@ -571,7 +604,10 @@ func stepsConverge(gain: Double) {
     var stalled = FocusPull(mode: .steps, from: 0, to: 100, duration: 0)
     let big = stalled.next(elapsed: 0, position: 0)
     #expect(big == .nearFar(7))
-    _ = stalled.next(elapsed: 0.1, position: 0)
+    let waiting = stalled.next(elapsed: 0.1, position: 0)            // положение прежнее, 0,1 с — ещё ждём
+    #expect(waiting == .wait)
+    let settled = stalled.next(elapsed: 0.4, position: 0)            // 0,3 с прошло: пустой шаг, k не трогаем
+    #expect(settled == .nearFar(7))
     #expect(stalled.gain == 3.5)
     // а сдвинувшая — уточняет: 0,7 · 3,5 + 0,3 · 25 / 7
     var moving = FocusPull(mode: .steps, from: 0, to: 100, duration: 0)
@@ -620,15 +656,16 @@ func stepsConverge(gain: Double) {
 }
 
 @Test func stepsStuckNeedsThreeInARowInOneDirection() {
-    // две пустые команды, потом сдвиг, потом снова две пустые — ещё не «упёрлись»; третья пустая подряд — упёрлись
+    // две пустые команды, потом сдвиг, потом снова две пустые — ещё не «упёрлись»; третья пустая подряд — упёрлись.
+    // Команда «пустая», когда положение не изменилось и с неё прошло 0,3 с, поэтому вызовы идут через 0,4 с
     var pull = FocusPull(mode: .steps, from: 80, to: 100, duration: 0)
     let c1 = pull.next(elapsed: 0.0, position: 96)                   // команда 1
-    let c2 = pull.next(elapsed: 0.1, position: 96)                   // команда 1 пустая (одна подряд); команда 2
-    let c3 = pull.next(elapsed: 0.2, position: 97)                   // команда 2 сдвинула — счёт с нуля; команда 3
-    let c4 = pull.next(elapsed: 0.3, position: 97)                   // команда 3 пустая (одна подряд); команда 4
-    let c5 = pull.next(elapsed: 0.4, position: 97)                   // команда 4 пустая (две подряд); команда 5
+    let c2 = pull.next(elapsed: 0.4, position: 96)                   // команда 1 пустая (одна подряд); команда 2
+    let c3 = pull.next(elapsed: 0.8, position: 97)                   // команда 2 сдвинула — счёт с нуля; команда 3
+    let c4 = pull.next(elapsed: 1.2, position: 97)                   // команда 3 пустая (одна подряд); команда 4
+    let c5 = pull.next(elapsed: 1.6, position: 97)                   // команда 4 пустая (две подряд); команда 5
     #expect([c1, c2, c3, c4, c5].allSatisfy { $0 == .nearFar(1) })
-    let stuck = pull.next(elapsed: 0.5, position: 97)                // команда 5 пустая — три подряд
+    let stuck = pull.next(elapsed: 2.0, position: 97)                // команда 5 пустая — три подряд
     #expect(stuck == .finish(.stuck))
 }
 
@@ -638,15 +675,15 @@ func stepsConverge(gain: Double) {
     var pull = FocusPull(mode: .steps, from: 100, to: 0, duration: 2)
     let up1 = pull.next(elapsed: 0.0, position: 50)
     #expect(up1 == .nearFar(7))
-    let up2 = pull.next(elapsed: 0.1, position: 50)                  // пустых вверх подряд: 1
+    let up2 = pull.next(elapsed: 0.4, position: 50)                  // пустых вверх подряд: 1
     #expect(up2 == .nearFar(7))
-    let down1 = pull.next(elapsed: 1.5, position: 50)                // вверх уже 2; кривая теперь ниже — команда вниз
+    let down1 = pull.next(elapsed: 1.6, position: 50)                // вверх уже 2; кривая теперь ниже — команда вниз
     #expect(down1 == .nearFar(-7))
-    let down2 = pull.next(elapsed: 1.6, position: 50)                // первая пустая вниз — счёт заново: 1
+    let down2 = pull.next(elapsed: 2.0, position: 50)                // первая пустая вниз — счёт заново: 1
     #expect(down2 == .nearFar(-7))
-    let down3 = pull.next(elapsed: 1.7, position: 50)                // вниз подряд: 2
+    let down3 = pull.next(elapsed: 2.4, position: 50)                // вниз подряд: 2
     #expect(down3 == .nearFar(-7))
-    let stuck = pull.next(elapsed: 1.8, position: 50)                // вниз подряд: 3 — упёрлись (всего пустых было пять)
+    let stuck = pull.next(elapsed: 2.8, position: 50)                // вниз подряд: 3 — упёрлись (всего пустых было пять)
     #expect(stuck == .finish(.stuck))
 }
 
@@ -655,8 +692,8 @@ func stepsConverge(gain: Double) {
     // через его положение — двигать нечего, ждём; а дальше она уходит вниз, и «упёрлись» про другое направление
     var pull = FocusPull(mode: .steps, from: 100, to: 0, duration: 2)
     _ = pull.next(elapsed: 0.0, position: 50)                        // команда вверх
-    _ = pull.next(elapsed: 0.1, position: 50)                        // пустых вверх подряд: 1; команда вверх
-    _ = pull.next(elapsed: 0.2, position: 50)                        // пустых подряд: 2; команда вверх
+    _ = pull.next(elapsed: 0.33, position: 50)                       // пустых вверх подряд: 1; команда вверх
+    _ = pull.next(elapsed: 0.66, position: 50)                       // пустых подряд: 2; команда вверх
     let pass = pull.next(elapsed: 1.0, position: 50)                 // пустых подряд: 3, но кривая на 50: в допуске
     #expect(pass == .wait)
     let down = pull.next(elapsed: 1.1, position: 50)                 // кривая ниже: команда вниз, а не «упёрлись»
@@ -679,11 +716,171 @@ func stepsConverge(gain: Double) {
     var pull = FocusPull(mode: .steps, from: 0, to: 100, duration: 8)
     let before = pull.next(elapsed: 10.9, position: 0)
     if case .finish = before { Issue.record("рано: срок 8 + 3 = 11 с") }
+    // шагу 0,2 с и положение прежнее — по правилу устаревшего положения это ещё «ждём», но срок вышел: тайм-аут важнее
     let after = pull.next(elapsed: 11.1, position: 0)
     #expect(after == .finish(.timedOut))
     var instant = FocusPull(mode: .steps, from: 0, to: 100, duration: 0)
     let late = instant.next(elapsed: 3.1, position: 0)
     #expect(late == .finish(.timedOut))
+}
+
+// MARK: - Шаги Near/Far: положение не успело прийти
+
+@Test func stepsStaleTicksAreNotEmptySteps() {
+    // Шаг ушёл, а ответ камеры и свежее положение идут дольше тика: на тиках через 0,1 и 0,2 с положение ещё прежнее. Это не
+    // «камера не двинулась» — автомат ждёт, пока положение не изменится или не пройдёт 0,3 с. Восемь шагов подряд, ни один не пустой.
+    var pull = FocusPull(mode: .steps, from: 0, to: 1000, duration: 0)
+    var position = 0.0
+    var time = 0.0
+    var action = pull.next(elapsed: time, position: position)
+    for _ in 0..<8 {
+        #expect(action == .nearFar(7))
+        let first = pull.next(elapsed: time + 0.1, position: position)
+        let second = pull.next(elapsed: time + 0.2, position: position)
+        #expect(first == .wait)
+        #expect(second == .wait)
+        position += 25                                               // 7 · 3,5 = 24,5 → 25: положение пришло
+        time += 0.25
+        action = pull.next(elapsed: time, position: position)        // шаг учтён, следующий уходит сразу
+    }
+    #expect(action == .nearFar(7))
+    // учтён как есть, со сдвигом 25: k подошёл к 25 / 7
+    #expect(abs(pull.gain - 25.0 / 7.0) < 0.01)
+}
+
+@Test func stepsStaleWaitEndsAfterThreeTenthsOfASecond() {
+    var pull = FocusPull(mode: .steps, from: 80, to: 100, duration: 0)
+    let first = pull.next(elapsed: 0.0, position: 96)                // шаг +1
+    #expect(first == .nearFar(1))
+    let early = pull.next(elapsed: 0.25, position: 96)               // 0,25 с, положение прежнее — ждём
+    #expect(early == .wait)
+    let late = pull.next(elapsed: 0.35, position: 96)                // 0,35 с: камера не двинулась — пустой шаг, уходит следующий
+    #expect(late == .nearFar(1))
+
+    // а изменившееся положение учитывается сразу, как только пришло (хоть через 10 мс): k уточняется по сдвигу 3 за шаг 7
+    var quick = FocusPull(mode: .steps, from: 0, to: 100, duration: 0)
+    let step = quick.next(elapsed: 1.0, position: 0)
+    #expect(step == .nearFar(7))
+    let reply = quick.next(elapsed: 1.01, position: 3)
+    #expect(reply == .wait)                                          // следующая команда — на тике
+    #expect(abs(quick.gain - (0.7 * 3.5 + 0.3 * 3.0 / 7.0)) < 1e-12)
+}
+
+@Test(arguments: [2.0, 3.5, 5.0])
+func stepsSlowCameraConvergesWithoutFalseStuck(gain: Double) {
+    // Ответ камеры и свежее положение идут 120…280 мс, контроллер тикает каждые 100 мс — и тик за тиком видит прежнее положение.
+    // Раньше каждый такой шаг засчитывался «ничего не сдвинул», три подряд давали «упёрлись» (на 450 переводах — все 450).
+    // Теперь все доходят до метки, и не позже чем за секунду после конца времени.
+    let marks = Array(stride(from: 5.0, through: 95.0, by: 10.0))
+    var failed: [String] = []
+    for delay in [0.12, 0.15, 0.18, 0.22, 0.28] {
+        for again in [false, true] {
+            for from in marks {
+                for to in marks where to != from {
+                    let run = runSlow(from: from, to: to, duration: 2, lens: Lens(at: from, gain: gain), delay: delay,
+                                      again: again)
+                    if run.outcome != .reached || (run.finishedAt ?? .infinity) > 3 {
+                        failed.append("\(Int(from))→\(Int(to)) \(delay) с \(again ? "и" : "без") повтора: \(String(describing: run.outcome)) \(run.finishedAt ?? -1)")
+                    }
+                }
+            }
+        }
+    }
+    let sample = failed.prefix(3).joined(separator: "; ")
+    #expect(failed.count == 0, "не дошли до метки: \(sample)")
+}
+
+@Test func stepsSilentCameraStillEnds() {
+    // Камера молчит: положение не меняется никогда. Зависнуть нельзя: три пустых шага подряд — «упёрлись» (на 1…3 с), а если
+    // до этого не дошло, то тайм-аут по сроку
+    let cases: [(Double, Double, Double)] = [(10, 90, 2), (10, 90, 8), (90, 10, 0), (50, 52, 2), (0, 100, 0.5)]
+    for (from, to, duration) in cases {
+        for again in [false, true] {
+            let run = runSlow(from: from, to: to, duration: duration, lens: Lens(at: from, gain: 0), delay: 0.12, again: again)
+            #expect(run.outcome == .stuck || run.outcome == .timedOut, "\(from)→\(to) за \(duration) с: \(String(describing: run.outcome))")
+            #expect((run.finishedAt ?? .infinity) <= duration + 3 + FocusPull.tick)
+            #expect(!run.moves.isEmpty)
+        }
+        let direct = runSteps(from: from, to: to, duration: duration, lens: Lens(at: from, gain: 0))
+        #expect(direct.outcome == .stuck || direct.outcome == .timedOut)
+        #expect((direct.finishedAt ?? .infinity) <= duration + 3 + FocusPull.tick)
+    }
+}
+
+@Test func focusPullSurvivesAbsurdMarks() {
+    // Метки и положения, от которых разность не помещается в Double (±1e308), не роняют программу и дают разумные команды
+    let big = 1e308
+    var rising = FocusPull(mode: .absolute, from: -big, to: big, duration: 2)
+    let low = rising.next(elapsed: 0, position: 0)
+    #expect(low == .write(0))                                        // −1e308 — низ регистра
+    let high = rising.next(elapsed: 1.5, position: 0)
+    #expect(high == .write(65535))                                   // 0,69e308 — верх
+    let end = rising.next(elapsed: 2.0, position: 0)
+    #expect(end == .wait)                                            // цель в регистре — те же 65535, что уже записаны
+    var falling = FocusPull(mode: .absolute, from: big, to: -big, duration: 0)
+    let floor = falling.next(elapsed: 0, position: big)
+    #expect(floor == .write(0))
+    var instant = FocusPull(mode: .absolute, from: -big, to: big, duration: 0)
+    let ceiling = instant.next(elapsed: 0, position: -big)
+    #expect(ceiling == .write(65535))
+
+    var steps = FocusPull(mode: .steps, from: -big, to: big, duration: 0)
+    let up = steps.next(elapsed: 0, position: 0)
+    #expect(up == .nearFar(7))
+    var down = FocusPull(mode: .steps, from: big, to: -big, duration: 2)
+    let far = down.next(elapsed: 2.0, position: big)                 // до цели −2e308: больше Double — всё равно самый большой шаг
+    #expect(far == .nearFar(-7))
+    #expect(down.progress.isFinite)
+    #expect((0.0...1.0).contains(down.progress))
+    #expect(down.desired(at: 1).isFinite)
+    #expect(steps.desired(at: 0).isFinite)
+
+    // регистр и шаг сами по себе: не-число — 0, бесконечность — край
+    #expect(FocusPull.register(.nan) == 0)
+    #expect(FocusPull.register(.infinity) == 65535)
+    #expect(FocusPull.register(-.infinity) == 0)
+    #expect(FocusPull.register(1e308) == 65535)
+    #expect(FocusPull.register(-1e308) == 0)
+    #expect(FocusPull.register(65535.4) == 65535)
+    #expect(FocusPull.register(0.5) == 1)
+    #expect(FocusPull.steps(from: .nan) == 0)
+    #expect(FocusPull.steps(from: .infinity) == 7)
+    #expect(FocusPull.steps(from: -.infinity) == -7)
+    #expect(FocusPull.steps(from: 1e308) == 7)
+    #expect(FocusPull.steps(from: -2.5) == -3)
+    #expect(FocusPull.steps(from: 0.4) == 0)
+}
+
+@Test func focusPullNeverTrapsOnFiniteNumbers() {
+    // Перебор крайних конечных чисел во всех местах: метки, время перевода, момент и положение — ни один вызов не падает,
+    // кривая не-число не даёт, доля пути остаётся в 0…1
+    let sizes: [Double] = [0, 1e-320, 5e-324, 1, 100, 65535, 1e300, 1e308, .greatestFiniteMagnitude]
+    let values = sizes.flatMap { [$0, -$0] }
+    let times: [Double] = [0, 0.05, 1, 2, 3, 10, 1e300, .infinity, -1, .nan]
+    let positions: [Double] = [0, 50, 1e308, -1e308, .greatestFiniteMagnitude]
+    var notNumbers = 0
+    var badProgress = 0
+    var calls = 0
+    for mode in [FocusPull.Mode.absolute, .steps] {
+        for from in values {
+            for to in values {
+                for duration in [0.0, 2.0, 1e-320, 1e300] {
+                    var pull = FocusPull(mode: mode, from: from, to: to, duration: duration)
+                    for time in times {
+                        if pull.desired(at: time).isNaN { notNumbers += 1 }
+                        for position in positions {
+                            _ = pull.next(elapsed: time, position: position)
+                            if !(0.0...1.0).contains(pull.progress) { badProgress += 1 }
+                            calls += 1
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #expect(calls == 2 * 18 * 18 * 4 * 10 * 5)
+    #expect(notNumbers == 0)
+    #expect(badProgress == 0)
 }
 
 // MARK: - Шаги Near/Far: темп
@@ -758,10 +955,10 @@ func stepsConverge(gain: Double) {
     #expect(still == .finish(.timedOut))
 
     var stuck = FocusPull(mode: .steps, from: 80, to: 100, duration: 0)
-    for index in 0..<3 { _ = stuck.next(elapsed: Double(index) * FocusPull.tick, position: 96) }
-    let three = stuck.next(elapsed: 0.3, position: 96)
+    for index in 0..<3 { _ = stuck.next(elapsed: Double(index) * 0.4, position: 96) }   // пустые шаги — через 0,4 с
+    let three = stuck.next(elapsed: 1.2, position: 96)
     #expect(three == .finish(.stuck))
-    let kept = stuck.next(elapsed: 0.4, position: 100)
+    let kept = stuck.next(elapsed: 1.3, position: 100)
     #expect(kept == .finish(.stuck))
 
     var absolute = FocusPull(mode: .absolute, from: 0, to: 65535, duration: 0)

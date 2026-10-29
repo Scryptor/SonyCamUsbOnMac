@@ -3,13 +3,12 @@ import Foundation
 /// Перевод фокуса от метки к метке за заданное время — конечный автомат без ввода-вывода: ни камеры, ни часов, ни потоков.
 /// Mac и Android ведут его одинаково:
 ///
-/// - контроллер зовёт `next(elapsed:position:)` на каждом тике (`tick`, 100 мс) и сразу после того, как камера ответила на
-///   команду, — всегда с самым свежим известным положением (после шага Near/Far свежий 0xD24C ждут не дольше 300 мс).
-///   `elapsed` — секунды от начала перевода, `position` — в единицах режима;
+/// - контроллер зовёт `next(elapsed:position:)` на каждом тике (`tick`, 100 мс) — и, если хочет, ещё раз сразу после того, как
+///   камера ответила на команду, — с самым свежим известным положением. Тики пропускать не нужно, даже пока команда без
+///   ответа и положение не обновилось: автомат сам ждёт его (см. ниже). `elapsed` — секунды от начала перевода, `position` —
+///   в единицах режима;
 /// - исполняет ответ: `.write` — записать 0xE042, `.nearFar` — послать шаг Near/Far, `.wait` — ничего до следующего вызова,
 ///   `.finish` — перевод кончился (чем — в `Outcome`, подпись — `caption`), больше `next` не зовут;
-/// - каждый вызов после `.nearFar` автомат принимает за ответ на эту команду: положение сравнивается с тем, что было до неё.
-///   Пока ответа и свежего положения нет, `next` не зовут (тик в это время пропускают);
 /// - при любом ручном движении фокуса, выходе из ручного фокуса, обрыве связи или касании едущей метки зовёт `cancel()`.
 ///
 /// **Абсолютный фокус** (0…65535). Пока время идёт — `.write(точка кривой)`, повтор прошлого числа не нужен (`.wait`). На
@@ -18,9 +17,13 @@ import Foundation
 ///
 /// **Шаги Near/Far** (0…100, отрицательный шаг уменьшает положение — фокус ближе):
 ///
-/// - каждый вызов сначала учитывает прошлую команду n: сдвиг Δ = положение − положение до неё. При |n| ≥ 3 и Δ ≠ 0 коэффициент
-///   (единиц положения на шаг) уточняется: k ← 0,7·k + 0,3·(Δ/n), в пределах 0,2…20. Три команды подряд в одну сторону
-///   с Δ = 0 — `.finish(.stuck)`: дальше камера не двигает (у края шкалы так бывает);
+/// - команда считается отработанной, когда положение стало другим, чем было перед ней, или когда с неё прошло 0,3 с (тогда
+///   положение берётся как есть, и если оно прежнее — камера не двинулась). Пока нет ни того ни другого, `next` отвечает
+///   `.wait`: ответ камеры и свежее положение могли просто не дойти. Срок (тайм-аут) и `cancel()` при этом работают, а новая
+///   команда уходит только после того, как прошлая отработана;
+/// - у отработанной команды n сдвиг Δ = положение − положение до неё. При |n| ≥ 3 и Δ ≠ 0 коэффициент (единиц положения на
+///   шаг) уточняется: k ← 0,7·k + 0,3·(Δ/n), в пределах 0,2…20. Три команды подряд в одну сторону с Δ = 0 — `.finish(.stuck)`:
+///   дальше камера не двигает (у края шкалы так бывает);
 /// - ошибка e — кривая в этот момент минус положение; допуск τ = max(1, k/2). В допуске — `.wait` до конца времени и
 ///   `.finish(.reached)` на конце. Вне допуска — команда `round(e / k)` в пределах −7…7, но не 0 (шаг ±1 сдвигает фокус
 ///   примерно на k, ближе камера не подойдёт);
@@ -31,7 +34,8 @@ import Foundation
 /// - не кончилось за 3 с после конца времени — `.finish(.timedOut)`.
 ///
 /// После любого конца `next` отвечает тем же самым. Метки и положения — числа в единицах режима: автомат шкалу не проверяет,
-/// кроме записи в регистр (она обрезается до 0…65535).
+/// кроме записи в регистр (она обрезается до 0…65535). Любые конечные числа, хоть ±1e308, он переваривает без остановки
+/// программы: кривая считается взвешенной суммой, а не разностью меток, а не-число в регистре и в шаге даёт 0.
 public struct FocusPull: Sendable {
     /// Как камера двигает фокус.
     public enum Mode: Equatable, Sendable {
@@ -92,6 +96,9 @@ public struct FocusPull: Sendable {
     private static let stuckRun = 3
     /// Не чаще одной команды за тик, с запасом на дрожание таймера.
     private static let commandSpacing = tick * 0.9
+    /// Сколько ждать новое положение после шага, секунд: пока оно прежнее и этого времени не прошло, «камера не двинулась» не
+    /// засчитывается. Столько же (300 мс) контроллер ждёт свежий 0xD24C.
+    private static let settleWindow = 0.3
     /// Коэффициент: пределы и начальное значение, если дали не число.
     private static let gainRange = 0.2...20.0
     private static let defaultGain = 3.5
@@ -101,7 +108,9 @@ public struct FocusPull: Sendable {
     /// Команда Near/Far, ответа на которую ещё не учли.
     private struct Command: Sendable {
         let steps: Int64
+        /// Положение перед командой и время, когда она ушла.
         let before: Double
+        let issuedAt: Double
     }
 
     private var outcome: Outcome?
@@ -131,7 +140,8 @@ public struct FocusPull: Sendable {
     public var progress: Double {
         let span = target - start
         guard span != 0 else { return 1 }
-        return min(max((lastPosition - start) / span, 0), 1)
+        let share = (lastPosition - start) / span
+        return share.isNaN ? 0 : min(max(share, 0), 1)
     }
 
     /// Кривая перевода 3t² − 2t³: медленно трогается и медленно подходит. t обрезается в 0…1, не-число — 0.
@@ -146,7 +156,9 @@ public struct FocusPull: Sendable {
         guard duration > 0 else { return target }
         let time = elapsed.isNaN ? 0 : elapsed
         if time >= duration { return target }
-        return start + (target - start) * Self.ease(time / duration)
+        // взвешенная сумма, а не start + (target − start)·s: разность двух далёких меток может не поместиться в Double
+        let share = Self.ease(time / duration)
+        return start * (1 - share) + target * share
     }
 
     /// Что делать сейчас. Зовётся по тику и после ответа камеры; правила — в описании типа. Положение — не-число: ничего не
@@ -205,6 +217,11 @@ public struct FocusPull: Sendable {
 
     private mutating func nextSteps(time: Double, position: Double) -> Action {
         if let command = pending {
+            // положение прежнее и с команды не прошло 0,3 с: ответ камеры и свежее положение могли просто не дойти — «камера
+            // не двинулась» ещё не засчитываем, ждём (срок при этом идёт)
+            if position == command.before, time - command.issuedAt < Self.settleWindow {
+                return time >= deadline ? end(.timedOut) : .wait
+            }
             pending = nil
             settle(command, at: position)
         }
@@ -219,9 +236,9 @@ public struct FocusPull: Sendable {
         if time >= deadline { return end(.timedOut) }
         // следующая команда — на ближайшем тике, а не сразу после ответа на прошлую
         if time - lastCommandAt < Self.commandSpacing { return .wait }
-        var steps = Int64(min(max((error / gain).rounded(), -Self.maxSteps), Self.maxSteps))
+        var steps = Self.steps(from: error / gain)
         if steps == 0 { steps = Int64(direction) }
-        pending = Command(steps: steps, before: position)
+        pending = Command(steps: steps, before: position, issuedAt: time)
         lastCommandAt = time
         return .nearFar(steps)
     }
@@ -262,9 +279,16 @@ public struct FocusPull: Sendable {
         return .finish(result)
     }
 
-    /// Число для регистра 0xE042: целое в пределах 0…65535.
-    private static func register(_ value: Double) -> UInt16 {
-        UInt16(min(max(value.rounded(), 0), 65535))
+    /// Число для регистра 0xE042: целое в пределах 0…65535; не-число — 0, бесконечность — край. Не `private` ради проверки.
+    static func register(_ value: Double) -> UInt16 {
+        guard !value.isNaN else { return 0 }
+        return UInt16(min(max(value.rounded(), 0), 65535))
+    }
+
+    /// Команда Near/Far из «шагов» (ошибка / k): целое в пределах −7…7; не-число — 0. Не `private` ради проверки.
+    static func steps(from raw: Double) -> Int64 {
+        guard !raw.isNaN else { return 0 }
+        return Int64(min(max(raw.rounded(), -maxSteps), maxSteps))
     }
 
     /// Коэффициент в разумных пределах; не-число — начальное значение.
