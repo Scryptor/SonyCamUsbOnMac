@@ -40,7 +40,10 @@ class PicturePath(private val transform: PictureTransform = PictureTransform()) 
         /** Кадр посчитан и записан обратно; точки для помощи — [help]. */
         Done,
 
-        /** Проход закрыт (или остановлен ошибкой): кадр не тронут, цикл кадров должен кончиться, а не крутиться. */
+        /**
+         * Проход закрыт или остановлен ошибкой (прохода или Bitmap): на экран этот кадр не попал, цикл кадров должен кончиться,
+         * а не крутиться и не падать. Причина — [failure] и [stopReason].
+         */
         Stopped,
     }
 
@@ -53,11 +56,23 @@ class PicturePath(private val transform: PictureTransform = PictureTransform()) 
         private set
 
     /**
-     * Ошибка, на которой остановился кадр: `IllegalStateException` от [PictureTransform] — полоса не сосчиталась или `close()`
-     * пришёл посреди кадра. После `close()` до кадра, как и пока всё в порядке, null.
+     * Ошибка, на которой остановился кадр: `IllegalStateException` или `IllegalArgumentException` — от [PictureTransform]
+     * (полоса не сосчиталась, `close()` пришёл посреди кадра) или от самого кадра (`getPixels` / `setPixels` у освобождённого или
+     * неизменяемого Bitmap). После `close()` до кадра, как и пока всё в порядке, null.
      */
     var failure: Throwable? = null
         private set
+
+    /** Что с проходом, словами для журнала: «работает», «закрыт» или «IllegalStateException: …» — на чём остановился. */
+    val stopReason: String
+        get() {
+            val error = failure
+            return when {
+                error != null -> "${error.javaClass.simpleName}: ${error.message ?: "без описания"}"
+                stopped -> "закрыт"
+                else -> "работает"
+            }
+        }
 
     /** Сколько раз за жизнь прохода выделялся массив: растёт, только когда кадр больше всех прежних. Для проверки буферов. */
     var allocations = 0
@@ -85,15 +100,17 @@ class PicturePath(private val transform: PictureTransform = PictureTransform()) 
         val count = width * height
         val signal = signalForHelp && lut != null
         reserve(count, signal)
-        surface.read(src)
         try {
+            surface.read(src)
             transform.apply(src, width, height, orientation, lut, display, if (signal) analysis else null)
+            surface.write(display)
         } catch (e: IllegalStateException) {
-            // закрыт: close() пришёл, пока кадр читался, — или полоса не сосчиталась. И то и другое — конец цикла кадров
-            failure = e
-            return stop()
+            // закрыт: close() пришёл, пока кадр читался, — или полоса не сосчиталась, или Bitmap освобождён / не изменяем
+            return fail(e)
+        } catch (e: IllegalArgumentException) {
+            // Bitmap.getPixels / setPixels не взяли размеры кадра. Всё это — конец цикла кадров, а не падение корутины
+            return fail(e)
         }
-        surface.write(display)
         help = if (signal) analysis else display
         return Step.Done
     }
@@ -102,6 +119,11 @@ class PicturePath(private val transform: PictureTransform = PictureTransform()) 
     override fun close() {
         stopped = true
         transform.close()
+    }
+
+    private fun fail(error: RuntimeException): Step {
+        failure = error
+        return stop()
     }
 
     private fun stop(): Step {

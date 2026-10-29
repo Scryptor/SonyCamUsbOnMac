@@ -461,34 +461,81 @@ class PicturePathTest {
         fresh.close()
     }
 
-    // без выделений
+    // Bitmap, который не читается или не пишется
 
-    /**
-     * Выделенные потоком байты (HotSpot: com.sun.management.ThreadMXBean). Через отражение: тесты собираются с android.jar,
-     * где java.lang.management нет, а на JVM, где они идут, он есть. Нет счётчика — null.
-     */
-    private class AllocationCounter private constructor(private val bean: Any, private val read: java.lang.reflect.Method) {
-        fun total(ids: LongArray): Long {
-            val sizes = read.invoke(bean, ids) as LongArray
-            var sum = 0L
-            for (size in sizes) sum += size
-            return sum
+    /** Кадр, у которого чтение или запись отказывают, как у Bitmap, освобождённого (`recycle`) или неизменяемого. */
+    private class FailingSurface(private val readError: RuntimeException?, private val writeError: RuntimeException?) : FrameSurface {
+        override val width = 16
+        override val height = 9
+        var reads = 0
+        var writes = 0
+
+        override fun read(into: IntArray) {
+            reads += 1
+            readError?.let { throw it }
+            java.util.Arrays.fill(into, 0, 16 * 9, 0xFF102030.toInt())
         }
 
-        companion object {
-            fun create(): AllocationCounter? = try {
-                val bean = Class.forName("java.lang.management.ManagementFactory").getMethod("getThreadMXBean").invoke(null)
-                val sun = Class.forName("com.sun.management.ThreadMXBean")
-                if (bean == null || !sun.isInstance(bean) || sun.getMethod("isThreadAllocatedMemorySupported").invoke(bean) != true) {
-                    null
-                } else {
-                    AllocationCounter(bean, sun.getMethod("getThreadAllocatedBytes", LongArray::class.java))
-                }
-            } catch (e: ReflectiveOperationException) {
-                null
+        override fun write(from: IntArray) {
+            writes += 1
+            writeError?.let { throw it }
+        }
+    }
+
+    private val bitmapErrors = listOf<RuntimeException>(
+        IllegalStateException("Can't call getPixels() on a recycled bitmap"),
+        IllegalArgumentException("x + width must be <= bitmap.width()"),
+    )
+
+    @Test fun bitmapThatCannotBeReadStopsTheFrameInsteadOfThrowing() {
+        for (error in bitmapErrors) {
+            val surface = FailingSurface(readError = error, writeError = null)
+            PicturePath().use { path ->
+                assertEquals("$error", Step.Stopped, path.apply(surface, FrameOrientation.mirror, slog3cine(), signalForHelp = true))
+                assertSame("причина остаётся у прохода", error, path.failure)
+                assertEquals("картинки для помощи нет", 0, path.help.size)
+                assertEquals("на экран ничего не записано", 0, surface.writes)
+                // и дальше то же, кадр больше не трогают: цикл кадров по этому выходит
+                assertEquals(Step.Stopped, path.apply(surface, FrameOrientation.mirror, slog3cine(), signalForHelp = true))
+                assertEquals(1, surface.reads)
             }
         }
     }
+
+    @Test fun bitmapThatCannotBeWrittenStopsTheFrameAndOffersNothingToTheHelp() {
+        for (error in bitmapErrors) {
+            val surface = FailingSurface(readError = null, writeError = error)
+            PicturePath().use { path ->
+                assertEquals("$error", Step.Stopped, path.apply(surface, FrameOrientation.mirror, slog3cine(), signalForHelp = false))
+                assertSame(error, path.failure)
+                // картинка, которая до экрана не дошла, помощи не достаётся: она считала бы то, чего не видно
+                assertEquals(0, path.help.size)
+                assertEquals(Step.Stopped, path.apply(surface, FrameOrientation.mirror, slog3cine(), signalForHelp = false))
+                assertEquals(1, surface.reads)
+                assertEquals(1, surface.writes)
+            }
+        }
+    }
+
+    @Test fun stopReasonSaysWhatHappened() {
+        PicturePath().use { path ->
+            assertEquals("работает", path.stopReason)
+            path.apply(FailingSurface(IllegalStateException("Bitmap освобождён"), null), FrameOrientation.mirror, null, signalForHelp = false)
+            assertEquals("IllegalStateException: Bitmap освобождён", path.stopReason)
+        }
+        val closed = PicturePath()
+        closed.close()
+        assertEquals("закрыт", closed.stopReason)
+        // закрыт по close(): причина «закрыт», пока кадр не споткнулся об это сам
+        val midFrame = PicturePath()
+        midFrame.apply(surfaceOf(8, 4), FrameOrientation.mirror, null, signalForHelp = false)
+        midFrame.close()
+        assertEquals("закрыт", midFrame.stopReason)
+        assertEquals(Step.Stopped, midFrame.apply(surfaceOf(8, 4), FrameOrientation.mirror, null, signalForHelp = false))
+        assertEquals("закрыт", midFrame.stopReason)
+    }
+
+    // без выделений
 
     private fun workerThreads() = Thread.getAllStackTraces().keys.filter { it.isAlive && it.name.startsWith("PictureTransform-") }
 
@@ -520,14 +567,8 @@ class PicturePathTest {
             val mine = workerThreads().map { it.id }.filter { it !in before }
             assertEquals(3, mine.size)
             val ids = (mine + Thread.currentThread().id).toLongArray()
-            repeat(50) { counter!!.total(ids) } // прогрев самого замера: отражение сначала дороже
-            val first = counter!!.total(ids)
-            frames(200)
-            val second = counter.total(ids)
-            val third = counter.total(ids)
-            // между вторым и третьим замером кадров нет — это цена одного замера, она есть и в разности первого и второго
-            val spent = (second - first) - (third - second)
-            println("PicturePathTest: за 200 кадров выделено $spent байт (сам замер — ${third - second}, $sink)")
+            val spent = counter!!.spent(ids) { frames(200) }
+            println("PicturePathTest: за 200 кадров выделено $spent байт ($sink)")
             assertEquals("за 200 кадров выделено $spent байт", 0L, spent)
         }
     }

@@ -95,8 +95,8 @@ import local.zve10viewer.monitor.AssistRaster
 import local.zve10viewer.monitor.BuiltinLut
 import local.zve10viewer.monitor.CameraProfile
 import local.zve10viewer.monitor.FrameSurface
+import local.zve10viewer.monitor.LookWatch
 import local.zve10viewer.monitor.LutCache
-import local.zve10viewer.monitor.LutChoice
 import local.zve10viewer.monitor.MonitorAssist
 import local.zve10viewer.monitor.MonitorTool
 import local.zve10viewer.monitor.PictureHelp
@@ -293,7 +293,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
      * (следует за ним, как только камера его сменит); null — встроенного нет («Выкл», «Свой», «Авто» без профиля лога).
      */
     val resolvedLut: BuiltinLut?
-        get() = LutChoice.resolve(assist.lut, value(SonyProp.PICTURE_PROFILE), value(SonyProp.PP_GAMMA), value(SonyProp.PP_COLOR_MODE))
+        get() = luts.resolved(assist, CameraProfile(value(SonyProp.PICTURE_PROFILE), value(SonyProp.PP_GAMMA), value(SonyProp.PP_COLOR_MODE)))
 
     /** Волновая форма: включена ли, какая (яркость или RGB-парад) и где; место null — по умолчанию, справа внизу. */
     var waveformOn by mutableStateOf(prefs.waveformOn)
@@ -2894,6 +2894,7 @@ class CameraController(private val context: Context, private val scope: Coroutin
             val pool = FramePool()
             val picture = PicturePath()
             val surface = BitmapSurface()
+            val watch = LookWatch()
             val pictureLevels = IntArray(256)
             var sampler: HistogramSampler? = null
             var assistSampler: AssistSampler? = null
@@ -2913,6 +2914,10 @@ class CameraController(private val context: Context, private val scope: Coroutin
                     val profile = cameraProfile
                     // итоговый куб, а не настройка: «Авто» у камеры без профиля лога куба не даёт, и тогда кадр не трогают
                     val lut = luts.cube(tools, profile)
+                    if (watch.changed(lut, tools.orientation)) {
+                        // смена куба или поворота — строка сразу, а не через две секунды: по ней меряется «LUT сменился за ≤ 1 с»
+                        Log.i("ZVAssist", watch.accept(lut, luts.appliedName(tools, profile, lut != null), tools.orientation))
+                    }
                     val analyzing = tools.needsPixels || waveMode != null
                     val now = System.currentTimeMillis()
                     // строка в logcat раз в 2 с: в отладочной сборке всегда (проверка «с LUT и без» читает её и при выключенных
@@ -2930,8 +2935,10 @@ class CameraController(private val context: Context, private val scope: Coroutin
                         passFrames += 1
                     }
                     if (step == PicturePath.Step.Stopped) {
-                        // проход закрыт: кадры больше не показываем, но и не падаем, и не крутимся
+                        // проход закрыт или споткнулся о Bitmap: кадры больше не показываем, но и не падаем, и не крутимся.
+                        // В журнал (его видно в панели отладки) — чтобы по отчёту «картинка встала» была ясна причина
                         Log.w(TAG, "проход картинки остановлен — кадры больше не идут", picture.failure)
+                        journal("проход картинки остановлен, кадры больше не идут: ${picture.stopReason}")
                         frames.cancel()
                         break
                     }
@@ -2977,13 +2984,8 @@ class CameraController(private val context: Context, private val scope: Coroutin
      */
     private fun noteLook(tools: MonitorAssist, profile: CameraProfile, lutOn: Boolean, white: Int, levels: IntArray, width: Int,
                          height: Int, passAverageMs: Double, passWorstMs: Double) {
-        val applied = when {
-            !lutOn -> "off"
-            tools.lut == MonitorAssist.LutMode.file -> "file:" + tools.lutFile
-            else -> luts.resolved(tools, profile)?.value ?: "off"
-        }
-        Log.i("ZVAssist", PictureHelp.report(applied, tools.lut.value, tools.orientation, tools.lutScopes, white, levels, width,
-            height, passAverageMs, passWorstMs))
+        Log.i("ZVAssist", PictureHelp.report(luts.appliedName(tools, profile, lutOn), tools.lut.value, tools.orientation,
+            tools.lutScopes, white, levels, width, height, passAverageMs, passWorstMs))
     }
 
     /** Связь по Wi-Fi: провал — для экрана, время ответа на пробы — для качества превью и журнала. */

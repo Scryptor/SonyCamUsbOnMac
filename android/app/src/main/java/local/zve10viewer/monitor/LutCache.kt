@@ -33,7 +33,8 @@ data class CameraProfile(val pictureProfile: Long? = null, val gamma: Long? = nu
  * @param folder папка своих LUT; её может не быть
  * @param background где выполнять чтение и сборку: не в потоке вызова
  * @param journal что произошло с файлом: разобран или почему нет (текст — как в окне «Добавить LUT…»)
- * @param maxFileBytes файл тяжелее не читается: куб 65³ — около десяти мегабайт, всё, что больше, — не LUT
+ * @param maxFileBytes файл тяжелее не читается: куб 65³ текстом — от 7 до 12 МБ, всё, что больше 16, — не LUT
+ * @param read как читается файл целиком; тесты подменяют, чтобы проверить нехватку памяти и что тяжёлый файл не читается
  * @param make как делается встроенный куб; тесты подменяют, чтобы проверить гонки
  */
 class LutCache(
@@ -41,6 +42,7 @@ class LutCache(
     private val background: (Runnable) -> Unit = { task -> Thread(task, "LutCache").apply { isDaemon = true }.start() },
     private val journal: (String) -> Unit = {},
     private val maxFileBytes: Long = MAX_FILE_BYTES,
+    private val read: (File) -> ByteArray = { file -> file.readBytes() },
     private val make: (BuiltinLut) -> ColorLut = { kind -> kind.make(BUILTIN_SIZE) },
 ) {
     // встроенные
@@ -91,6 +93,16 @@ class LutCache(
     /** Какой встроенный LUT на экране (по плитке и профилю главной камеры); null — встроенного нет. */
     fun resolved(assist: MonitorAssist, camera: CameraProfile): BuiltinLut? =
         LutChoice.resolve(assist.lut, camera.pictureProfile, camera.gamma, camera.colorMode)
+
+    /**
+     * Как называется LUT на картинке — для журнала и logcat: `slog3cine`, `file:имя` или `off`. [applied] — лежит ли куб на
+     * картинке (у «Свой» файл мог ещё не разобраться, у «Авто» профиль мог не дать LUT).
+     */
+    fun appliedName(assist: MonitorAssist, camera: CameraProfile, applied: Boolean): String = when {
+        !applied -> "off"
+        assist.lut == LutMode.file -> "file:" + assist.lutFile
+        else -> resolved(assist, camera)?.value ?: "off"
+    }
 
     /**
      * Куб, который лежит на картинке сейчас; null — LUT нет: «Выкл», «Авто» у камеры без профиля лога, «Свой» без файла или
@@ -166,12 +178,19 @@ class LutCache(
         var lut: ColorLut? = null
         var problem: String? = null
         try {
-            // тяжёлый — не .cube: отказ как у чужого файла
-            if (length > maxFileBytes) throw CubeFile.Failure.NotThreeD
-            // не бросающее чтение UTF-8: Latin-1 в TITLE (или в комментарии) не должен ронять файл — такие байты заменяются
-            lut = CubeFile.parse(String(slot.file.readBytes(), Charsets.UTF_8))
+            // тяжёлый — не .cube: даже не читается
+            if (length > maxFileBytes) {
+                problem = TOO_BIG
+            } else {
+                // не бросающее чтение UTF-8: Latin-1 в TITLE (или в комментарии) не должен ронять файл — такие байты заменяются
+                lut = CubeFile.parse(String(read(slot.file), Charsets.UTF_8))
+            }
         } catch (failure: CubeFile.Failure) {
             problem = CubeFile.message(failure)
+        } catch (e: OutOfMemoryError) {
+            // файл под пределом, но памяти на него (байты, строка, числа куба) не хватило: для этого планшета он слишком большой.
+            // Ловим здесь, когда всё выделенное под файл уже отпущено; заново файл не пробуется, пока не изменится
+            problem = TOO_BIG
         } catch (e: Exception) {
             problem = "Не удалось прочитать файл"
         } finally {
@@ -212,7 +231,9 @@ class LutCache(
         /** Сколько разобранных своих кубов держится в памяти. */
         const val CUBE_LIMIT = 3
 
-        /** Файл тяжелее не читается. */
-        const val MAX_FILE_BYTES = 32L shl 20
+        /** Файл тяжелее не читается: куб 65³ текстом — от 7 до 12 МБ. */
+        const val MAX_FILE_BYTES = 16L shl 20
+
+        private const val TOO_BIG = "Файл слишком большой для LUT"
     }
 }

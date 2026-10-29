@@ -50,7 +50,7 @@ class LutCacheTest {
     private val queue = Queue()
     private val notes = ArrayList<String>()
 
-    private fun cache(limit: Long = 32L shl 20) = LutCache(lutsFolder(), queue::post, { notes += it }, limit)
+    private fun cache(limit: Long = LutCache.MAX_FILE_BYTES) = LutCache(lutsFolder(), queue::post, { notes += it }, limit)
 
     private fun lutsFolder(): File = File(folder.root, "luts").also { it.mkdirs() }
 
@@ -431,12 +431,102 @@ class LutCacheTest {
 
     @Test fun tooHeavyFileIsRefusedWithoutReadingIt() {
         write("huge", identity2 + "\n" + "# ".repeat(600))
-        val cache = cache(limit = 200)
+        val reads = AtomicInteger()
+        val cache = LutCache(lutsFolder(), queue::post, { notes += it }, 200, { file -> reads.incrementAndGet(); file.readBytes() })
         cache.file("huge")
         queue.runAll()
         assertNull(cache.file("huge"))
-        assertTrue("$notes", notes.any { "huge" in it })
+        assertTrue("$notes", notes.any { "huge" in it && "большой" in it })
+        assertEquals("тяжёлый файл не читается", 0, reads.get())
+        assertEquals("и заново не пробуется, пока он не изменится", 0, queue.tasks.size)
+    }
+
+    @Test fun fileOfExactlyTheCapIsReadAndOneByteMoreIsNot() {
+        val cap = 4096L
+        val exact = write("exact", identity2 + "\n" + "#".repeat((cap - identity2.toByteArray().size - 1).toInt()))
+        assertEquals(cap, exact.length())
+        val over = write("over", identity2 + "\n" + "#".repeat((cap - identity2.toByteArray().size).toInt()))
+        assertEquals(cap + 1, over.length())
+        val cache = cache(limit = cap)
+        cache.file("exact")
+        cache.file("over")
+        queue.runAll()
+        assertNotNull("ровно по пределу читается", cache.file("exact"))
+        assertNull("на байт больше — нет", cache.file("over"))
+    }
+
+    @Test fun outOfMemoryWhileReadingIsAFileThatIsTooBigAndIsNotRetried() {
+        write("big", identity2, stamp = 1_700_000_000_000L)
+        val reads = AtomicInteger()
+        val cache = LutCache(lutsFolder(), queue::post, { notes += it }, LutCache.MAX_FILE_BYTES, { reads.incrementAndGet(); throw OutOfMemoryError("Failed to allocate") })
+        assertNull(cache.file("big"))
+        queue.runAll()
+        assertNull(cache.file("big"))
+        assertTrue("в журнал: что файл слишком большой — $notes", notes.any { "big" in it && "большой" in it })
+        repeat(5) { assertNull(cache.file("big")) }
+        assertEquals("заново не читается, пока файл не изменился", 1, reads.get())
         assertEquals(0, queue.tasks.size)
+    }
+
+    @Test fun outOfMemoryThenChangedFileIsReadAgainBySameCache() {
+        val file = write("big", identity2, stamp = 1_700_000_000_000L)
+        var memory = false
+        val cache = LutCache(lutsFolder(), queue::post, { notes += it }, LutCache.MAX_FILE_BYTES, { f -> if (memory) f.readBytes() else throw OutOfMemoryError() })
+        cache.file("big")
+        queue.runAll()
+        assertNull(cache.file("big"))
+        memory = true
+        assertNull("файл тот же — не пробуется", cache.file("big"))
+        assertEquals(0, queue.tasks.size)
+        file.writeText(identity2 + "\n# теперь другой\n")
+        assertTrue(file.setLastModified(1_700_000_009_000L))
+        assertNull(cache.file("big"))
+        assertEquals(1, queue.tasks.size)
+        queue.runAll()
+        assertNotNull(cache.file("big"))
+    }
+
+    @Test fun defaultCapIsSixteenMegabytesAndAHeavyRealCubeFitsUnderIt() {
+        assertEquals(16L shl 20, LutCache.MAX_FILE_BYTES)
+        // куб 65³ с длинными числами и CRLF — самый тяжёлый настоящий .cube (около 10 МБ): под пределом, и читается
+        val axis = Array(65) { String.format(java.util.Locale.ROOT, "%.9f", it / 64.0) }
+        val text = StringBuilder("TITLE \"тяжёлый\"\r\nLUT_3D_SIZE 65\r\n")
+        for (b in 0 until 65) for (g in 0 until 65) for (r in 0 until 65) {
+            text.append(axis[r]).append(' ').append(axis[g]).append(' ').append(axis[b]).append("\r\n")
+        }
+        val file = write("heavy", text.toString())
+        assertTrue("${file.length()} байт", file.length() in (8L shl 20)..LutCache.MAX_FILE_BYTES)
+        val cache = cache()
+        cache.file("heavy")
+        queue.runAll()
+        val cube = cache.file("heavy")
+        assertNotNull("$notes", cube)
+        assertEquals(65, cube!!.size)
+    }
+
+    @Test fun fileOverTheDefaultCapIsRefusedWithoutBeingParsed() {
+        val file = write("toomuch", identity2 + "\n" + "#".repeat(((LutCache.MAX_FILE_BYTES - identity2.toByteArray().size) + 1).toInt()))
+        assertEquals(LutCache.MAX_FILE_BYTES + 2, file.length())
+        val cache = cache()
+        cache.file("toomuch")
+        queue.runAll()
+        assertNull(cache.file("toomuch"))
+        assertTrue("$notes", notes.any { "toomuch" in it && "большой" in it })
+    }
+
+    // имя для журнала и logcat
+
+    @Test fun appliedNameIsWhatIsReallyOnThePicture() {
+        write("look", identity2)
+        val cache = cache()
+        val profile8 = CameraProfile(pictureProfile = 8)
+        assertEquals("slog3cine", cache.appliedName(assist(LutMode.auto), profile8, applied = true))
+        assertEquals("off", cache.appliedName(assist(LutMode.auto), CameraProfile(pictureProfile = 0), applied = false))
+        assertEquals("hlg", cache.appliedName(assist(LutMode.hlg), CameraProfile.none, applied = true))
+        assertEquals("off", cache.appliedName(assist(LutMode.off), profile8, applied = false))
+        // «Свой»: пока куб не разобран, на картинке ничего нет
+        assertEquals("off", cache.appliedName(assist(LutMode.file, "look"), profile8, applied = false))
+        assertEquals("file:look", cache.appliedName(assist(LutMode.file, "look"), profile8, applied = true))
     }
 
     @Test fun namesWithPathPartsNeverReachTheDisk() {
