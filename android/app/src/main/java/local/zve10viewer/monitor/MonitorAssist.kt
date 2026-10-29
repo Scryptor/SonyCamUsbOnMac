@@ -4,19 +4,37 @@ import org.json.JSONObject
 import kotlin.math.roundToInt
 
 /**
- * Помощь в кадре, как у мониторов: зебра, false color, пикинг и маркеры. Всё считается и рисуется по картинке превью
- * на экране планшета — камера об этом не знает, и на запись это не влияет. Значения и подписи — как у программы для Mac.
+ * Помощь в кадре, как у мониторов: зебра, false color, пикинг, маркеры, вектороскоп и пипетка, а ещё LUT и зеркало с
+ * переворотом картинки. Всё считается и рисуется по картинке превью на экране планшета — камера об этом не знает, и на
+ * запись это не влияет. Значения и подписи — как у программы для Mac.
  */
 data class MonitorAssist(
     val zebra: Zebra = Zebra.off,
     val falseColor: Boolean = false,
     val peaking: Peaking = Peaking.off,
     val peakingColor: PeakingColor = PeakingColor.red,
+    val lut: LutMode = LutMode.off,
+    /**
+     * Какой свой LUT выбран — имя файла без расширения; null — ни один. Остаётся и при другом выборе, и после «Всё —
+     * выключить».
+     */
+    val lutFile: String? = null,
+    /**
+     * Помощь (гистограмма, волновая форма, вектороскоп, зебра, false color, пикинг, пипетка) считать по картинке с LUT, а
+     * не по сигналу камеры. Не плитка и не включатель: «Всё — выключить» её не трогает.
+     */
+    val lutScopes: Boolean = true,
+    val vectorscope: Boolean = false,
+    /** Масштаб вектороскопа: 1 или 2. Не плитка: «Всё — выключить» его не трогает. */
+    val vectorscopeZoom: Int = 1,
+    val probe: Boolean = false,
     val grid: Grid = Grid.off,
     val center: Boolean = false,
     val frameMarker: FrameMarker = FrameMarker.off,
     val safeZone: SafeZone = SafeZone.off,
     val overlay: Overlay = Overlay.off,
+    /** Зеркало и переворот картинки на экране — плитка «Картинка». */
+    val orientation: FrameOrientation = FrameOrientation.off,
     /** Последнее включённое значение каждого инструмента — к нему возвращает повторное касание выбранной плитки. */
     val lastOn: Map<String, String> = emptyMap(),
 ) {
@@ -58,26 +76,44 @@ data class MonitorAssist(
         }
     }
 
+    /**
+     * LUT для превью: S-Log и HLG на экране выглядят привычно. «Авто» выбирает LUT по профилю изображения камеры (какой
+     * именно — решает LutChoice), следующие четыре — встроенные, «Свой» — файл .cube из lutFile.
+     */
+    enum class LutMode(val value: String) {
+        off("off"), auto("auto"), slog3cine("slog3cine"), slog3("slog3"), slog2("slog2"), hlg("hlg"), file("file")
+    }
+
     /** Что считается по точкам кадра: зебра, false color, пикинг. */
     val needsRaster: Boolean get() = zebra != Zebra.off || falseColor || peaking != Peaking.off
+
+    /** Нужны ли точки кадра: растр помощи, вектороскоп или пипетка. */
+    val needsPixels: Boolean get() = needsRaster || vectorscope || probe
 
     /** Что рисуется линиями поверх кадра: сетка, центр, рамка, безопасная зона. */
     val hasMarkers: Boolean get() = grid != Grid.off || center || frameMarker != FrameMarker.off || safeZone != SafeZone.off
 
-    /** Включено хоть что-то. */
-    val isActive: Boolean get() = needsRaster || hasMarkers || overlay != Overlay.off
+    /** Меняет ли картинку на экране: LUT и зеркало с переворотом. Без них преобразования нет и оно ничего не стоит. */
+    val transformsPicture: Boolean get() = lut != LutMode.off || orientation != FrameOrientation.off
 
-    /** Значение инструмента строкой — как в API программы для Mac: «95», «on», «9:16». */
+    /** Включено хоть что-то. */
+    val isActive: Boolean get() = needsPixels || transformsPicture || hasMarkers || overlay != Overlay.off
+
+    /** Значение инструмента строкой — как в API программы для Mac: «95», «on», «9:16», «slog3», «180». */
     fun value(tool: MonitorTool): String = when (tool) {
         MonitorTool.zebra -> zebra.value
         MonitorTool.falseColor -> if (falseColor) "on" else "off"
         MonitorTool.peaking -> peaking.value
         MonitorTool.peakingColor -> peakingColor.value
+        MonitorTool.lut -> lut.value
+        MonitorTool.vectorscope -> if (vectorscope) "on" else "off"
+        MonitorTool.probe -> if (probe) "on" else "off"
         MonitorTool.grid -> grid.value
         MonitorTool.center -> if (center) "on" else "off"
         MonitorTool.frameMarker -> frameMarker.value
         MonitorTool.safeZone -> safeZone.value
         MonitorTool.overlay -> overlay.value
+        MonitorTool.orientation -> orientation.value
     }
 
     /** С новым значением инструмента; null — такого значения у него нет. */
@@ -87,11 +123,15 @@ data class MonitorAssist(
             MonitorTool.falseColor -> flag(value)?.let { copy(falseColor = it) }
             MonitorTool.peaking -> Peaking.entries.firstOrNull { it.value == value }?.let { copy(peaking = it) }
             MonitorTool.peakingColor -> PeakingColor.entries.firstOrNull { it.value == value }?.let { copy(peakingColor = it) }
+            MonitorTool.lut -> LutMode.entries.firstOrNull { it.value == value }?.let { copy(lut = it) }
+            MonitorTool.vectorscope -> flag(value)?.let { copy(vectorscope = it) }
+            MonitorTool.probe -> flag(value)?.let { copy(probe = it) }
             MonitorTool.grid -> Grid.entries.firstOrNull { it.value == value }?.let { copy(grid = it) }
             MonitorTool.center -> flag(value)?.let { copy(center = it) }
             MonitorTool.frameMarker -> FrameMarker.entries.firstOrNull { it.value == value }?.let { copy(frameMarker = it) }
             MonitorTool.safeZone -> SafeZone.entries.firstOrNull { it.value == value }?.let { copy(safeZone = it) }
             MonitorTool.overlay -> Overlay.of(value)?.let { copy(overlay = it) }
+            MonitorTool.orientation -> FrameOrientation.entries.firstOrNull { it.value == value }?.let { copy(orientation = it) }
         } ?: return null
         return if (value != "off") next.copy(lastOn = lastOn + (tool.name to value)) else next
     }
@@ -124,7 +164,10 @@ data class MonitorAssist(
         return if (offset > 0) steps.firstOrNull { it > percent }?.toString() else steps.lastOrNull { it < percent }?.toString() ?: "off"
     }
 
-    /** Всё выключено; запомненные значения остаются. */
+    /**
+     * Всё выключено, зеркало и LUT тоже: «всё выключено» — картинка такая, какой её даёт камера. Запомненные значения,
+     * выбранный файл LUT, помощь «по картинке с LUT» и масштаб вектороскопа остаются.
+     */
     fun allOff(): MonitorAssist = MonitorTool.entries.fold(this) { assist, tool ->
         if (tool.options.any { it.first == "off" }) assist.with(tool, "off") ?: assist else assist
     }
@@ -132,23 +175,39 @@ data class MonitorAssist(
     /** Горит ли плитка инструмента: включён. Цвет пикинга «выкл» не бывает — он горит вместе с пикингом. */
     fun isOn(tool: MonitorTool): Boolean = if (tool == MonitorTool.peakingColor) peaking != Peaking.off else value(tool) != "off"
 
-    /** Подпись значения на плитке: «95 %», «Выкл», «Красный»; у наложения с ползунка — «40 %». */
+    /**
+     * Подпись значения на плитке: «95 %», «Выкл», «Красный»; у наложения с ползунка — «40 %»; у своего LUT — имя файла
+     * («Свой», пока файл не выбран); у картинки — короткое «Зеркало», «180°». «Авто: S-Log3» на плитке LUT складывает
+     * LutChoice по профилю камеры, здесь у «Авто» — «Авто».
+     */
     fun label(tool: MonitorTool): String {
+        if (tool == MonitorTool.lut && lut == LutMode.file) return lutFile?.takeIf { it.isNotEmpty() } ?: "Свой"
+        if (tool == MonitorTool.orientation) return orientation.label
         val v = value(tool)
         return tool.options.firstOrNull { it.first == v }?.second ?: if (tool == MonitorTool.overlay) "$v %" else v
     }
 
-    /** Как хранится в настройках — тот же JSON, что у программы для Mac. */
+    /**
+     * Как хранится в настройках — тот же JSON, что у программы для Mac: выбор из нескольких — строкой («95», «180»),
+     * вкл/выкл — bool, масштаб вектороскопа — число; файла LUT нет — ключа нет.
+     */
     fun toJson(): String = JSONObject().apply {
         put("zebra", zebra.value)
         put("falseColor", falseColor)
         put("peaking", peaking.value)
         put("peakingColor", peakingColor.value)
+        put("lut", lut.value)
+        lutFile?.let { put("lutFile", it) }
+        put("lutScopes", lutScopes)
+        put("vectorscope", vectorscope)
+        put("vectorscopeZoom", vectorscopeZoom)
+        put("probe", probe)
         put("grid", grid.value)
         put("center", center)
         put("frameMarker", frameMarker.value)
         put("safeZone", safeZone.value)
         put("overlay", overlay.value)
+        put("orientation", orientation.value)
         put("lastOn", JSONObject(lastOn))
     }.toString()
 
@@ -165,24 +224,45 @@ data class MonitorAssist(
             else -> null
         }
 
-        /** Из настроек; новые инструменты в старых настройках и битые значения — выключены. */
+        /**
+         * Из настроек; новые инструменты в старых настройках и битые значения — выключены. Ключи, появившиеся позже
+         * остальных (LUT, вектороскоп, пипетка, картинка), читаются только своим типом JSON, как у программы для Mac:
+         * строка, bool или число; другой тип — как «не записано». org.json сам приводит типы (optString делает из числа
+         * строку, optBoolean читает «true»), поэтому тип проверяется здесь.
+         */
         fun fromJson(text: String?): MonitorAssist {
             val json = runCatching { JSONObject(text ?: return none) }.getOrNull() ?: return none
             var assist = none
             for (tool in MonitorTool.entries) {
                 val raw = json.opt(tool.name) ?: continue
-                val value = if (raw is Boolean) (if (raw) "on" else "off") else raw.toString()
+                val value = when (tool) {
+                    // новые: выбор — только строкой, вкл/выкл — только bool
+                    MonitorTool.lut, MonitorTool.orientation -> raw as? String
+                    MonitorTool.vectorscope, MonitorTool.probe -> (raw as? Boolean)?.let { if (it) "on" else "off" }
+                    // прежние читаются как раньше: bool или строка
+                    else -> if (raw is Boolean) (if (raw) "on" else "off") else raw.toString()
+                } ?: continue
                 // значения из прошлого не должны попадать в память «последнего включённого»: её читаем отдельно
                 assist = assist.with(tool, value)?.copy(lastOn = assist.lastOn) ?: assist
             }
             val last = json.optJSONObject("lastOn")
             val remembered = last?.keys()?.asSequence()?.associateWith { last.optString(it) }.orEmpty()
-            return assist.copy(lastOn = remembered)
+            return assist.copy(
+                // не плитки: свой файл LUT, помощь «по картинке с LUT» и масштаб вектороскопа — только 1 и 2 (число 2 в
+                // любой записи, всё остальное — 1)
+                lutFile = json.opt("lutFile") as? String,
+                lutScopes = (json.opt("lutScopes") as? Boolean) ?: true,
+                vectorscopeZoom = if ((json.opt("vectorscopeZoom") as? Number)?.toDouble() == 2.0) 2 else 1,
+                lastOn = remembered,
+            )
         }
     }
 }
 
-/** Плитки меню «Монитор» — по порядку на экране. options — значение и подпись. */
+/**
+ * Плитки меню «Монитор» — по порядку на экране; после последней идёт «Всё — выключить», она не инструмент. options —
+ * значение и подпись.
+ */
 enum class MonitorTool(val title: String, val options: List<Pair<String, String>>, val help: String) {
     zebra("Зебра", listOf("off" to "Выкл", "100" to "100 %", "95" to "95 %", "70" to "70 % кожа"),
         "Полосы там, где кадр ярче порога: 100 % и 95 % — пересвет и почти пересвет, 70 % — светлая кожа (70 ± 5 %)."),
@@ -193,6 +273,17 @@ enum class MonitorTool(val title: String, val options: List<Pair<String, String>
         "Подсветка резких краёв — где фокус. С увеличением кадра работает точнее."),
     peakingColor("Цвет пикинга", listOf("red" to "Красный", "yellow" to "Жёлтый", "white" to "Белый", "blue" to "Синий"),
         "Цвет подсветки резких краёв."),
+    lut("LUT", listOf("off" to "Выкл", "auto" to "Авто", "slog3cine" to "S-Log3 Cine", "slog3" to "S-Log3", "slog2" to "S-Log2",
+        "hlg" to "HLG", "file" to "Свой"),
+        "Превью S-Log и HLG с обычным контрастом и цветом — только на экране. «Авто» берёт LUT по профилю " +
+            "изображения камеры с заводскими гаммами Sony (PP7 — S-Log2, PP8 и PP9 — S-Log3, PP10 — HLG); если " +
+            "профиль перенастроен, выберите LUT вручную. «Свой» — файл .cube."),
+    vectorscope("Вектороскоп", listOf("off" to "Выкл", "on" to "Вкл"),
+        "Цвета кадра на круге: направление — оттенок, расстояние от центра — насыщенность, наклонная " +
+            "линия — тон кожи. Касание панели — масштаб ×2, чтобы разглядеть бледные цвета лога."),
+    probe("Пипетка", listOf("off" to "Выкл", "on" to "Вкл"),
+        "Касание кадра ставит пипетку; пока она включена, фокус касанием не ставится. Метка показывает " +
+            "яркость в процентах, R, G, B и зону false color — среднее по квадрату 5×5 точек; её можно тащить."),
     grid("Сетка", listOf("off" to "Выкл", "thirds" to "Трети", "squares" to "Квадраты"),
         "Сетка по третям или квадратами — для композиции."),
     center("Центр", listOf("off" to "Выкл", "on" to "Вкл"), "Крестик в центре кадра."),
@@ -203,4 +294,7 @@ enum class MonitorTool(val title: String, val options: List<Pair<String, String>
     overlay("Наложение", listOf("off" to "Выкл", "25" to "25 %", "50" to "50 %", "75" to "75 %", "100" to "100 %"),
         "Эталонный кадр поверх живого — повторить сцену. Эталон — текущий кадр, картинка из файла или снимок " +
             "из галереи; прозрачность и «спрятать» — на панели наложения."),
+    orientation("Картинка", FrameOrientation.entries.map { it.value to it.title },
+        "Только на экране: «Зеркально» — как в зеркале, чтобы снимать себя; «Вверх ногами» — камера на риге " +
+            "или подвесе перевёрнута. Снимки, файлы и сама камера остаются как есть."),
 }

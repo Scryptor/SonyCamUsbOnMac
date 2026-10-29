@@ -6,10 +6,13 @@ import androidx.compose.ui.geometry.Size
 import local.zve10viewer.monitor.AssistRaster
 import local.zve10viewer.monitor.AssistRaster.FalseColorBand
 import local.zve10viewer.monitor.FrameMarkers
+import local.zve10viewer.monitor.FrameOrientation
 import local.zve10viewer.monitor.MonitorAssist
+import local.zve10viewer.monitor.MonitorAssist.LutMode
 import local.zve10viewer.monitor.MonitorAssist.Zebra
 import local.zve10viewer.monitor.MonitorTool
 import local.zve10viewer.monitor.Waveform
+import org.json.JSONObject
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -113,6 +116,367 @@ class MonitorAssistTest {
         assertFalse(assist.isActive)
         assertEquals(MonitorAssist.PeakingColor.white, assist.peakingColor)
         assertEquals(MonitorAssist.Peaking.low, assist.toggled(MonitorTool.peaking).peaking)
+    }
+
+    // LUT, вектороскоп, пипетка, картинка
+
+    @Test fun monitorToolsKeepTheTileOrder() {
+        // 13 плиток; четырнадцатая — «Всё — выключить» — рисуется отдельно. Ряд 1: до «Пипетки», ряд 2: от «Сетки»
+        assertEquals(
+            listOf(
+                "zebra", "falseColor", "peaking", "peakingColor", "lut", "vectorscope", "probe",
+                "grid", "center", "frameMarker", "safeZone", "overlay", "orientation",
+            ),
+            MonitorTool.entries.map { it.name },
+        )
+    }
+
+    @Test fun newToolsHaveTheirTitlesOptionsAndHelp() {
+        assertEquals("LUT", MonitorTool.lut.title)
+        assertEquals("Вектороскоп", MonitorTool.vectorscope.title)
+        assertEquals("Пипетка", MonitorTool.probe.title)
+        assertEquals("Картинка", MonitorTool.orientation.title)
+
+        assertEquals(listOf("off", "auto", "slog3cine", "slog3", "slog2", "hlg", "file"), MonitorTool.lut.options.map { it.first })
+        assertEquals(listOf("Выкл", "Авто", "S-Log3 Cine", "S-Log3", "S-Log2", "HLG", "Свой"), MonitorTool.lut.options.map { it.second })
+        for (tool in listOf(MonitorTool.vectorscope, MonitorTool.probe)) {
+            assertEquals(listOf("off", "on"), tool.options.map { it.first })
+            assertEquals(listOf("Выкл", "Вкл"), tool.options.map { it.second })
+        }
+        assertEquals(listOf("off", "mirror", "180", "mirror180"), MonitorTool.orientation.options.map { it.first })
+        assertEquals(listOf("Как есть", "Зеркально", "Вверх ногами", "Зеркально + 180°"), MonitorTool.orientation.options.map { it.second })
+
+        // у каждой плитки есть справка, и у новых она говорит главное
+        for (tool in MonitorTool.entries) assertTrue("$tool", tool.help.isNotEmpty())
+        // «Авто» — по профилю с заводскими гаммами Sony; перенастроенный профиль — вручную
+        for (pp in listOf("PP7", "S-Log2", "PP8", "PP9", "S-Log3", "PP10", "HLG")) assertTrue(pp, MonitorTool.lut.help.contains(pp))
+        assertTrue(MonitorTool.probe.help.contains("Касание кадра ставит пипетку; пока она включена, фокус касанием не ставится."))
+        assertTrue(MonitorTool.vectorscope.help.contains("×2"))
+        assertTrue(MonitorTool.orientation.help.contains("Зеркально") && MonitorTool.orientation.help.contains("Вверх ногами"))
+    }
+
+    @Test fun lutIsSetByItsApiValues() {
+        var assist = MonitorAssist().with(MonitorTool.lut, "auto")!!
+        assertEquals(LutMode.auto, assist.lut)
+        assertEquals("auto", assist.value(MonitorTool.lut))
+        // все семь значений — в обе стороны
+        for (mode in LutMode.entries) {
+            assist = assist.with(MonitorTool.lut, mode.value)!!
+            assertEquals(mode, assist.lut)
+            assertEquals(mode.value, assist.value(MonitorTool.lut))
+        }
+        assist = assist.with(MonitorTool.lut, "slog2")!!
+        // чужие значения не принимаются и ничего не меняют
+        for (bad in listOf("bogus", "S-Log2", "on", "", "AUTO")) assertNull(bad, assist.with(MonitorTool.lut, bad))
+        assertEquals(LutMode.slog2, assist.lut)
+        assertEquals(listOf("off", "auto", "slog3cine", "slog3", "slog2", "hlg", "file"), LutMode.entries.map { it.value })
+    }
+
+    @Test fun orientationIsSetByItsApiValues() {
+        var assist = MonitorAssist().with(MonitorTool.orientation, "180")!!
+        assertEquals(FrameOrientation.rotate180, assist.orientation)
+        assertEquals("180", assist.value(MonitorTool.orientation))
+        for (o in FrameOrientation.entries) {
+            assist = assist.with(MonitorTool.orientation, o.value)!!
+            assertEquals(o, assist.orientation)
+            assertEquals(o.value, assist.value(MonitorTool.orientation))
+        }
+        assist = assist.with(MonitorTool.orientation, "mirror")!!
+        // в API — «180», а не имя варианта
+        for (bad in listOf("rotate180", "90", "flip", "on")) assertNull(bad, assist.with(MonitorTool.orientation, bad))
+        assertEquals(FrameOrientation.mirror, assist.orientation)
+    }
+
+    @Test fun vectorscopeAndProbeAreOnOffInTheApi() {
+        var assist = MonitorAssist()
+        assertTrue(assist.value(MonitorTool.vectorscope) == "off" && assist.value(MonitorTool.probe) == "off")
+        assist = assist.with(MonitorTool.vectorscope, "on")!!.with(MonitorTool.probe, "on")!!
+        assertTrue(assist.vectorscope && assist.probe)
+        assertTrue(assist.value(MonitorTool.vectorscope) == "on" && assist.value(MonitorTool.probe) == "on")
+        assist = assist.with(MonitorTool.vectorscope, "off")!!.with(MonitorTool.probe, "off")!!
+        assertFalse(assist.vectorscope || assist.probe)
+        // как у false color: «true» и «1» тоже читаются
+        assist = assist.with(MonitorTool.vectorscope, "true")!!.with(MonitorTool.probe, "1")!!
+        assertTrue(assist.vectorscope && assist.probe)
+        assertNull(assist.with(MonitorTool.vectorscope, "maybe"))
+        assertNull(assist.with(MonitorTool.probe, "2"))
+        assertNull(assist.with(MonitorTool.probe, ""))
+        assertTrue(assist.vectorscope && assist.probe)
+    }
+
+    @Test fun newToolsLightUpTheirTilesWhenOn() {
+        val tools = listOf(MonitorTool.lut, MonitorTool.vectorscope, MonitorTool.probe, MonitorTool.orientation)
+        for (tool in tools) assertFalse("$tool", MonitorAssist().isOn(tool))
+        val assist = MonitorAssist().with(MonitorTool.lut, "hlg")!!.with(MonitorTool.vectorscope, "on")!!
+            .with(MonitorTool.probe, "on")!!.with(MonitorTool.orientation, "mirror180")!!
+        for (tool in tools) assertTrue("$tool", assist.isOn(tool))
+        // «Авто» тоже горит, даже когда профиль не опознан: гасит её сама плитка
+        assertTrue(assist.with(MonitorTool.lut, "auto")!!.isOn(MonitorTool.lut))
+    }
+
+    @Test fun lutToggleRemembersTheLastValue() {
+        // в первый раз — «Авто», первое значение после «Выкл»
+        var assist = MonitorAssist().toggled(MonitorTool.lut)
+        assertEquals(LutMode.auto, assist.lut)
+        // после «Авто»: выкл, и снова «Авто»
+        assist = assist.with(MonitorTool.lut, "auto")!!.toggled(MonitorTool.lut)
+        assertEquals(LutMode.off, assist.lut)
+        assist = assist.toggled(MonitorTool.lut)
+        assertEquals(LutMode.auto, assist.lut)
+        // запомнился последний выбор, а не первый
+        assist = assist.with(MonitorTool.lut, "slog2")!!.toggled(MonitorTool.lut)
+        assertEquals(LutMode.off, assist.lut)
+        assist = assist.toggled(MonitorTool.lut)
+        assertEquals(LutMode.slog2, assist.lut)
+        assist = assist.with(MonitorTool.lut, "file")!!.toggled(MonitorTool.lut).toggled(MonitorTool.lut)
+        assertEquals(LutMode.file, assist.lut)
+    }
+
+    @Test fun otherNewToolsToggleLikeTheOldOnes() {
+        var assist = MonitorAssist().toggled(MonitorTool.vectorscope).toggled(MonitorTool.probe).toggled(MonitorTool.orientation)
+        assertTrue(assist.vectorscope && assist.probe)
+        assertEquals(FrameOrientation.mirror, assist.orientation)
+        assist = assist.with(MonitorTool.orientation, "mirror180")!!.toggled(MonitorTool.orientation)
+        assertEquals(FrameOrientation.off, assist.orientation)
+        assist = assist.toggled(MonitorTool.orientation)
+        assertEquals(FrameOrientation.mirror180, assist.orientation)
+        assist = assist.toggled(MonitorTool.vectorscope).toggled(MonitorTool.probe)
+        assertFalse(assist.vectorscope || assist.probe)
+        assist = assist.toggled(MonitorTool.vectorscope)
+        assertTrue(assist.vectorscope)
+    }
+
+    @Test fun newToolsStepThroughTheirOptions() {
+        var assist = MonitorAssist()
+        assertEquals("auto", assist.stepped(MonitorTool.lut, 1))
+        assist = assist.with(MonitorTool.lut, "hlg")!!
+        assertEquals("file", assist.stepped(MonitorTool.lut, 1))
+        assertEquals("file", assist.stepped(MonitorTool.lut, 5))
+        assertEquals("slog2", assist.stepped(MonitorTool.lut, -1))
+        assist = assist.with(MonitorTool.orientation, "mirror")!!
+        assertEquals("off", assist.stepped(MonitorTool.orientation, -1))
+        assertEquals("180", assist.stepped(MonitorTool.orientation, 1))
+        assertEquals("on", assist.stepped(MonitorTool.vectorscope, 1))
+        assertTrue(MonitorAssist.accepts(MonitorTool.lut, "slog3cine"))
+        assertFalse(MonitorAssist.accepts(MonitorTool.lut, "slog4"))
+        assertTrue(MonitorAssist.accepts(MonitorTool.orientation, "180") && !MonitorAssist.accepts(MonitorTool.orientation, "rotate180"))
+        assertTrue(MonitorAssist.accepts(MonitorTool.probe, "on") && !MonitorAssist.accepts(MonitorTool.probe, "true"))
+    }
+
+    @Test fun lutTileLabelFollowsTheChoice() {
+        var assist = MonitorAssist()
+        assertEquals("Выкл", assist.label(MonitorTool.lut))
+        // подпись «Авто: S-Log3» решает LutChoice по профилю камеры; здесь — «Авто»
+        assist = assist.with(MonitorTool.lut, "auto")!!
+        assertEquals("Авто", assist.label(MonitorTool.lut))
+        assertEquals("S-Log3 Cine", assist.with(MonitorTool.lut, "slog3cine")!!.label(MonitorTool.lut))
+        assertEquals("HLG", assist.with(MonitorTool.lut, "hlg")!!.label(MonitorTool.lut))
+        // свой файл: на плитке его имя; файл ещё не выбран — «Свой»
+        assist = assist.with(MonitorTool.lut, "file")!!
+        assertEquals("Свой", assist.label(MonitorTool.lut))
+        assist = assist.copy(lutFile = "Тёплый закат")
+        assertEquals("Тёплый закат", assist.label(MonitorTool.lut))
+        assertEquals("Свой", assist.copy(lutFile = "").label(MonitorTool.lut))
+        // файл помнится, но при другом выборе не показывается
+        assertEquals("S-Log2", assist.with(MonitorTool.lut, "slog2")!!.label(MonitorTool.lut))
+        assertEquals("Выкл", assist.with(MonitorTool.lut, "off")!!.label(MonitorTool.lut))
+    }
+
+    @Test fun pictureTileShowsTheShortLabel() {
+        val assist = MonitorAssist()
+        // на плитке — короткое значение, в полосе вариантов — длинное
+        assertEquals("—", assist.label(MonitorTool.orientation))
+        assertEquals("Зеркало", assist.with(MonitorTool.orientation, "mirror")!!.label(MonitorTool.orientation))
+        assertEquals("180°", assist.with(MonitorTool.orientation, "180")!!.label(MonitorTool.orientation))
+        assertEquals("Зеркало 180°", assist.with(MonitorTool.orientation, "mirror180")!!.label(MonitorTool.orientation))
+        val on = assist.with(MonitorTool.vectorscope, "on")!!.with(MonitorTool.probe, "on")!!
+        assertTrue(on.label(MonitorTool.vectorscope) == "Вкл" && on.label(MonitorTool.probe) == "Вкл")
+    }
+
+    @Test fun pixelsAndPictureTransformFollowTheTools() {
+        assertTrue(!MonitorAssist().needsPixels && !MonitorAssist().transformsPicture && !MonitorAssist().isActive)
+        // (инструмент, значение, нужны ли точки кадра, меняет ли картинку, нужен ли растр зебры/пикинга)
+        class Case(val tool: MonitorTool, val value: String, val pixels: Boolean, val transforms: Boolean, val raster: Boolean)
+        val cases = listOf(
+            Case(MonitorTool.zebra, "100", true, false, true), Case(MonitorTool.falseColor, "on", true, false, true),
+            Case(MonitorTool.peaking, "low", true, false, true),
+            Case(MonitorTool.vectorscope, "on", true, false, false), Case(MonitorTool.probe, "on", true, false, false),
+            Case(MonitorTool.lut, "auto", false, true, false), Case(MonitorTool.lut, "slog3", false, true, false),
+            Case(MonitorTool.lut, "file", false, true, false),
+            Case(MonitorTool.orientation, "mirror", false, true, false), Case(MonitorTool.orientation, "180", false, true, false),
+            Case(MonitorTool.orientation, "mirror180", false, true, false),
+            Case(MonitorTool.grid, "thirds", false, false, false), Case(MonitorTool.center, "on", false, false, false),
+            Case(MonitorTool.frameMarker, "9:16", false, false, false), Case(MonitorTool.safeZone, "90", false, false, false),
+            Case(MonitorTool.overlay, "50", false, false, false),
+        )
+        for (c in cases) {
+            val assist = MonitorAssist().with(c.tool, c.value)!!
+            val what = "${c.tool} ${c.value}"
+            assertEquals(what, c.pixels, assist.needsPixels)
+            assertEquals(what, c.transforms, assist.transformsPicture)
+            assertEquals(what, c.raster, assist.needsRaster)
+            // «Всё — выключить» доступна, пока включено хоть что-то
+            assertTrue(what, assist.isActive)
+        }
+        // цвет пикинга без пикинга ничего не включает
+        val color = MonitorAssist().with(MonitorTool.peakingColor, "blue")!!
+        assertTrue(!color.needsPixels && !color.transformsPicture && !color.isActive)
+        // настройки, которые сами ничего не включают
+        val settings = MonitorAssist().copy(lutFile = "Тёплый", lutScopes = false, vectorscopeZoom = 2)
+        assertTrue(!settings.needsPixels && !settings.transformsPicture && !settings.isActive)
+    }
+
+    @Test fun turnOffAllSwitchesTheNewToolsOffButKeepsTheirSettings() {
+        var assist = MonitorAssist().with(MonitorTool.lut, "slog3")!!.copy(lutFile = "Тёплый", lutScopes = false)
+            .with(MonitorTool.vectorscope, "on")!!.copy(vectorscopeZoom = 2)
+            .with(MonitorTool.probe, "on")!!.with(MonitorTool.orientation, "mirror")!!.with(MonitorTool.zebra, "95")!!
+        assertTrue(assist.isActive && assist.needsPixels && assist.transformsPicture)
+        assist = assist.allOff()
+        assertEquals(LutMode.off, assist.lut)
+        assertFalse(assist.vectorscope || assist.probe)
+        assertEquals(FrameOrientation.off, assist.orientation)
+        assertEquals(Zebra.off, assist.zebra)
+        assertTrue(!assist.isActive && !assist.needsPixels && !assist.transformsPicture)
+        // помощь «по картинке с LUT», масштаб вектороскопа и выбранный файл — не включатели, остаются как были
+        assertFalse(assist.lutScopes)
+        assertEquals(2, assist.vectorscopeZoom)
+        assertEquals("Тёплый", assist.lutFile)
+        // запомненные значения тоже: повторное касание плиток возвращает прежнее
+        assist = assist.toggled(MonitorTool.lut).toggled(MonitorTool.orientation)
+        assertTrue(assist.lut == LutMode.slog3 && assist.orientation == FrameOrientation.mirror)
+    }
+
+    @Test fun settingsWithoutTheNewKeysReadAsDefaults() {
+        // JSON, записанный версией до LUT, вектороскопа и картинки: только старые ключи
+        val old = MonitorAssist.fromJson("""{"zebra":"95","falseColor":true,"overlay":"40","lastOn":{"zebra":"95"}}""")
+        assertTrue(old.zebra == Zebra.above95 && old.falseColor && old.overlay.percent == 40)
+        assertEquals(LutMode.off, old.lut)
+        assertNull(old.lutFile)
+        assertTrue(old.lutScopes)
+        assertFalse(old.vectorscope)
+        assertEquals(1, old.vectorscopeZoom)
+        assertFalse(old.probe)
+        assertEquals(FrameOrientation.off, old.orientation)
+        assertFalse(old.transformsPicture)
+        assertEquals(MonitorAssist(), MonitorAssist.fromJson("{}"))
+        // в новой настройке без включённого — «по картинке с LUT», масштаб ×1, файла нет
+        val fresh = MonitorAssist()
+        assertTrue(fresh.lut == LutMode.off && fresh.lutFile == null && fresh.lutScopes && !fresh.vectorscope)
+        assertTrue(fresh.vectorscopeZoom == 1 && !fresh.probe && fresh.orientation == FrameOrientation.off)
+    }
+
+    @Test fun settingsWithTheNewKeysSurviveJson() {
+        val assist = MonitorAssist().with(MonitorTool.lut, "file")!!.copy(lutFile = "Тёплый закат", lutScopes = false)
+            .with(MonitorTool.vectorscope, "on")!!.copy(vectorscopeZoom = 2)
+            .with(MonitorTool.probe, "on")!!.with(MonitorTool.orientation, "mirror180")!!.with(MonitorTool.zebra, "70")!!
+        val text = assist.toJson()
+        val decoded = MonitorAssist.fromJson(text)
+        assertEquals(assist, decoded)
+        assertTrue(decoded.lut == LutMode.file && decoded.lutFile == "Тёплый закат" && !decoded.lutScopes)
+        assertTrue(decoded.vectorscope && decoded.vectorscopeZoom == 2 && decoded.probe)
+        assertEquals(FrameOrientation.mirror180, decoded.orientation)
+        // запомненные значения новых плиток тоже доезжают
+        assertTrue(decoded.lastOn["lut"] == "file" && decoded.lastOn["orientation"] == "mirror180")
+
+        // как это лежит на диске и читается программой для Mac: выбор из нескольких — строкой, вкл/выкл — bool, масштаб — число
+        val json = JSONObject(text)
+        assertEquals("file", json.get("lut"))
+        assertEquals("Тёплый закат", json.get("lutFile"))
+        assertEquals(false, json.get("lutScopes"))
+        assertEquals(true, json.get("vectorscope"))
+        assertEquals(2, json.get("vectorscopeZoom"))
+        assertEquals(true, json.get("probe"))
+        assertEquals("mirror180", json.get("orientation"))
+        assertEquals(false, json.get("falseColor"))
+        // «180» лежит строкой, как и все значения плиток
+        assertEquals("180", JSONObject(MonitorAssist().with(MonitorTool.orientation, "180")!!.toJson()).get("orientation"))
+        // файла нет — ключа нет
+        assertFalse(JSONObject(MonitorAssist().toJson()).has("lutFile"))
+    }
+
+    /** JSON как дерево значений: у JSONObject нет equals, а тип значения (bool, строка, число) важен. */
+    private fun tree(json: JSONObject): Map<String, Any?> = json.keys().asSequence().associateWith { key ->
+        when (val value = json.get(key)) {
+            is JSONObject -> tree(value)
+            else -> value
+        }
+    }
+
+    @Test fun settingsWrittenByTheMacAppAreReadAndOursLookTheSame() {
+        // то, что программа для Mac пишет на диск (JSONEncoder) для этих же настроек, — слово в слово
+        val mac = listOf(
+            """{"center":true,"falseColor":true,"frameMarker":"9:16","grid":"thirds",""",
+            """"lastOn":{"center":"on","falseColor":"on","frameMarker":"9:16","grid":"thirds","lut":"file",""",
+            """"orientation":"180","overlay":"40","peaking":"mid","peakingColor":"blue","probe":"on","safeZone":"90",""",
+            """"vectorscope":"on","zebra":"70"},""",
+            """"lut":"file","lutFile":"Тёплый закат","lutScopes":false,"orientation":"180","overlay":"40","peaking":"mid",""",
+            """"peakingColor":"blue","probe":true,"safeZone":"90","vectorscope":true,"vectorscopeZoom":2,"zebra":"70"}""",
+        ).joinToString("")
+        val built = MonitorAssist().with(MonitorTool.zebra, "70")!!.with(MonitorTool.falseColor, "on")!!
+            .with(MonitorTool.peaking, "mid")!!.with(MonitorTool.peakingColor, "blue")!!.with(MonitorTool.lut, "file")!!
+            .with(MonitorTool.vectorscope, "on")!!.with(MonitorTool.probe, "on")!!.with(MonitorTool.grid, "thirds")!!
+            .with(MonitorTool.center, "on")!!.with(MonitorTool.frameMarker, "9:16")!!.with(MonitorTool.safeZone, "90")!!
+            .with(MonitorTool.overlay, "40")!!.with(MonitorTool.orientation, "180")!!
+            .copy(lutFile = "Тёплый закат", lutScopes = false, vectorscopeZoom = 2)
+        assertEquals(built, MonitorAssist.fromJson(mac))
+        assertEquals(tree(JSONObject(mac)), tree(JSONObject(built.toJson())))
+
+        // настройка «по умолчанию»: те же шестнадцать ключей, файла нет
+        val macDefault = listOf(
+            """{"center":false,"falseColor":false,"frameMarker":"off","grid":"off","lastOn":{},"lut":"off","lutScopes":true,""",
+            """"orientation":"off","overlay":"off","peaking":"off","peakingColor":"red","probe":false,"safeZone":"off",""",
+            """"vectorscope":false,"vectorscopeZoom":1,"zebra":"off"}""",
+        ).joinToString("")
+        assertEquals(MonitorAssist(), MonitorAssist.fromJson(macDefault))
+        assertEquals(tree(JSONObject(macDefault)), tree(JSONObject(MonitorAssist().toJson())))
+    }
+
+    @Test fun brokenNewKeysFallBackToDefaults() {
+        // неизвестное значение, неверный тип и неверный масштаб — как «не записано»; остальное читается
+        val broken = """{"zebra":"100","lut":"bogus","lutFile":5,"lutScopes":"no","vectorscope":"on","vectorscopeZoom":3,""" +
+            """"probe":"yes","orientation":"sideways"}"""
+        val assist = MonitorAssist.fromJson(broken)
+        assertEquals(Zebra.above100, assist.zebra)
+        assertEquals(LutMode.off, assist.lut)
+        assertNull(assist.lutFile)
+        assertTrue(assist.lutScopes)
+        assertFalse(assist.vectorscope)
+        assertEquals(1, assist.vectorscopeZoom)
+        assertFalse(assist.probe)
+        assertEquals(FrameOrientation.off, assist.orientation)
+        // масштаб — только 1 и 2: число 2 в любой записи, всё остальное — 1
+        val zooms = listOf("1" to 1, "2" to 2, "0" to 1, "-2" to 1, "4" to 1, "2.0" to 2, "2e0" to 2, "1.5" to 1, "2.5" to 1,
+            "\"2\"" to 1, "true" to 1, "null" to 1)
+        for ((text, zoom) in zooms) assertEquals(text, zoom, MonitorAssist.fromJson("""{"vectorscopeZoom":$text}""").vectorscopeZoom)
+        // «null» вместо файла — файла нет
+        val none = MonitorAssist.fromJson("""{"lut":"file","lutFile":null}""")
+        assertTrue(none.lut == LutMode.file && none.lutFile == null)
+    }
+
+    @Test fun newKeysAreReadOnlyByTheirOwnJsonType() {
+        // org.json охотно приводит типы: optString делает из числа строку, optBoolean читает «true» и «false». Как у программы
+        // для Mac, новые ключи читаются только своим типом, иначе — как «не записано»
+        fun read(key: String, raw: String) = MonitorAssist.fromJson("""{"$key":$raw}""")
+        assertNull(read("lutFile", "5").lutFile)
+        assertNull(read("lutFile", "true").lutFile)
+        assertNull(read("lutFile", "null").lutFile)
+        assertEquals("", read("lutFile", "\"\"").lutFile)
+        assertEquals("Look 1", read("lutFile", "\"Look 1\"").lutFile)
+        assertTrue(read("lutScopes", "\"false\"").lutScopes)
+        assertTrue(read("lutScopes", "0").lutScopes)
+        assertFalse(read("lutScopes", "false").lutScopes)
+        assertFalse(read("vectorscope", "1").vectorscope)
+        assertFalse(read("vectorscope", "\"true\"").vectorscope)
+        assertTrue(read("vectorscope", "true").vectorscope)
+        assertFalse(read("probe", "1").probe)
+        assertFalse(read("probe", "\"on\"").probe)
+        assertTrue(read("probe", "true").probe)
+        // «180» — строка; число 180 не принимается
+        assertEquals(FrameOrientation.off, read("orientation", "180").orientation)
+        assertEquals(FrameOrientation.rotate180, read("orientation", "\"180\"").orientation)
+        assertEquals(LutMode.off, read("lut", "true").lut)
+        assertEquals(LutMode.off, read("lut", "1").lut)
+        assertEquals(LutMode.hlg, read("lut", "\"hlg\"").lut)
     }
 
     // зебра и false color
