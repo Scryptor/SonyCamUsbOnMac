@@ -196,7 +196,29 @@ class HardwareKeysTest {
         assertTrue(KeyAction.entries.filter { it != KeyAction.photo && it != KeyAction.record }.all { "ничего" in it.journalText })
     }
 
-    // экран кадра: ни ⚙, ни галереи, ни пресетов, ни отладки, ни просмотра снимка, ни меню
+    // экран кадра: ⚙, пресеты, галерея, отладка, просмотр снимка и карточки-подсказки его закрывают, меню Fn, «Монитор» и «Все настройки» —
+    // нет (так и пробел на Mac: ему мешают только галерея и просмотр)
+
+    /** Что может лежать над кадром, как это открывается и остаётся ли с этим кадр экраном кадра для кнопок громкости. */
+    private class Cover(val name: String, val open: (ScreenState) -> Unit, val keepsFrameScreen: Boolean)
+
+    private val covers = listOf(
+        // рабочие панели: кнопки съёмки рядом, картинка видна — клавиша работает
+        Cover("меню Fn", { it.fnOpen = true }, true),
+        Cover("меню «Монитор»", { it.assistOpen = true }, true),
+        Cover("«Все настройки»", { it.allSettingsOpen = true }, true),
+        // всё остальное кадр закрывает: клавиша ничего не делает (но забирается)
+        Cover("⚙", { it.settingsOpen = true }, false),
+        Cover("подсказка строки состояния", { it.pillInfo = PillInfo.connection }, false),
+        Cover("список пресетов", { it.presetMenuOpen = true }, false),
+        Cover("«Новый пресет»", { it.newPresetOpen = true }, false),
+        Cover("«Сохранить настройки»", { it.savePresetOpen = true }, false),
+        Cover("окно пресетов", { it.presetsOpen = true }, false),
+        Cover("подсказка «Фокус касанием»", { it.touchFocusHelpOpen = true }, false),
+        Cover("карточка «Метки фокуса»", { it.focusMarksHelpOpen = true }, false),
+        Cover("панель отладки", { it.debugOpen = true }, false),
+        Cover("галерея", { it.galleryShot = 7L }, false),
+    )
 
     @Test fun anEmptyScreenIsTheFrameScreen() {
         val screen = ScreenState()
@@ -220,37 +242,55 @@ class HardwareKeysTest {
         assertTrue(screen.isFrameScreen(reviewOpen = false))
     }
 
-    @Test fun eachPanelAndMenuTakesTheFrameScreenAway() {
-        val opens: Map<String, (ScreenState) -> Unit> = mapOf(
-            "⚙" to { it.settingsOpen = true },
-            "все настройки" to { it.allSettingsOpen = true },
-            "меню Fn" to { it.fnOpen = true },
-            "меню «Монитор»" to { it.assistOpen = true },
-            "подсказка строки состояния" to { it.pillInfo = PillInfo.connection },
-            "список пресетов" to { it.presetMenuOpen = true },
-            "«Новый пресет»" to { it.newPresetOpen = true },
-            "«Сохранить настройки»" to { it.savePresetOpen = true },
-            "окно пресетов" to { it.presetsOpen = true },
-            "подсказка «Фокус касанием»" to { it.touchFocusHelpOpen = true },
-            "карточка «Метки фокуса»" to { it.focusMarksHelpOpen = true },
-            "панель отладки" to { it.debugOpen = true },
-            "галерея" to { it.galleryShot = 7L },
-        )
-        for ((name, open) in opens) {
+    @Test fun theFnMenuTheMonitorMenuAndAllSettingsLeaveTheFrameScreenAlone() {
+        val menus = covers.filter { it.keepsFrameScreen }
+        assertEquals(listOf("меню Fn", "меню «Монитор»", "«Все настройки»"), menus.map { it.name })
+        for (menu in menus) {
             val screen = ScreenState()
-            open(screen)
-            assertFalse(name, screen.isFrameScreen(reviewOpen = false))
+            menu.open(screen)
+            assertTrue(menu.name, screen.isFrameScreen(reviewOpen = false))
+            // но для касаний и автоскрытия это по-прежнему открытое меню: касание кадра закрывает его, элементы не прячутся
+            assertTrue(menu.name, screen.overlayOpen)
+        }
+        val all = ScreenState()
+        menus.forEach { it.open(all) }
+        assertTrue(all.isFrameScreen(reviewOpen = false))
+    }
+
+    @Test fun everythingElseThatCoversTheFrameTakesTheFrameScreenAway() {
+        val closing = covers.filter { !it.keepsFrameScreen }
+        assertEquals(10, closing.size)
+        for (cover in closing) {
+            val screen = ScreenState()
+            cover.open(screen)
+            assertFalse(cover.name, screen.isFrameScreen(reviewOpen = false))
+        }
+    }
+
+    @Test fun twoThingsOpenTogetherKeepTheFrameScreenOnlyIfEachOneDoes() {
+        // карточка «Метки фокуса» открывается сама поверх открытого меню: меню кадр не закрывало, карточка закрывает
+        for (a in covers) {
+            for (b in covers) {
+                val screen = ScreenState()
+                a.open(screen)
+                b.open(screen)
+                assertEquals("${a.name} + ${b.name}", a.keepsFrameScreen && b.keepsFrameScreen, screen.isFrameScreen(reviewOpen = false))
+            }
         }
     }
 
     @Test fun aShotOnReviewTakesTheFrameScreenAway() {
-        // просмотр снимка живёт в контроллере, не в состоянии экрана — его передают отдельно
+        // просмотр снимка живёт в контроллере, не в состоянии экрана — его передают отдельно; закрывает кадр и с открытым меню
         assertFalse(ScreenState().isFrameScreen(reviewOpen = true))
+        val withMenu = ScreenState()
+        withMenu.fnOpen = true
+        assertFalse(withMenu.isFrameScreen(reviewOpen = true))
     }
 
     @Test fun closingWhatWasOpenBringsTheFrameScreenBack() {
         val screen = ScreenState()
         screen.fnOpen = true
+        assertTrue(screen.isFrameScreen(reviewOpen = false))
         screen.settingsOpen = true
         assertFalse(screen.isFrameScreen(reviewOpen = false))
         screen.closeOverlays()

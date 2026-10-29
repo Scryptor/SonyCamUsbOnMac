@@ -224,16 +224,23 @@ class ScreenState {
     var focusMarksHelpOpen by mutableStateOf(false)
     private val focusMarksHelpOffer = FocusMarksHelpOffer()
 
-    val overlayOpen: Boolean
-        get() = fnOpen || assistOpen || allSettingsOpen || settingsOpen || pillInfo != null || presetMenuOpen || newPresetOpen ||
-            savePresetOpen || presetsOpen || touchFocusHelpOpen || focusMarksHelpOpen
+    val overlayOpen: Boolean get() = workPanelOpen || coverOpen
+
+    /** Меню Fn, меню «Монитор» и «Все настройки»: лежат над кадром, но кадр остаётся экраном кадра — кнопки съёмки рядом, видно картинку. */
+    private val workPanelOpen: Boolean get() = fnOpen || assistOpen || allSettingsOpen
+
+    /** Всё прочее над кадром, что забирает касание: ⚙, пресеты (список, окошки, окно), подсказка строки состояния, карточки-подсказки. */
+    private val coverOpen: Boolean
+        get() = settingsOpen || pillInfo != null || presetMenuOpen || newPresetOpen || savePresetOpen || presetsOpen ||
+            touchFocusHelpOpen || focusMarksHelpOpen
 
     /**
-     * На экране кадр, и поверх него ничего не открыто: ни меню и панелей, ни ⚙, ни окна пресетов, ни галереи, ни отладки, ни просмотра
-     * снимка ([reviewOpen] — он у контроллера, не здесь). Только здесь кнопки громкости и «Камера» что-то делают. Спрятанные элементы
-     * и увеличение этого не отменяют: с пультом снимают и без кнопок на экране.
+     * На экране кадр: не закрыт ни ⚙, ни пресетами, ни карточкой-подсказкой, ни галереей, ни отладкой, ни просмотром снимка
+     * ([reviewOpen] — он у контроллера, не здесь). Только здесь кнопки громкости и «Камера» что-то делают. Меню Fn, «Монитор» и «Все
+     * настройки» кадр не закрывают — с ними клавиша работает, как пробел на Mac. Спрятанные элементы и увеличение этого не отменяют:
+     * с пультом снимают и без кнопок на экране.
      */
-    fun isFrameScreen(reviewOpen: Boolean): Boolean = !overlayOpen && !debugOpen && galleryShot == null && !reviewOpen
+    fun isFrameScreen(reviewOpen: Boolean): Boolean = !coverOpen && !debugOpen && galleryShot == null && !reviewOpen
 
     /**
      * Шкала с метками на экране; [doNotShow] — «Больше не показывать» отмечено. Первый раз за запуск открывает карточку — сама, без
