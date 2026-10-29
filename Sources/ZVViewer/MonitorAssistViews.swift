@@ -37,8 +37,9 @@ final class AssistInput: Sendable {
         }
 
         /// Куб, который ложится на картинку: встроенный (один на вид на всю программу) или свой файл; nil — LUT нет. Решает
-        /// он, а не `assist.transformsPicture`: «Авто» без профиля картинку не меняет.
-        var lut: ColorLUT? { assist.lut == .file ? fileLUT : builtinLUT?.cube }
+        /// он, а не `assist.transformsPicture`: «Авто» без профиля картинку не меняет. Кубы рассчитаны на код камеры/1023, а
+        /// на вход им идёт превью: домен переводится в значения превью (`PreviewLevels.forPreview`), числа куба — те же.
+        var lut: ColorLUT? { (assist.lut == .file ? fileLUT : builtinLUT?.cube).map(PreviewLevels.forPreview) }
 
         /// Точка пипетки в долях кадра: поставленная или центр.
         var probePoint: CGPoint { probe ?? CGPoint(x: 0.5, y: 0.5) }

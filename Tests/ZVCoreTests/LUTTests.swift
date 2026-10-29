@@ -589,8 +589,8 @@ func makeFollowsTheExactPathAlongTheGreyAxis(_ lut: BuiltinLUT) {
     #expect(LUTChoice.autoLabel(nil) == "Авто: нет")
 }
 
-@Test func cameraDoesNotConvertThePreviewUntilTheDeviceCheck() {
-    // пока камерой не проверено, превью считается логарифмическим и «Авто» включает LUT
+@Test func cameraDoesNotConvertThePreview() {
+    // проверено на ZV-E10: превью в S-Log и HLG логарифмическое, камера к 709 его не приводит — «Авто» включает LUT
     #expect(LUTChoice.cameraConverts == false)
 }
 

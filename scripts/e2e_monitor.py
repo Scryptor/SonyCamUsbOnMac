@@ -674,7 +674,7 @@ def run_lut(out):
 
 
 def identity_cube():
-    """Тождественный куб 2³ — картинка с ним не меняется (красный меняется быстрее всех)."""
+    """Тождественный куб 2³: на экране — его вход, код камеры/1023 (красный меняется быстрее всех)."""
     rows = "".join(f"{r} {g} {b}\n" for b in (0, 1) for g in (0, 1) for r in (0, 1))
     return 'TITLE "e2e identity"\nLUT_3D_SIZE 2\n' + rows
 
@@ -699,8 +699,12 @@ def run_cube(out, log_spread):
         check("и он выбран: LUT «Свой», файл e2e-identity, resolved null", picture(s)["lut"]["mode"] == "file"
               and picture(s)["lut"]["file"] == "e2e-identity" and picture(s)["lut"]["resolved"] is None, picture(s)["lut"])
         check("куб в потоке кадров: белый уровень помощи 255 (без LUT на логе 234)", picture(s)["whiteLevel"] == 255, picture(s))
-        check("тождественный куб картинку не меняет: размах и средняя яркость как без LUT",
-              near(picture(s)["lumaSpread"], log_spread["lumaSpread"], 1) and near(picture(s)["meanLuma"], log_spread["meanLuma"], 0.5),
+        # свой куб получает тот же вход, что встроенные, — код камеры/1023 = a + b·v (превью растягивает коды 64…1019 на
+        # 0…255, docs/protocol.md «Превью в S-Log и HLG»): тождественный показывает его — чёрное 16, шкала ×955/1023
+        a, b = 64 / 1023 * 255, 955 / 1023
+        check("тождественный куб показывает код камеры: средняя 16 + 0,934·средняя без LUT, размах ×0,934",
+              near(picture(s)["lumaSpread"], b * log_spread["lumaSpread"], 1.5)
+              and near(picture(s)["meanLuma"], a + b * log_spread["meanLuma"], 1.0),
               (picture(s)["lumaSpread"], picture(s)["meanLuma"], log_spread))
         shot(out, "18-lut-own-cube")
         act("lutScopes", on=False)

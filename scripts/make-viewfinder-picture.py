@@ -10,9 +10,11 @@
 
 --log рисует то, что камера отдаёт в превью при профиле изображения с логом (PP7 — S-Log2, PP8 и PP9 — S-Log3, PP10 —
 HLG): тот же кадр, обратным путём к LUT программы (docs/superpowers/specs/2026-10-29-monitor-plus-ideas-design.md, §4).
-Кадр 709 → линейный свет → отражение сцены L (100 % белого = 1, 18 % серого = 0,18) → кривая камеры → 8 бит как
-код/1023·255. Охват не пересчитывается: цвета остаются в основных цветах 709, меняется только кривая. Все три файла —
-1024×576, качество 92: scripts/fake_camera.py отдаёт их вместо viewfinder.jpg, когда в камере выбран такой профиль.
+Кадр 709 → линейный свет → отражение сцены L (100 % белого = 1, 18 % серого = 0,18) → кривая камеры → 8 бит так, как
+превью ZV-E10 растягивает коды камеры: (код − 64)/955·255, коды 64…1019 → 0…255 (docs/protocol.md, «Превью в S-Log и
+HLG»): чёрное S-Log3 — 8, 18 % серого — 95. Охват не пересчитывается: цвета остаются в основных цветах 709, меняется только
+кривая. Все три файла — 1024×576, качество 92: scripts/fake_camera.py отдаёт их вместо viewfinder.jpg, когда в камере
+выбран такой профиль.
 """
 import argparse, io, os
 import numpy as np
@@ -194,6 +196,13 @@ def hlg_code(L):
 
 
 LOG_CURVES = {"slog3": slog3_code, "slog2": slog2_code, "hlg": hlg_code}
+# превью ZV-E10 растягивает коды камеры 64…1019 на 0…255 — так измерено на камере (scripts/check_log_preview.py)
+PREVIEW_BLACK, PREVIEW_SPAN = 64, 955
+
+
+def preview_level(code):
+    """Код камеры 0–1023 → значение канала превью 0–255."""
+    return np.clip((code - PREVIEW_BLACK) / PREVIEW_SPAN * 255, 0, 255)
 
 
 def log_pictures():
@@ -202,10 +211,10 @@ def log_pictures():
     scene_light = to_linear(source)
     for name, curve in LOG_CURVES.items():
         code = np.clip(curve(scene_light), 0, 1023)
-        picture = Image.fromarray(np.rint(code / 1023 * 255).astype(np.uint8))
+        picture = Image.fromarray(np.rint(preview_level(code)).astype(np.uint8))
         path = os.path.join(ASSETS, f"viewfinder-{name}.jpg")
         picture.save(path, "JPEG", quality=92, optimize=True)
-        gray = np.rint(curve(np.array(0.18)) / 1023 * 255)
+        gray = np.rint(preview_level(curve(np.array(0.18))))
         print(f"{path}: {os.path.getsize(path) // 1024} КБ, 18 % серого → {int(gray)} из 255")
 
 

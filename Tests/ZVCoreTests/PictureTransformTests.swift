@@ -194,6 +194,35 @@ private func expected(_ lut: ColorLUT, _ rgb: [Int]) -> [Int] {
     #expect(worst <= 2, "наибольшее расхождение \(worst) уровней")
 }
 
+@Test func builtinCubeForThePreviewReadsTheCameraCode() {
+    // превью ZV-E10 в S-Log3: чёрное (код 95) — 8, 18 % серого (код 420) — 95, 90 % отражения (код 598) — 143 из 255.
+    // Куб для превью (домен в значениях превью) делает из них экран: 0, 104 (0,409) и 230 (0,90)
+    let levels: [UInt8] = [8, 95, 143]
+    let image = makeImage(width: 3, height: 1) { x, _ in (levels[x], levels[x], levels[x]) }
+    let lut = PreviewLevels.forPreview(BuiltinLUT.slog3cine.cube)
+    let out = readPixels(PictureTransform().apply(image, orientation: .off, lut: lut, needPlain: false).display)
+    for (x, want) in [0, 104, 230].enumerated() {
+        let got = pixel(out, x, 0, width: 3)
+        #expect(got.allSatisfy { abs($0 - want) <= 3 }, "уровень \(levels[x]): \(got), ждали \(want)")
+        // и Core Image даёт то же, что точный путь куба с доменом превью
+        #expect(zip(expected(lut, [Int(levels[x]), Int(levels[x]), Int(levels[x])]), got).allSatisfy { abs($0 - $1) <= 1 })
+    }
+}
+
+@Test func identityCubeForThePreviewLiftsBlackToTheCameraCode() {
+    // свой куб получает тот же вход, что встроенные: тождественный показывает код камеры/1023 — 0 → 16, 255 → 254
+    let image = makeImage(width: 256, height: 1) { x, _ in (UInt8(x), UInt8(x), UInt8(x)) }
+    let out = readPixels(PictureTransform().apply(image, orientation: .off, lut: PreviewLevels.forPreview(.identity(size: 2)),
+                                                  needPlain: false).display)
+    var worst = 0
+    for x in 0..<256 {
+        let want = Int((PreviewLevels.code(Double(x) / 255) * 255).rounded())
+        worst = max(worst, pixel(out, x, 0, width: 256).map { abs($0 - want) }.max()!)
+    }
+    #expect(worst <= 1, "наибольшее расхождение \(worst)")
+    #expect(pixel(out, 0, 0, width: 256) == [16, 16, 16] && pixel(out, 255, 0, width: 256) == [254, 254, 254])
+}
+
 @Test func domainOfTheCubeScalesTheInputBeforeIt() {
     // домен уже 0…1 и разный по каналам: вход приводится к нему, что за ним — обрезается
     let lut = scrambledCube(size: 9, domainMin: [0.25, 0.1, 0.0], domainMax: [0.75, 0.9, 0.5])
