@@ -6,6 +6,7 @@ import local.zve10viewer.monitor.CubeFile
 import local.zve10viewer.monitor.FrameOrientation
 import local.zve10viewer.monitor.FramePoint
 import local.zve10viewer.monitor.PictureTransform
+import local.zve10viewer.monitor.PreviewLevels
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -301,6 +302,39 @@ class PictureTransformTest {
                 assertTrue("$name: $match", match.share > if (lut.size >= 33) 0.955 else if (lut.size >= 17) 0.9 else 0.8)
             }
         }
+    }
+
+    @Test fun builtinCubeForThePreviewReadsTheCameraCode() {
+        // превью ZV-E10 в S-Log3: чёрное (код 95) — 8, 18 % серого (код 420) — 95, 90 % отражения (код 598) — 143 из 255.
+        // Куб для превью (домен в значениях превью) делает из них экран: 0, 104 (0,409) и 230 (0,90)
+        val levels = intArrayOf(8, 95, 143)
+        val src = IntArray(3) { opaque or (levels[it] shl 16) or (levels[it] shl 8) or levels[it] }
+        val lut = PreviewLevels.forPreview(BuiltinLut.slog3cine.make())
+        PictureTransform(1).use { transform ->
+            val display = IntArray(3)
+            transform.apply(src, 3, 1, FrameOrientation.off, lut, display, null)
+            for ((x, want) in listOf(0, 104, 230).withIndex()) {
+                val got = listOf((display[x] shr 16) and 0xFF, (display[x] shr 8) and 0xFF, display[x] and 0xFF)
+                assertTrue("уровень ${levels[x]}: $got, ждали $want", got.all { abs(it - want) <= 3 })
+                // и таблица прохода даёт то же, что точный путь куба с доменом превью
+                assertTrue("уровень ${levels[x]}: ${display[x].toUInt().toString(16)}", channelDistance(expectedPixel(lut, src[x]), display[x]) <= 1)
+            }
+        }
+    }
+
+    @Test fun identityCubeForThePreviewLiftsBlackToTheCameraCode() {
+        // свой куб получает тот же вход, что встроенные: тождественный показывает код камеры/1023 — 0 → 16, 255 → 254
+        val src = IntArray(256) { opaque or (it shl 16) or (it shl 8) or it }
+        val display = IntArray(256)
+        PictureTransform(1).use { it.apply(src, 256, 1, FrameOrientation.off, PreviewLevels.forPreview(ColorLut.identity(2)), display, null) }
+        var worst = 0
+        for (x in 0 until 256) {
+            val want = floor(PreviewLevels.code(x / 255.0) * 255 + 0.5).toInt()
+            worst = max(worst, channelDistance(opaque or (want shl 16) or (want shl 8) or want, display[x]))
+        }
+        assertTrue("наибольшее расхождение $worst", worst <= 1)
+        assertEquals(opaque or 0x101010, display[0])
+        assertEquals(opaque or 0xFEFEFE, display[255])
     }
 
     @Test fun lutHonoursTheDomainOfTheCube() {

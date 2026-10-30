@@ -3,6 +3,7 @@ package local.zve10viewer
 import local.zve10viewer.monitor.ColorLut
 import local.zve10viewer.monitor.CubeFile
 import local.zve10viewer.monitor.LutCache
+import local.zve10viewer.monitor.PreviewLevels
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -52,7 +53,8 @@ class LutStoreTest {
         return (header + rows).joinToString("\n") + "\n"
     }
 
-    private fun parsed(text: String): ColorLut = CubeFile.parse(text)
+    /** Куб текста таким, каким он ложится на картинку: с доменом в значениях превью. */
+    private fun onPicture(text: String): ColorLut = PreviewLevels.forPreview(CubeFile.parse(text))
 
     private fun bytes(text: String) = text.toByteArray(Charsets.UTF_8)
 
@@ -90,7 +92,7 @@ class LutStoreTest {
         assertEquals(listOf("Тёплый закат.cube"), stored())
         assertEquals(text, File(folder, "Тёплый закат.cube").readText())
         // куб уже в памяти того же кэша, который кладёт его на картинку: ждать фонового чтения не нужно
-        assertEquals(parsed(text), cache.file("Тёплый закат"))
+        assertEquals(onPicture(text), cache.file("Тёплый закат"))
         assertTrue(queue.isEmpty())
     }
 
@@ -105,7 +107,7 @@ class LutStoreTest {
         val second = cache.file("grade")
         assertNotNull(second)
         assertNotSame(first, second)
-        assertEquals(parsed(cube(inverted = true)), second)
+        assertEquals(onPicture(cube(inverted = true)), second)
         assertSame(second, cache.file("grade"))
     }
 
@@ -133,7 +135,7 @@ class LutStoreTest {
         // куб под новым именем — новый (диск у разных телефонов и у Mac по-разному относится к регистру, поэтому старое
         // написание не проверяем: на диске с регистром его уже нет, на другом это тот же файл)
         assertNotSame(old, cache.file("look"))
-        assertEquals(parsed(cube(inverted = true)), cache.file("look"))
+        assertEquals(onPicture(cube(inverted = true)), cache.file("look"))
     }
 
     @Test fun anyExtensionIsAcceptedAndTheCopyIsStoredWithTheLowercaseOne() {
@@ -223,7 +225,7 @@ class LutStoreTest {
         for (i in 1..12) store.add("lut$i.cube", cube())
         store.add("lut7.cube", cube(inverted = true))
         assertEquals(12, store.names.size)
-        assertEquals(parsed(cube(inverted = true)), cache.file("lut7"))
+        assertEquals(onPicture(cube(inverted = true)), cache.file("lut7"))
         // и то же имя другим регистром — тоже замена, а не тринадцатый
         store.add("LUT7.cube", cube())
         assertEquals(12, store.names.size)
@@ -363,7 +365,7 @@ class LutStoreTest {
         val store = LutStore(cache)
         val data = "TITLE \"Caf".toByteArray() + byteArrayOf(0xE9.toByte()) + "\"\n".toByteArray() + bytes(cube())
         assertEquals("latin", added(store.importFile("latin.cube", source(data))))
-        assertEquals(parsed(cube()), cache.file("latin"))
+        assertEquals(onPicture(cube()), cache.file("latin"))
         // копия — те же байты, а не пересохранённый текст
         assertTrue(data.contentEquals(File(folder, "latin.cube").readBytes()))
     }
@@ -373,7 +375,7 @@ class LutStoreTest {
         val store = LutStore(cache)
         val data = byteArrayOf(0xEF.toByte(), 0xBB.toByte(), 0xBF.toByte()) + bytes(cube().replace("\n", "\r\n"))
         assertEquals("crlf", added(store.importFile("crlf.cube", source(data))))
-        assertEquals(parsed(cube()), cache.file("crlf"))
+        assertEquals(onPicture(cube()), cache.file("crlf"))
     }
 
     // удаление и список
@@ -611,6 +613,6 @@ class LutStoreTest {
         assertNull(cache.file("x"))
         runBackground()
         assertEquals(1, reads.get())
-        assertEquals(parsed(cube(inverted = true)), cache.file("x"))
+        assertEquals(onPicture(cube(inverted = true)), cache.file("x"))
     }
 }

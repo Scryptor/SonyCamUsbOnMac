@@ -9,6 +9,8 @@ import local.zve10viewer.monitor.LutCache
 import local.zve10viewer.monitor.MonitorAssist
 import local.zve10viewer.monitor.MonitorAssist.LutMode
 import local.zve10viewer.monitor.PicturePath
+import local.zve10viewer.monitor.PreviewLevels
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -90,6 +92,16 @@ class LutCacheTest {
 
     private fun assist(mode: LutMode, file: String? = null) = MonitorAssist(lut = mode, lutFile = file)
 
+    /**
+     * Куб на картинке — исходный куб с доменом в значениях превью (`PreviewLevels.forPreview`), числа те же: тот же массив, а не
+     * копия на 33³ или 65³ точек. [sameArray] = false — исходный куб разобран тестом заново из того же текста, сверяются числа.
+     */
+    private fun assertPreviewOf(source: ColorLut, served: ColorLut?, sameArray: Boolean = true) {
+        assertNotNull(served)
+        assertEquals(PreviewLevels.forPreview(source), served)
+        if (sameArray) assertSame("числа куба — тот же массив", source.values, served!!.values)
+    }
+
     // встроенные
 
     @Test fun builtinCubeIsMadeOncePerKind() {
@@ -114,7 +126,32 @@ class LutCacheTest {
 
     @Test fun builtinCubeIsTheExactPathOfItsKind() {
         val cube = cache().builtin(BuiltinLut.hlg)
-        assertEquals(BuiltinLut.hlg.make(), cube)
+        // числа — точный путь вида, домен — в значениях превью: вход куба — код камеры/1023, а на вход идёт превью
+        assertEquals(PreviewLevels.forPreview(BuiltinLut.hlg.make()), cube)
+        assertArrayEquals(BuiltinLut.hlg.make().values, cube.values, 0f)
+    }
+
+    @Test fun builtinCubesComeWithThePreviewDomain() {
+        val cache = cache()
+        for (kind in BuiltinLut.entries) {
+            val cube = cache.builtin(kind)
+            for (channel in 0 until 3) {
+                assertEquals(kind.name, -64f / 955f, cube.domainMin[channel], 1e-6f)
+                assertEquals(kind.name, 959f / 955f, cube.domainMax[channel], 1e-6f)
+            }
+            // один раз на экземпляр: кадровый цикл получает тот же куб на каждом кадре, и таблица прохода не строится заново
+            assertSame(kind.name, cube, cache.builtin(kind))
+            assertSame(kind.name, cube, cache.cube(assist(LutMode.entries.first { it.value == kind.value }), CameraProfile.none))
+        }
+    }
+
+    @Test fun greyPreviewLevelsOfTheCameraReachTheControlPointsThroughTheCachedCube() {
+        // S-Log3 в превью ZV-E10: чёрное (код 95) — 8 из 255, серый (код 420) — 95; куб из кэша делает из них 0 и 0,409
+        val cube = cache().builtin(BuiltinLut.slog3cine)
+        val black = cube.apply(8f / 255f, 8f / 255f, 8f / 255f)
+        val grey = cube.apply(95f / 255f, 95f / 255f, 95f / 255f)
+        assertEquals(0.0, black.second.toDouble(), 0.01)
+        assertEquals(0.409, grey.second.toDouble(), 0.01)
     }
 
     @Test fun builtinCubeIsTheSameInstanceForAllThreads() {
@@ -275,6 +312,23 @@ class LutCacheTest {
         assertNotNull(cache.cube(mode, CameraProfile.none))
     }
 
+    @Test fun ownFileCubeComesWithThePreviewDomainAndTheNumbersOfTheFile() {
+        // .cube с доменом 0,1…0,9 по коду камеры: на картинке он получает вход превью как a + b·v
+        val text = "LUT_3D_SIZE 2\nDOMAIN_MIN 0.1 0.1 0.1\nDOMAIN_MAX 0.9 0.9 0.9\n" +
+            identity2.lines().filter { it.isNotEmpty() && it[0].isDigit() }.joinToString("\n")
+        write("look", text)
+        val cache = cache()
+        cache.file("look")
+        queue.runAll()
+        val cube = cache.file("look")
+        assertPreviewOf(CubeFile.parse(text), cube, sameArray = false)
+        assertEquals((0.1f - 64f / 1023f) / (955f / 1023f), cube!!.domainMin[0], 1e-6f)
+        assertEquals((0.9f - 64f / 1023f) / (955f / 1023f), cube.domainMax[2], 1e-6f)
+        // один раз на экземпляр, а не на каждый кадр
+        assertSame(cube, cache.file("look"))
+        assertSame(cube, cache.cube(assist(LutMode.file, "look"), CameraProfile.none))
+    }
+
     @Test fun fileModeWithoutAFileChosenGivesNothing() {
         val cache = cache()
         assertNull(cache.cube(assist(LutMode.file, null), CameraProfile.none))
@@ -426,8 +480,10 @@ class LutCacheTest {
         queue.runAll()
         val cube = cache.file("flip")
         assertNotNull("$notes", cube)
-        assertEquals(1f, cube!!.domainMin[0], 0f)
-        assertEquals(0f, cube.domainMax[0], 0f)
+        // домен остаётся перевёрнутым (b > 0 порядок не меняет), и куб по-прежнему даёт то, что даёт разбор: начало домена
+        assertEquals((1f - 64f / 1023f) / (955f / 1023f), cube!!.domainMin[0], 1e-6f)
+        assertEquals((0f - 64f / 1023f) / (955f / 1023f), cube.domainMax[0], 1e-6f)
+        assertTrue(cube.domainMax[0] < cube.domainMin[0])
     }
 
     @Test fun tooHeavyFileIsRefusedWithoutReadingIt() {
@@ -619,7 +675,10 @@ class LutCacheTest {
         val cache = counting(reads)
         val cube = CubeFile.parse(identity2)
         cache.adopt("look", cube)
-        assertSame(cube, cache.file("look"))
+        // принятый куб ложится на картинку с доменом превью, один раз; числа — те же
+        val served = cache.file("look")
+        assertPreviewOf(cube, served)
+        assertSame(served, cache.file("look"))
         assertEquals(0, queue.tasks.size)
         queue.runAll()
         assertEquals(0, reads.get())
@@ -630,7 +689,8 @@ class LutCacheTest {
         val cache = cache()
         val adopted = CubeFile.parse(identity2)
         cache.adopt("look", adopted)
-        assertSame(adopted, cache.file("look"))
+        val served = cache.file("look")
+        assertPreviewOf(adopted, served)
         // файл изменили снаружи: принятый куб больше не отдаётся, новый читается в фоне
         file.writeText(inverted2)
         assertTrue(file.setLastModified(1_700_000_005_000L))
@@ -639,8 +699,9 @@ class LutCacheTest {
         queue.runAll()
         val fresh = cache.file("look")
         assertNotNull(fresh)
-        assertNotSame(adopted, fresh)
+        assertNotSame(served, fresh)
         assertEquals(1f, fresh!!.values[0], 0f)
+        assertPreviewOf(CubeFile.parse(inverted2), fresh, sameArray = false)
     }
 
     @Test fun adoptingAgainReplacesWhatWasThere() {
@@ -655,7 +716,10 @@ class LutCacheTest {
         assertTrue(file.setLastModified(1_700_000_009_000L))
         val adopted = CubeFile.parse(inverted2)
         cache.adopt("look", adopted)
-        assertSame(adopted, cache.file("look"))
+        val served = cache.file("look")
+        assertPreviewOf(adopted, served)
+        assertNotSame(read, served)
+        assertSame(served, cache.file("look"))
         assertEquals(0, queue.tasks.size)
     }
 
@@ -679,7 +743,7 @@ class LutCacheTest {
         // три хороших куба на местах
         val good = (1..3).map { n ->
             write("g$n", identity2)
-            CubeFile.parse(identity2).also { cache.adopt("g$n", it) }
+            CubeFile.parse(identity2).also { cache.adopt("g$n", it) }.let { cache.file("g$n")!! }
         }
         // за папкой лежит настоящий файл: имя «../outside» к нему ведёт, но принято быть не может
         File(lutsFolder().parentFile, "outside.cube").writeText(identity2)
@@ -696,14 +760,19 @@ class LutCacheTest {
     @Test fun adoptedCubesCountInTheLimitOfThree() {
         val cache = cache()
         val cubes = (1..4).map { CubeFile.parse(identity2) }
+        val served = ArrayList<ColorLut?>()
         for (n in 1..4) {
             write("l$n", identity2)
             cache.adopt("l$n", cubes[n - 1])
+            served.add(cache.file("l$n"))
         }
-        // четвёртый вытеснил первый: тот читается заново, остальные на месте
-        assertSame(cubes[1], cache.file("l2"))
-        assertSame(cubes[2], cache.file("l3"))
-        assertSame(cubes[3], cache.file("l4"))
+        // четвёртый вытеснил первый: тот читается заново, остальные на месте — те же экземпляры
+        assertPreviewOf(cubes[1], served[1])
+        assertPreviewOf(cubes[2], served[2])
+        assertPreviewOf(cubes[3], served[3])
+        assertSame(served[1], cache.file("l2"))
+        assertSame(served[2], cache.file("l3"))
+        assertSame(served[3], cache.file("l4"))
         assertNull(cache.file("l1"))
         assertEquals(1, queue.tasks.size)
     }
@@ -714,6 +783,8 @@ class LutCacheTest {
         val adopted = CubeFile.parse(inverted2)
         cache.adopt("look", adopted)
         assertTrue(file.exists())
-        assertSame(adopted, cache.cube(assist(LutMode.file, "look"), CameraProfile.none))
+        val onScreen = cache.cube(assist(LutMode.file, "look"), CameraProfile.none)
+        assertPreviewOf(adopted, onScreen)
+        assertSame(cache.file("look"), onScreen)
     }
 }

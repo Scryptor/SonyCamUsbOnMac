@@ -20,6 +20,9 @@ data class CameraProfile(val pictureProfile: Long? = null, val gamma: Long? = nu
  * Кубы LUT, которые лежат на картинке: по одному экземпляру на LUT. Экземпляр важен — [PictureTransform] узнаёт куб по
  * ссылке и строит свою таблицу один раз на экземпляр; другой экземпляр с теми же числами стоил бы таблицы на каждый кадр.
  *
+ * Кубы рассчитаны на код камеры/1023, а на вход им идёт превью: каждый куб кладётся сюда уже с доменом в значениях превью
+ * ([PreviewLevels.forPreview], числа — тот же массив), один раз — при попадании в кэш, а не на каждый кадр.
+ *
  * - **Встроенные** — 33³ из точных формул, один на вид на всю программу, делается при первом обращении ([builtin]) или заранее
  *   в фоне ([warm]): «строится при первом выборе».
  * - **Свои** — `.cube` из папки программы (`filesDir/luts/имя.cube`), ключ — имя, дата и длина файла. Файл читается и
@@ -67,7 +70,7 @@ class LutCache(
         synchronized(builders.getValue(kind)) {
             synchronized(buildLock) { built[kind] }?.let { return it }
             val started = System.nanoTime()
-            cube = make(kind)
+            cube = PreviewLevels.forPreview(make(kind))
             millis = (System.nanoTime() - started) / 1_000_000
             synchronized(buildLock) { built[kind] = cube }
         }
@@ -185,7 +188,7 @@ class LutCache(
             val slot = known ?: Slot(file).also { slots[name] = it }
             slot.modified = modified
             slot.length = length
-            slot.lut = lut
+            slot.lut = PreviewLevels.forPreview(lut)
             slot.done = true
             slot.loading = false
             trim()
@@ -210,7 +213,7 @@ class LutCache(
                 problem = TOO_BIG
             } else {
                 // не бросающее чтение UTF-8: Latin-1 в TITLE (или в комментарии) не должен ронять файл — такие байты заменяются
-                lut = CubeFile.parse(String(read(slot.file), Charsets.UTF_8))
+                lut = PreviewLevels.forPreview(CubeFile.parse(String(read(slot.file), Charsets.UTF_8)))
             }
         } catch (failure: CubeFile.Failure) {
             problem = CubeFile.message(failure)
