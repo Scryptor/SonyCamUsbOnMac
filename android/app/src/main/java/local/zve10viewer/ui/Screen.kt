@@ -64,6 +64,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
@@ -71,11 +72,14 @@ import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.round
 import androidx.compose.ui.unit.toSize
 import kotlinx.coroutines.launch
 import local.zve10viewer.view.FloatingPlacement
+import local.zve10viewer.view.PillFit
 import local.zve10viewer.view.HardwareKeys
 import local.zve10viewer.view.KeyAction
 import local.zve10viewer.view.OrientedFrame
@@ -163,12 +167,15 @@ class ScreenState {
     /** Где гистограмма и волновая форма на экране: касания по ним не возвращают скрытые элементы. */
     var histogramRect: Rect? = null
     var waveformRect: Rect? = null
-    var overlayRect: Rect? = null
-    var vectorscopeRect: Rect? = null
+    /** Где панель наложения и вектороскоп: ещё и для гистограммы с волновой формой — поднявшись над меню, они на них не ложатся. */
+    var overlayRect by mutableStateOf<Rect?>(null)
+    var vectorscopeRect by mutableStateOf<Rect?>(null)
     /** Высота ленты снимков (как её разложили) — гистограмма по умолчанию стоит над ней. */
     var stripHeight by mutableStateOf<Float?>(null)
     /** Где меню Fn, пока оно открыто: гистограмма поднимается над ним, а не прячется под ним. */
     var fnMenuRect by mutableStateOf<Rect?>(null)
+    /** Где шкала фокуса (в ручном фокусе) с карточкой меток над ней: гистограмма и волновая форма поднимаются и над ней. */
+    var focusScaleRect by mutableStateOf<Rect?>(null)
     /**
      * Где правая колонка кнопок (зум, режим, запись): гистограмма и волновая форма на неё не ложатся — встают левее.
      * Колонку спрятали вместе с элементами — место остаётся прежним: панели не прыгают туда и обратно.
@@ -606,10 +613,15 @@ private fun LiveScreen(controller: CameraController, screen: ScreenState) {
         }
         // строка состояния — своим слоем: всегда вместе с элементами, а закреплённая — и когда они скрыты, на том же месте
         AnimatedVisibility(showControls || controller.statusBarPinned, enter = fadeIn(), exit = fadeOut()) {
-            Box(Modifier.fillMaxSize().padding(18.dp)) {
+            BoxWithConstraints(Modifier.fillMaxSize().padding(18.dp)) {
+                // рядом с верхней панелью — не шире места до неё: кнопка пресетов сжимается до 120, справа от неё ☆+ и ⚙ (106) и
+                // зазор 12. Элементы спрятаны — панели нет, строка во всю ширину
+                val room = with(LocalDensity.current) {
+                    if (showControls && screen.presetButtonLeft > 0f) 18.dp + maxWidth - screen.presetButtonLeft.toDp() - 238.dp else maxWidth
+                }
                 // поверх кнопок справа: подсказка может их накрыть
                 Column(Modifier.align(Alignment.TopEnd), horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    StatusPill(controller, screen)
+                    StatusPill(controller, screen, room)
                     screen.pillInfo?.let { PillInfoCard(controller, it) }
                 }
             }
@@ -862,9 +874,14 @@ private fun Controls(controller: CameraController, screen: ScreenState, feedback
                     // шкала фокуса над строкой значений
                     if (controller.touchCancelAvailable) CancelTouchChip(controller)
                     if (controller.focusDriveAvailable) {
-                        // карточка «Метки фокуса» — прямо над шкалой, а не на высоте, подобранной под неё
-                        if (screen.focusMarksHelpOpen) FocusMarksHelpCard(controller, screen)
-                        FocusScale(controller, screen)
+                        // где шкала — для гистограммы и волновой формы: они поднимаются над ней
+                        DisposableEffect(Unit) { onDispose { screen.focusScaleRect = null } }
+                        Column(Modifier.onGloballyPositioned { screen.focusScaleRect = it.boundsInRoot() },
+                            horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            // карточка «Метки фокуса» — прямо над шкалой, а не на высоте, подобранной под неё
+                            if (screen.focusMarksHelpOpen) FocusMarksHelpCard(controller, screen)
+                            FocusScale(controller, screen)
+                        }
                     }
                     InfoLine(controller) { screen.openFn(it) }
                 }
@@ -874,9 +891,42 @@ private fun Controls(controller: CameraController, screen: ScreenState, feedback
 }
 
 @Composable
-private fun StatusPill(controller: CameraController, screen: ScreenState) {
-    Row(
-        Modifier.onGloballyPositioned { screen.statusPillLeft = it.positionInRoot().x }
+private fun StatusPill(controller: CameraController, screen: ScreenState, room: Dp) {
+    // что видно всегда: запись, точка связи, камера и кадры; остальное прячется, когда строке не хватает места (во время записи
+    // она шире и иначе легла бы на ☆+ и ⚙). Число — порядок: меньше — прячется раньше
+    val items = ArrayList<Pair<Int, @Composable () -> Unit>>()
+    controller.recordingStartedAt?.let { started -> items += ALWAYS to { RecBadge(started) } }
+    val ready = controller.phase == CameraController.Phase.ready
+    items += ALWAYS to { Box(Modifier.size(10.dp).background(if (ready) Color(0xFF34C759) else Color(0xFFFF9F0A), CircleShape)) }
+    // касание — подсказка: адреса и сигнал / что это за кадры
+    items += ALWAYS to {
+        PillText("${controller.cameraName} · ${transportLabel(controller)}", Modifier.clickable { screen.togglePillInfo(PillInfo.connection) })
+    }
+    // и частота, и разрешение превью — всегда, и в авто: снижение из-за слабого Wi-Fi видно сразу
+    val size = controller.frame?.let { " · ${it.height}p" } ?: ""
+    items += ALWAYS to { PillText("${controller.shownFps} к/с$size", Modifier.clickable { screen.togglePillInfo(PillInfo.frames) }) }
+    items += 1 to { PillText(ValueFormatter.label(SettingID.exposureProgram, controller.property(SettingID.exposureProgram))) }
+    controller.slowMotion?.let { slow ->
+        items += 4 to { PillText(slowMotionSummary(slow), Modifier.clickable { screen.togglePillInfo(PillInfo.slowMotion) }) }
+    }
+    if (controller.mode == CaptureMode.video) {
+        items += 2 to { PillText("Карта: ${ValueFormatter.label(SettingID.cardRemaining, controller.property(SettingID.cardRemaining))}") }
+    } else {
+        val card = controller.properties[SonyProp.CARD_REMAINING_SHOTS]
+        val shots = card?.current?.intValue
+        if (controller.prefs.destination != Prefs.Destination.macOnly && card?.enabled != 0 && shots != null) {
+            // при сохранении «только на планшет» карта не используется — счётчик не показываем
+            items += 2 to { PillText("Карта: $shots кадров") }
+        }
+    }
+    items += 5 to { PillText("Камера: ${ValueFormatter.label(SettingID.battery, controller.property(SettingID.battery))}") }
+    controller.tabletBattery?.let { level -> items += 3 to { PillText("Планшет: $level%" + if (controller.tabletCharging) " ⚡" else "") } }
+
+    val gap = with(LocalDensity.current) { 16.dp.roundToPx() }
+    Layout(
+        content = { for ((_, item) in items) item() },
+        modifier = Modifier.widthIn(max = room.coerceAtLeast(0.dp))
+            .onGloballyPositioned { screen.statusPillLeft = it.positionInRoot().x }
             .background(Panel, RoundedCornerShape(14.dp))
             // долгое нажатие — панель отладки; короткие по надписям — подсказки, как раньше
             .onLongPress {
@@ -884,35 +934,24 @@ private fun StatusPill(controller: CameraController, screen: ScreenState) {
                 screen.debugOpen = true
             }
             .padding(horizontal = 16.dp, vertical = 10.dp),
-        horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically,
-    ) {
-        controller.recordingStartedAt?.let { RecBadge(it) }
-        val ready = controller.phase == CameraController.Phase.ready
-        Box(Modifier.size(10.dp).background(if (ready) Color(0xFF34C759) else Color(0xFFFF9F0A), CircleShape))
-        // касание — подсказка: адреса и сигнал / что это за кадры
-        PillText("${controller.cameraName} · ${transportLabel(controller)}",
-            Modifier.clickable { screen.togglePillInfo(PillInfo.connection) })
-        // и частота, и разрешение превью — всегда, и в авто: снижение из-за слабого Wi-Fi видно сразу
-        val size = controller.frame?.let { " · ${it.height}p" } ?: ""
-        PillText("${controller.shownFps} к/с$size", Modifier.clickable { screen.togglePillInfo(PillInfo.frames) })
-        PillText(ValueFormatter.label(SettingID.exposureProgram, controller.property(SettingID.exposureProgram)))
-        controller.slowMotion?.let { slow ->
-            PillText(slowMotionSummary(slow), Modifier.clickable { screen.togglePillInfo(PillInfo.slowMotion) })
-        }
-        if (controller.mode == CaptureMode.video) {
-            PillText("Карта: ${ValueFormatter.label(SettingID.cardRemaining, controller.property(SettingID.cardRemaining))}")
-        } else {
-            val card = controller.properties[SonyProp.CARD_REMAINING_SHOTS]
-            val shots = card?.current?.intValue
-            if (controller.prefs.destination != Prefs.Destination.macOnly && card?.enabled != 0 && shots != null) {
-                // при сохранении «только на планшет» карта не используется — счётчик не показываем
-                PillText("Карта: $shots кадров")
+    ) { measurables, constraints ->
+        val placeables = measurables.map { it.measure(Constraints()) }
+        val shown = PillFit.shown(placeables.map { it.width }, items.map { it.first }, gap, constraints.maxWidth)
+        val visible = placeables.filterIndexed { index, _ -> shown[index] }
+        val width = visible.sumOf { it.width } + gap * (visible.size - 1).coerceAtLeast(0)
+        val height = visible.maxOfOrNull { it.height } ?: 0
+        layout(width.coerceAtMost(constraints.maxWidth), height) {
+            var x = 0
+            for (placeable in visible) {
+                placeable.placeRelative(x, (height - placeable.height) / 2)
+                x += placeable.width + gap
             }
         }
-        PillText("Камера: ${ValueFormatter.label(SettingID.battery, controller.property(SettingID.battery))}")
-        controller.tabletBattery?.let { PillText("Планшет: $it%" + if (controller.tabletCharging) " ⚡" else "") }
     }
 }
+
+/** У пункта строки состояния: виден всегда, сколько бы места ни было. */
+private const val ALWAYS = Int.MAX_VALUE
 
 @Composable
 private fun PillText(text: String, modifier: Modifier = Modifier) =
@@ -1154,13 +1193,15 @@ private fun TopBar(controller: CameraController, screen: ScreenState) {
  * за экран не уходит. Место — доли свободного места: переживает поворот и перезапуск. Размер панели — как её разложили,
  * а не на глаз: с неверным размером у краёв она уходила бы за экран. defaultOrigin — где стоять, пока её не перетаскивали
  * (в пикселях, по размеру панели и экрана); onRect — где она сейчас (касания по ней не возвращают скрытые элементы);
- * alsoAvoiding — ещё одно место, которое панель не закрывает: лента камер слева (null — не мешает).
+ * alsoAvoiding — ещё одно место, которое панель не закрывает: лента камер слева (null — не мешает); keepClearOf — панели, на
+ * которые она не ложится, когда поднялась над меню, шкалой фокуса или плашкой увеличения: встаёт рядом с ними на той же высоте.
+ * Там, где её поставили, она лежит как лежала, даже на другой панели: туда её положили сами.
  */
 @Composable
 private fun FloatingPanel(
     screen: ScreenState, feedback: FeedbackState, placement: FloatingPlacement?, onPlace: (FloatingPlacement) -> Unit,
     defaultOrigin: (panel: Size, view: Size) -> Offset, onRect: (Rect?) -> Unit, alsoAvoiding: Rect? = null,
-    content: @Composable () -> Unit,
+    keepClearOf: List<Rect?> = emptyList(), content: @Composable () -> Unit,
 ) {
     val density = LocalDensity.current
     val scope = rememberCoroutineScope()
@@ -1191,12 +1232,19 @@ private fun FloatingPanel(
             fun besideStrip(at: Offset): Offset =
                 alsoAvoiding?.let { FloatingPlacement.clear(at, size, it, view, gap = 12.dp.toPx(), margin = 16.dp.toPx()) } ?: at
             val origin = placement?.let { px(it.origin(dp(size), dp(view))) } ?: defaultOrigin(size, view)
-            // меню Fn и плашка увеличения её не закрывают: если легла бы под них — поднимается над ними
-            var placed = besideColumn(besideStrip(origin))
-            for (obstacle in listOfNotNull(screen.fnMenuRect, screen.zoomBadgeRect)) {
+            // меню Fn, «Монитор», шкала фокуса и плашка увеличения её не закрывают: если легла бы под них — поднимается над ними
+            val resting = besideColumn(besideStrip(origin))
+            var placed = resting
+            for (obstacle in listOfNotNull(screen.fnMenuRect, screen.focusScaleRect, screen.zoomBadgeRect)) {
                 if (Rect(placed, size).overlaps(obstacle)) placed = placed.copy(y = maxOf(16.dp.toPx(), obstacle.top - 10.dp.toPx() - size.height))
             }
-            // поднялась — могла выйти на ленту или на колонку
+            // поднялась — могла лечь на вектороскоп или наложение: встаёт рядом с ними
+            if (placed != resting) {
+                for (other in keepClearOf.filterNotNull()) {
+                    placed = FloatingPlacement.clear(placed, size, other, view, gap = 12.dp.toPx(), margin = 16.dp.toPx())
+                }
+            }
+            // и могла выйти на ленту или на колонку
             besideColumn(besideStrip(placed))
         }
     }
@@ -1275,6 +1323,9 @@ private fun FloatingHistogram(controller: CameraController, screen: ScreenState,
             }
         },
         onRect = { screen.histogramRect = it },
+        // лента из трёх-четырёх камер доходит до неё сверху — встаёт правее ленты, как вектороскоп
+        alsoAvoiding = if (controller.stripVisible) screen.stripRect else null,
+        keepClearOf = listOf(screen.vectorscopeRect, screen.overlayRect),
     ) {
         HistogramView(bins, controller.histogramStats)
     }
@@ -1303,6 +1354,7 @@ private fun FloatingWaveform(controller: CameraController, screen: ScreenState, 
             with(density) { Offset(view.width - 18.dp.toPx() - size.width, view.height - 18.dp.toPx() - 76.dp.toPx() - size.height) }
         },
         onRect = { screen.waveformRect = it },
+        keepClearOf = listOf(screen.vectorscopeRect, screen.overlayRect),
     ) {
         WaveformView(trace, controller.waveformMode) { controller.chooseWaveformMode(it) }
     }
