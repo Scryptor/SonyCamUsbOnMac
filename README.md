@@ -1,3 +1,5 @@
+<p align="center"><b>Русский</b> · <a href="README.en.md">English</a></p>
+
 <h1 align="center">Sony Cam Viewer</h1>
 
 <p align="center">
