@@ -4,28 +4,62 @@ import Testing
 
 // MARK: - Объектив и прогон
 
-/// Лёгкая модель объектива с шагами Near/Far: команда n сдвигает положение на n·g, округлённое от нуля на половинке
-/// (3,5 → 4, −3,5 → −4, 2,5 → 3), но не за шкалу 0…`limit` (у настоящей — 100). Малая команда (|n| ≤ 3) у края шкалы,
-/// ближе d единиц, к краю не двигает — «мёртвая зона». Так же ведёт себя поддельная камера (`scripts/fake_camera.py`,
-/// `--focus-gain` и `--focus-deadband`), поэтому проверки на ней сойдутся с этими.
+/// Лёгкая модель объектива с шагами Near/Far. Два вида.
+///
+/// Линейный (`Lens(at:gain:…)`): команда n сдвигает положение на n·g, округлённое от нуля на половинке (3,5 → 4, −3,5 → −4,
+/// 2,5 → 3), но не за шкалу 0…`limit` (у настоящей — 100). Малая команда (|n| ≤ 3) у края шкалы, ближе d единиц, к краю не
+/// двигает — «мёртвая зона». Так же ведёт себя поддельная камера (`scripts/fake_camera.py`, `--focus-gain` и
+/// `--focus-deadband`), поэтому проверки на ней сойдутся с этими.
+///
+/// Таблица PZ 16-50 (`Lens.pz1650(at:)`): так на 16 мм отвечал настоящий объектив ZV-E10 при замерах 30 октября 2026 года
+/// (`docs/protocol.md`, «Near/Far»), без разброса: |1| — 0 единиц (1, если до края шкалы не больше единицы), |2| — 1, |3| — 3,
+/// |4| — 4, |5| — 5, |6| — 7, |7| — до края шкалы в ту сторону; за шкалу 0…100 не выходит. Так же отвечает поддельная
+/// камера с `--focus-lens pz16-50`. Ответ на команду приходит через 0,4 с — это задаёт прогон (`runSlow`, `delay: 0.4`).
 private struct Lens {
     private(set) var position: Double
     let gain: Double
     let deadband: Double
     let limit: Double
+    /// Отвечает по таблице PZ 16-50, а не по усилению.
+    let table: Bool
 
-    init(at position: Double, gain: Double, deadband: Double = 0, limit: Double = 100) {
+    init(at position: Double, gain: Double, deadband: Double = 0, limit: Double = 100, table: Bool = false) {
         self.position = position
         self.gain = gain
         self.deadband = deadband
         self.limit = limit
+        self.table = table
+    }
+
+    /// PZ 16-50 на 16 мм: шкала 0…100, ответы по таблице.
+    static func pz1650(at position: Double) -> Lens {
+        Lens(at: position, gain: 1, table: true)
     }
 
     mutating func move(_ steps: Int64) {
+        if table {
+            moveByTable(steps)
+            return
+        }
         let toEdge = steps > 0 ? limit - position : position
         if steps != 0, abs(steps) <= 3, toEdge < deadband { return }
         let moved = (Double(steps) * gain).rounded(.toNearestOrAwayFromZero)
         position = min(max(position + moved, 0), limit)
+    }
+
+    private mutating func moveByTable(_ steps: Int64) {
+        var moved = 0.0
+        switch abs(steps) {
+        case 0: moved = 0
+        case 1: moved = (position <= 1 || position >= limit - 1) ? 1 : 0
+        case 2: moved = 1
+        case 3: moved = 3
+        case 4: moved = 4
+        case 5: moved = 5
+        case 6: moved = 7
+        default: moved = limit
+        }
+        position = min(max(position + (steps > 0 ? moved : -moved), 0), limit)
     }
 }
 
@@ -50,8 +84,9 @@ private struct Run {
 /// Прогон шагового перевода так, как его ведёт контроллер: тики по 0,1 с, на каждом — `next` с положением объектива. Команду
 /// исполняет объектив, и сразу после ответа камеры, в то же самое время, `next` зовут снова с новым положением; если
 /// в ответ опять команда, она тоже уходит. Тики считаются по номеру (k · 0,1), а не накоплением, чтобы 2,0 с было 2,0 с.
-/// Кончается, когда пришёл `.finish`, по горизонту или когда `stop` скажет «хватит» (после очередной команды).
-private func runSteps(from start: Double, to target: Double, duration: Double, lens: Lens, gain: Double = 3.5,
+/// Кончается, когда пришёл `.finish`, по горизонту или когда `stop` скажет «хватит» (после очередной команды). `gain` — стартовый
+/// коэффициент автомата, по умолчанию тот же 1,0, что и у `FocusPull`; 3,5 задают там, где проверка построена на старом числе.
+private func runSteps(from start: Double, to target: Double, duration: Double, lens: Lens, gain: Double = 1.0,
                       horizon: Double = 10, stop: (Run) -> Bool = { _ in false }) -> Run {
     var run = Run(pull: FocusPull(mode: .steps, from: start, to: target, duration: duration, gain: gain), lens: lens)
     for index in 0...Int((horizon / FocusPull.tick).rounded()) {
@@ -84,7 +119,7 @@ private func runSteps(from start: Double, to target: Double, duration: Double, l
 /// прежнее. `again` — сразу после команды, в тот же момент, `next` зовут ещё раз (как «после ответа камеры»): положение
 /// при этом тоже ещё старое.
 private func runSlow(from start: Double, to target: Double, duration: Double, lens: Lens, delay: Double, again: Bool,
-                     gain: Double = 3.5, horizon: Double = 12) -> Run {
+                     gain: Double = 1.0, horizon: Double = 12) -> Run {
     var run = Run(pull: FocusPull(mode: .steps, from: start, to: target, duration: duration, gain: gain), lens: lens)
     var due: [(time: Double, steps: Int64)] = []
     for index in 0...Int((horizon / FocusPull.tick).rounded()) {
@@ -112,6 +147,22 @@ private func runSlow(from start: Double, to target: Double, duration: Double, le
     return run
 }
 
+/// Прогон перевода на PZ 16-50: объектив отвечает по таблице через 0,4 с (`Lens.pz1650`, `runSlow`); `again` — как в `runSlow`.
+private func runPZ(from start: Double, to target: Double, duration: Double, again: Bool) -> Run {
+    runSlow(from: start, to: target, duration: duration, lens: Lens.pz1650(at: start), delay: 0.4, again: again)
+}
+
+/// На сколько единиц положение выходило за ту из меток, что дальше от пути, — по положениям после команд; 0, если не выходило.
+private func overshoot(_ run: Run, from start: Double, to target: Double) -> Double {
+    let low = min(start, target)
+    let high = max(start, target)
+    var worst = 0.0
+    for move in run.moves {
+        worst = max(worst, low - move.after, move.after - high)
+    }
+    return worst
+}
+
 /// Что запись `.write` кладёт в регистр; nil — это не запись.
 private func written(_ action: FocusPull.Action) -> Int? {
     if case let .write(value) = action { return Int(value) }
@@ -120,7 +171,7 @@ private func written(_ action: FocusPull.Action) -> Int? {
 
 /// Что свежий шаговый перевод скажет, когда до цели `error` единиц (цель выше положения — ошибка положительная).
 /// Метка одна (50 → 50), поэтому кривая стоит на месте: `ended` — время уже вышло (перевод за 0 с), иначе — ещё идёт.
-private func decide(error: Double, ended: Bool = true, gain: Double = 3.5) -> FocusPull.Action {
+private func decide(error: Double, ended: Bool = true, gain: Double = 1.0) -> FocusPull.Action {
     var pull = FocusPull(mode: .steps, from: 50, to: 50, duration: ended ? 0 : 2, gain: gain)
     return pull.next(elapsed: 0, position: 50 - error)
 }
@@ -173,6 +224,49 @@ private func decide(error: Double, ended: Bool = true, gain: Double = 3.5) -> Fo
     #expect(low.position == 3)              // у нижнего края — то же
     low.move(1)
     #expect(low.position == 7)
+}
+
+@Test func lensModelAnswersLikeThePZ1650() {
+    // середина шкалы: ±1 не двигает, ±2 — на 1, ±3 — на 3, ±4 — на 4, ±5 — на 5, ±6 — на 7; в обе стороны
+    let table: [(steps: Int64, moved: Double)] = [(1, 0), (2, 1), (3, 3), (4, 4), (5, 5), (6, 7)]
+    for entry in table {
+        var up = Lens.pz1650(at: 50)
+        up.move(entry.steps)
+        #expect(up.position == 50 + entry.moved, "+\(entry.steps)")
+        var down = Lens.pz1650(at: 50)
+        down.move(-entry.steps)
+        #expect(down.position == 50 - entry.moved, "-\(entry.steps)")
+    }
+    // ±7 — вся шкала в ту сторону
+    var whole = Lens.pz1650(at: 62)
+    whole.move(-7)
+    #expect(whole.position == 0)
+    whole.move(7)
+    #expect(whole.position == 100)
+    // не дальше единицы от края ±1 сдвигает на 1; дальше от края — нет; за край не выходит
+    var edge = Lens.pz1650(at: 100)
+    edge.move(-1)
+    #expect(edge.position == 99)
+    edge.move(1)
+    #expect(edge.position == 100)
+    edge.move(1)
+    #expect(edge.position == 100)
+    var bottom = Lens.pz1650(at: 1)
+    bottom.move(-1)
+    #expect(bottom.position == 0)
+    var near = Lens.pz1650(at: 98)
+    near.move(1)
+    #expect(near.position == 98)
+    // команда 0 не двигает; большие команды у края упираются в шкалу
+    var still = Lens.pz1650(at: 40)
+    still.move(0)
+    #expect(still.position == 40)
+    var top = Lens.pz1650(at: 98)
+    top.move(5)
+    #expect(top.position == 100)
+    var floor = Lens.pz1650(at: 3)
+    floor.move(-4)
+    #expect(floor.position == 0)
 }
 
 // MARK: - Кривая и время
@@ -399,18 +493,20 @@ private func decide(error: Double, ended: Bool = true, gain: Double = 3.5) -> Fo
 
 @Test(arguments: [2.0, 3.5, 5.0])
 func stepsConverge(gain: Double) {
-    // 10 → 90 за 2 с, тики 0,1 с; объектив с усилением g, а автомат начинает с k = 3,5 и уточняет
+    // 10 → 90 за 2 с, тики 0,1 с; объектив с усилением g, а автомат начинает с k = 1,0, по первой команде узнаёт g и уточняет
     let run = runSteps(from: 10, to: 90, duration: 2, lens: Lens(at: 10, gain: gain))
     #expect(run.outcome == .reached)
     #expect((run.finishedAt ?? .infinity) < 5)
     #expect(abs(run.lens.position - 90) <= max(1, gain / 2) + 0.5)
-    #expect(run.moves.allSatisfy { abs($0.steps) <= 7 })
+    #expect(run.moves.allSatisfy { abs($0.steps) <= 5 })
     #expect(!run.moves.isEmpty)
 }
 
 @Test func stepsNoDither() throws {
-    // g = 4: объектив стоит на 10, 14 … 50, 54, а цель 52 — между ними; ближе чем на 2 не подойти, k ≤ 4 — допуск меньше 2
-    let run = runSteps(from: 10, to: 52, duration: 2, lens: Lens(at: 10, gain: 4))
+    // g = 4: объектив стоит на 10, 14 … 50, 54, а цель 52 — между ними; ближе чем на 2 не подойти. Стартовый k = 3,5 задан
+    // явно: тогда все команды — ±1, ни одна не уточняет k, допуск остаётся 1,75 < 2 и дребезг у цели случается (при k₀ = 1,0 первая же
+    // команда |n| ≥ 2 узнала бы g = 4, допуск стал бы 2, и до дребезга не дошло)
+    let run = runSteps(from: 10, to: 52, duration: 2, lens: Lens(at: 10, gain: 4), gain: 3.5)
     #expect(run.outcome == .reached)
     #expect(run.outcome != .timedOut)
     // цель перескочена — положение оказалось по другую сторону от неё
@@ -422,8 +518,9 @@ func stepsConverge(gain: Double) {
 }
 
 @Test func stepsDitherFinishesAtTheEndWithoutAnotherCommand() {
-    // за тик до конца два шага ±1 подряд перескочили цель 52 туда и обратно: на конце новой команды не будет
-    var pull = FocusPull(mode: .steps, from: 10, to: 52, duration: 2)
+    // за тик до конца два шага ±1 подряд перескочили цель 52 туда и обратно: на конце новой команды не будет. Стартовый k = 3,5 задан
+    // явно: числа ниже (допуск 1,75, шаг ±1) построены на нём
+    var pull = FocusPull(mode: .steps, from: 10, to: 52, duration: 2, gain: 3.5)
     let first = pull.next(elapsed: 1.8, position: 48.9)              // до кривой 1,92 > 1,75: шаг вперёд
     #expect(first == .nearFar(1))
     let jumped = pull.next(elapsed: 1.8, position: 54)               // перескочил цель
@@ -438,8 +535,8 @@ func stepsConverge(gain: Double) {
 
 @Test func stepsDitherDoesNotEndTheTimeEarly() {
     // два шага ±1 перескочили цель 52 туда и обратно ещё до конца времени, а до кривой по-прежнему далеко: новая команда
-    // не нужна, но и «готово» рано — оно придёт на конце времени
-    var pull = FocusPull(mode: .steps, from: 10, to: 52, duration: 2)
+    // не нужна, но и «готово» рано — оно придёт на конце времени (k = 3,5 задан явно)
+    var pull = FocusPull(mode: .steps, from: 10, to: 52, duration: 2, gain: 3.5)
     let down = pull.next(elapsed: 1.7, position: 54)                 // кривая 49,45: до неё −4,55 → шаг −1
     #expect(down == .nearFar(-1))
     let up = pull.next(elapsed: 1.8, position: 48)                   // перескочил цель вниз; кривая 50,82: до неё 2,82 → шаг +1
@@ -452,12 +549,13 @@ func stepsConverge(gain: Double) {
 
 @Test func stepsDitherPairMustBeNextToEachOther() {
     // шаг −1 через цель, потом шаг другого размера, потом +1 через цель: два шага ±1 тут не «подряд» — это ещё не дребезг
-    var pull = FocusPull(mode: .steps, from: 10, to: 52, duration: 0)
+    // (k = 3,5 задан явно)
+    var pull = FocusPull(mode: .steps, from: 10, to: 52, duration: 0, gain: 3.5)
     let first = pull.next(elapsed: 0.0, position: 54)                // до цели −2: шаг −1
     #expect(first == .nearFar(-1))
     let second = pull.next(elapsed: 0.1, position: 40)               // ушёл на 14 вниз через цель; до цели 12: шаг +3
     #expect(second == .nearFar(3))
-    let third = pull.next(elapsed: 0.2, position: 50)                // сдвинуло на 10; до цели 2: шаг +1
+    let third = pull.next(elapsed: 0.2, position: 50)                // сдвинуло на 10 (первое измерение: k = 3,33); до цели 2: шаг +1
     #expect(third == .nearFar(1))
     let apart = pull.next(elapsed: 0.3, position: 54)                // через цель вверх; шаги −1 и +1 не соседние
     #expect(apart == .nearFar(-1))                                   // идёт дальше: до цели −2, шаг −1
@@ -466,8 +564,9 @@ func stepsConverge(gain: Double) {
 }
 
 @Test func stepsDitherNeedsOppositeUnitStepsThatCrossTheTarget() {
-    // два шага ±1 подряд в разные стороны, и второй перескочил цель 52 с одной стороны на другую: ближе не подойти
-    var pull = FocusPull(mode: .steps, from: 10, to: 52, duration: 0)
+    // два шага ±1 подряд в разные стороны, и второй перескочил цель 52 с одной стороны на другую: ближе не подойти (k = 3,5 задан
+    // явно)
+    var pull = FocusPull(mode: .steps, from: 10, to: 52, duration: 0, gain: 3.5)
     let forward = pull.next(elapsed: 0.0, position: 50)              // до цели 2 > 1,75: шаг +1
     #expect(forward == .nearFar(1))
     let back = pull.next(elapsed: 0.1, position: 54)                 // перескочил: до цели −2, шаг −1
@@ -476,7 +575,7 @@ func stepsConverge(gain: Double) {
     #expect(end == .finish(.reached))
 
     // а если второй шаг цель не пересёк — это не дребезг: объектив просто ещё далеко
-    var apart = FocusPull(mode: .steps, from: 10, to: 90, duration: 0)
+    var apart = FocusPull(mode: .steps, from: 10, to: 90, duration: 0, gain: 3.5)
     let first = apart.next(elapsed: 0.0, position: 85)               // до цели 5: шаг +1
     #expect(first == .nearFar(1))
     let second = apart.next(elapsed: 0.1, position: 95)              // перескочил на 5 выше: шаг −1
@@ -485,8 +584,78 @@ func stepsConverge(gain: Double) {
     #expect(third == .nearFar(-2))                                   // до цели −6: команда, а не «готово»
 }
 
+// MARK: - Шаги Near/Far: окно ожидания и наименьшая команда
+
+@Test func stepsSettleWindowIsSevenTenths() {
+    // команда ушла; положение прежнее — до 0,7 с камеру ждут (PZ 16-50 отвечает через 0,33–0,45 с), потом это «не двинулась»
+    var pull = FocusPull(mode: .steps, from: 0, to: 100, duration: 0)
+    let first = pull.next(elapsed: 0.0, position: 0)                 // до цели 100, самая большая команда — 5
+    #expect(first == .nearFar(5))
+    let at04 = pull.next(elapsed: 0.4, position: 0)                  // 0,4 с — ответ мог ещё не дойти
+    #expect(at04 == .wait)
+    let at065 = pull.next(elapsed: 0.65, position: 0)
+    #expect(at065 == .wait)
+    let at075 = pull.next(elapsed: 0.75, position: 0)                // 0,75 с: пустой шаг, уходит следующий
+    #expect(at075 == .nearFar(5))
+    // а как только положение изменилось — оно учтено сразу, не дожидаясь окна; новая команда — на ближайшем тике
+    let moved = pull.next(elapsed: 0.9, position: 5)
+    #expect(moved == .nearFar(5))
+}
+
+@Test func stepsSettleWindowIgnoresFloatingPointNoise() {
+    // тики прогонов считаются как k · 0,1: 23 · 0,1 и 30 · 0,1 — это ровно 0,7 с, хотя в Double их разность 0,6999999999999997.
+    // Окно всё равно вышло. Кривая (0 → 100 за 8 с) на 2,3 с на 20 при объективе на 10: идти надо вперёд
+    var pull = FocusPull(mode: .steps, from: 0, to: 100, duration: 8)
+    let first = pull.next(elapsed: 23 * 0.1, position: 10)
+    #expect(first == .nearFar(5))
+    let before = pull.next(elapsed: 29 * 0.1, position: 10)          // 0,6 с — ещё ждём
+    #expect(before == .wait)
+    let exact = pull.next(elapsed: 30 * 0.1, position: 10)           // 0,7 с — пустой шаг, уходит следующий
+    #expect(exact == .nearFar(5))
+}
+
+@Test func stepsEmptyUnitStepRaisesTheSmallestCommand() {
+    // e = 1,4 при допуске 1: команда round(1,4) = 1. Объектив ±1 не отрабатывает — после этого меньше 2 команд нет
+    var pull = FocusPull(mode: .steps, from: 50, to: 51.4, duration: 0)
+    let one = pull.next(elapsed: 0.0, position: 50)
+    #expect(one == .nearFar(1))
+    let waiting = pull.next(elapsed: 0.65, position: 50)
+    #expect(waiting == .wait)
+    let two = pull.next(elapsed: 0.75, position: 50)                 // ±1 ничего не сдвинул: наименьшая команда теперь 2
+    #expect(two == .nearFar(2))
+    // 2 сдвинула на 2,5 (первое измерение: k = 1,25), цель теперь на 1,1 ниже, round(−0,88) = −1 — но и в обратную сторону
+    // меньше 2 не бывает
+    let back = pull.next(elapsed: 1.15, position: 52.5)
+    #expect(back == .nearFar(-2))
+}
+
+@Test func stepsLensThatMovesOnOneKeepsOne() {
+    // объектив отработал ±1 (сдвинул на 2): наименьшая команда остаётся 1 — следующий шаг тоже ±1 (k = 3,5 задан явно)
+    var pull = FocusPull(mode: .steps, from: 50, to: 54, duration: 0, gain: 3.5)
+    let first = pull.next(elapsed: 0.0, position: 50)                // до цели 4: round(1,14) = 1
+    #expect(first == .nearFar(1))
+    let second = pull.next(elapsed: 0.4, position: 52)               // сдвинуло на 2; до цели 2 > 1,75: round(0,57) = 1
+    #expect(second == .nearFar(1))
+    #expect(pull.gain == 3.5)                                        // ±1 коэффициент не уточняет
+}
+
+@Test func stepsDitherPairsTheSmallestCommandAfterItWasRaised() {
+    // ±1 ничего не сдвинул → наименьшая команда 2. Дальше «два шага наименьшего размера подряд в разные стороны, второй перескочил
+    // цель» — это два шага ±2, а не ±1 (k = 3,5 задан явно, время 0: конец времени уже наступил)
+    var pull = FocusPull(mode: .steps, from: 10, to: 52, duration: 0, gain: 3.5)
+    let one = pull.next(elapsed: 0.0, position: 50)                  // до цели 2 > 1,75: round(0,57) = 1
+    #expect(one == .nearFar(1))
+    let two = pull.next(elapsed: 0.8, position: 50)                  // 0,8 с — пустой шаг; наименьшая команда 2
+    #expect(two == .nearFar(2))
+    let back = pull.next(elapsed: 0.9, position: 55)                 // +2 сдвинула на 5 через цель (k = 2,5); до цели −3: −1 → −2
+    #expect(back == .nearFar(-2))
+    let end = pull.next(elapsed: 1.0, position: 49)                  // −2 вернула через цель: два шага ±2 подряд — «у метки»
+    #expect(end == .finish(.reached))
+}
+
 @Test func stepsMarksSweep() {
-    // все пары меток 5, 15 … 95 (в обе стороны и совпадающие), g = 3,5, время 2 с: ни одного тайм-аута
+    // все пары меток 5, 15 … 95 (в обе стороны и совпадающие), объектив g = 3,5, автомат начинает с k₀ = 1,0, время 2 с: ни одного
+    // тайм-аута
     let marks = Array(stride(from: 5.0, through: 95.0, by: 10.0))
     var timedOut: [String] = []
     var unfinished: [String] = []
@@ -509,49 +678,68 @@ func stepsConverge(gain: Double) {
 }
 
 @Test func stepsSignCloser() {
-    // 90 → 10: отрицательный шаг уменьшает положение, то есть фокус ближе — все команды отрицательные
-    let down = runSteps(from: 90, to: 10, duration: 2, lens: Lens(at: 90, gain: 3.5))
+    // 90 → 10: отрицательный шаг уменьшает положение, то есть фокус ближе — все команды отрицательные. Стартовый k = 3,5 задан явно:
+    // с k₀ = 1,0 первая же команда перелетает кривую, и одна-две команды в обратную сторону в начале перевода — в порядке вещей
+    let down = runSteps(from: 90, to: 10, duration: 2, lens: Lens(at: 90, gain: 3.5), gain: 3.5)
     #expect(down.outcome == .reached)
     #expect(!down.moves.isEmpty)
     #expect(down.moves.allSatisfy { $0.steps < 0 })
     #expect(down.moves.allSatisfy { $0.after < $0.before })
     // и наоборот
-    let up = runSteps(from: 10, to: 90, duration: 2, lens: Lens(at: 10, gain: 3.5))
+    let up = runSteps(from: 10, to: 90, duration: 2, lens: Lens(at: 10, gain: 3.5), gain: 3.5)
     #expect(!up.moves.isEmpty)
     #expect(up.moves.allSatisfy { $0.steps > 0 })
     // та же команда без объектива: на середине пути до кривой 40 единиц вниз — самый большой шаг, отрицательный
     var pull = FocusPull(mode: .steps, from: 90, to: 10, duration: 2)
     let action = pull.next(elapsed: 1.0, position: 90)
-    #expect(action == .nearFar(-7))
+    #expect(action == .nearFar(-5))
 }
 
 @Test func stepsBounds() {
-    // самая большая команда — 7, в любую сторону, как бы далеко ни была цель
-    #expect(decide(error: 80) == .nearFar(7))
-    #expect(decide(error: -80) == .nearFar(-7))
-    #expect(decide(error: 1e9) == .nearFar(7))
-    #expect(decide(error: -1e9) == .nearFar(-7))
-    #expect(decide(error: 24.5) == .nearFar(7))
-    #expect(decide(error: 22.8) == .nearFar(7))
-    #expect(decide(error: 21) == .nearFar(6))
-    // при k = 3,5 допуск 1,75: ошибка 1,5 — команды нет (ждём до конца, на конце — «готово»), ошибка 2,5 — шаг 1
-    #expect(decide(error: 1.5, ended: false) == .wait)
-    #expect(decide(error: -1.5, ended: false) == .wait)
-    #expect(decide(error: 1.5) == .finish(.reached))
-    #expect(decide(error: -1.5) == .finish(.reached))
-    #expect(decide(error: 2.5, ended: false) == .nearFar(1))
-    #expect(decide(error: -2.5, ended: false) == .nearFar(-1))
-    #expect(decide(error: 2.5) == .nearFar(1))
-    // ровно допуск — ещё «в допуске»; чуть больше — уже шаг
-    #expect(decide(error: 1.75) == .finish(.reached))
-    #expect(decide(error: 1.76) == .nearFar(1))
-    #expect(decide(error: -1.76) == .nearFar(-1))
+    // самая большая команда — 5, в любую сторону, как бы далеко ни была цель (у PZ 16-50 ±7 проходит всю шкалу)
+    #expect(decide(error: 80) == .nearFar(5))
+    #expect(decide(error: -80) == .nearFar(-5))
+    #expect(decide(error: 1e9) == .nearFar(5))
+    #expect(decide(error: -1e9) == .nearFar(-5))
+    #expect(decide(error: 6) == .nearFar(5))
+    #expect(decide(error: 4.5) == .nearFar(5))
+    #expect(decide(error: 4.4) == .nearFar(4))
+    // при k₀ = 1,0 допуск max(1, 0,5) = 1: ошибка 0,9 — команды нет (ждём до конца, на конце — «готово»), ровно 1 — ещё «в допуске»,
+    // 1,1 — шаг 1
+    #expect(decide(error: 0.9, ended: false) == .wait)
+    #expect(decide(error: -0.9, ended: false) == .wait)
+    #expect(decide(error: 0.9) == .finish(.reached))
+    #expect(decide(error: -0.9) == .finish(.reached))
+    #expect(decide(error: 1) == .finish(.reached))
+    #expect(decide(error: -1) == .finish(.reached))
+    #expect(decide(error: 1.1, ended: false) == .nearFar(1))
+    #expect(decide(error: -1.1, ended: false) == .nearFar(-1))
+    #expect(decide(error: 1.1) == .nearFar(1))
     // команда — e / k, округлённое от нуля на половинке: 1,5 → 2, 2,5 → 3
-    #expect(decide(error: 5.24) == .nearFar(1))
-    #expect(decide(error: 5.25) == .nearFar(2))
-    #expect(decide(error: -5.25) == .nearFar(-2))
-    #expect(decide(error: 8.74) == .nearFar(2))
-    #expect(decide(error: 8.75) == .nearFar(3))
+    #expect(decide(error: 1.4) == .nearFar(1))
+    #expect(decide(error: 1.5) == .nearFar(2))
+    #expect(decide(error: -1.5) == .nearFar(-2))
+    #expect(decide(error: 2.4) == .nearFar(2))
+    #expect(decide(error: 2.5) == .nearFar(3))
+
+    // то же при k = 3,5 (его задают явно): допуск 1,75, команда e / 3,5
+    #expect(decide(error: 24.5, gain: 3.5) == .nearFar(5))
+    #expect(decide(error: 17.5, gain: 3.5) == .nearFar(5))
+    #expect(decide(error: 15.7, gain: 3.5) == .nearFar(4))
+    #expect(decide(error: 1.5, ended: false, gain: 3.5) == .wait)
+    #expect(decide(error: -1.5, ended: false, gain: 3.5) == .wait)
+    #expect(decide(error: 1.5, gain: 3.5) == .finish(.reached))
+    #expect(decide(error: 2.5, ended: false, gain: 3.5) == .nearFar(1))
+    #expect(decide(error: -2.5, ended: false, gain: 3.5) == .nearFar(-1))
+    // ровно допуск — ещё «в допуске»; чуть больше — уже шаг
+    #expect(decide(error: 1.75, gain: 3.5) == .finish(.reached))
+    #expect(decide(error: 1.76, gain: 3.5) == .nearFar(1))
+    #expect(decide(error: -1.76, gain: 3.5) == .nearFar(-1))
+    #expect(decide(error: 5.24, gain: 3.5) == .nearFar(1))
+    #expect(decide(error: 5.25, gain: 3.5) == .nearFar(2))
+    #expect(decide(error: -5.25, gain: 3.5) == .nearFar(-2))
+    #expect(decide(error: 8.74, gain: 3.5) == .nearFar(2))
+    #expect(decide(error: 8.75, gain: 3.5) == .nearFar(3))
 }
 
 @Test func stepsToleranceFollowsTheGain() {
@@ -566,69 +754,106 @@ func stepsConverge(gain: Double) {
 
 // MARK: - Шаги Near/Far: коэффициент k
 
-@Test func stepsGainAdapts() {
-    // g = 5, k₀ = 3,5; каждая команда |n| ≥ 3 со сдвигом уточняет k ← 0,7k + 0,3·(Δ/n): 3,95 → 4,265 → 4,4855 → 4,64 → 4,748.
-    // Пять таких команд в одном переводе на шкале 0…100 при g = 5 не уместить: каждая двигает на 15…35 единиц из ста
-    // (0 → 100 — это 7, 7, 7; лучший быстрый перевод 5 → 95 за 0,5 с — 3, 4, 5, 5; см. следующую проверку). Закон от единиц
-    // не зависит, поэтому здесь шкала длинная — 0…1000, и пять команд по 7 (по 35 единиц) идут подряд.
-    let run = runSteps(from: 0, to: 1000, duration: 0, lens: Lens(at: 0, gain: 5, limit: 1000),
-                       stop: { $0.moves.filter { abs($0.steps) >= 3 }.count >= 5 })
-    #expect(run.moves.filter { abs($0.steps) >= 3 }.count == 5)
-    #expect(run.pull.gain > 4.5 && run.pull.gain < 5.5)
-    #expect(abs(run.pull.gain - 4.747895) < 1e-6)
+@Test func stepsGainStartsAtOne() {
+    // стартовый коэффициент — 1,0 (у PZ 16-50 команда ±2…±5 сдвигает примерно на единицу на значение шага)
+    #expect(FocusPull(mode: .steps, from: 0, to: 1, duration: 1).gain == 1)
+    // при k = 1,0 команда — просто ошибка в единицах, не больше 5
+    #expect(decide(error: 3) == .nearFar(3))
+    #expect(decide(error: -4) == .nearFar(-4))
+    #expect(decide(error: 12) == .nearFar(5))
+}
+
+@Test func stepsFirstMeasurementReplacesTheGain() {
+    // первая же отработанная команда |n| ≥ 2 со сдвигом заменяет k на Δ/n, а не подмешивается: 20 за шаг 5 — сразу 4
+    var pull = FocusPull(mode: .steps, from: 0, to: 100, duration: 0)
+    let first = pull.next(elapsed: 0.0, position: 0)                 // до цели 100: самая большая команда
+    #expect(first == .nearFar(5))
+    let reply = pull.next(elapsed: 0.4, position: 20)                // сдвинуло на 20 за 5: k = 4; до цели 80 / 4 = 20 → 5
+    #expect(reply == .nearFar(5))
+    #expect(pull.gain == 4)
+    // следующие измерения уточняют: k ← 0,7k + 0,3·(Δ/n). Сдвиг 10 за 5 — 2; 0,7 · 4 + 0,3 · 2 = 3,4
+    let second = pull.next(elapsed: 0.8, position: 30)
+    #expect(second == .nearFar(5))
+    #expect(abs(pull.gain - 3.4) < 1e-12)
+    // и снова: сдвиг 15 за 5 — 3; 0,7 · 3,4 + 0,3 · 3 = 3,28
+    let third = pull.next(elapsed: 1.2, position: 45)
+    #expect(third == .nearFar(5))
+    #expect(abs(pull.gain - 3.28) < 1e-12)
+
+    // уже |n| = 2 годится: сдвинуло на 1 за шаг 2 — k = 0,5
+    var two = FocusPull(mode: .steps, from: 50, to: 52, duration: 0)
+    let pair = two.next(elapsed: 0.0, position: 50)                  // до цели 2 > 1: round(2) = 2
+    #expect(pair == .nearFar(2))
+    _ = two.next(elapsed: 0.4, position: 51)
+    #expect(two.gain == 0.5)
+}
+
+@Test func stepsGainIgnoresUnitStepsStallsAndOppositeMoves() {
+    // шаг ±1 коэффициент не трогает, даже если сдвинул: 3 за шаг 1 — k остаётся 1,0
+    var unit = FocusPull(mode: .steps, from: 50, to: 51.4, duration: 0)
+    let one = unit.next(elapsed: 0.0, position: 50)                  // до цели 1,4: round(1,4) = 1
+    #expect(one == .nearFar(1))
+    _ = unit.next(elapsed: 0.4, position: 53)
+    #expect(unit.gain == 1)
+
+    // команда |n| ≥ 2, которая ничего не сдвинула, — тоже: k не трогаем, и первым измерением остаётся следующее
+    var stalled = FocusPull(mode: .steps, from: 0, to: 100, duration: 0)
+    let big = stalled.next(elapsed: 0, position: 0)
+    #expect(big == .nearFar(5))
+    let waiting = stalled.next(elapsed: 0.1, position: 0)            // положение прежнее, 0,1 с — ещё ждём
+    #expect(waiting == .wait)
+    let settled = stalled.next(elapsed: 0.8, position: 0)            // 0,7 с прошло: пустой шаг, k не трогаем
+    #expect(settled == .nearFar(5))
+    #expect(stalled.gain == 1)
+
+    // сдвиг в обратную сторону (Δ/n ≤ 0: фокус ушёл не туда) не учитывается и первым измерением не считается
+    var back = FocusPull(mode: .steps, from: 50, to: 100, duration: 0)
+    let first = back.next(elapsed: 0.0, position: 50)
+    #expect(first == .nearFar(5))
+    let wrong = back.next(elapsed: 0.4, position: 40)                // −10 за +5: Δ/n = −2
+    #expect(wrong == .nearFar(5))
+    #expect(back.gain == 1)
+    let right = back.next(elapsed: 0.8, position: 60)                // +20 за +5: это первое измерение — k = 4, а не 0,7 + 1,2
+    #expect(right == .nearFar(5))
+    #expect(back.gain == 4)
 }
 
 @Test func stepsGainAdaptsOnTheRealScale() {
-    // на шкале 0…100 при g = 5 быстрый перевод 5 → 95 за 0,5 с даёт четыре команды |n| ≥ 3 (3, 4, 5, 5): k уже около g
+    // на шкале 0…100 при g = 5 быстрый перевод 5 → 95 за 0,5 с: команды 5, 1, 5, 5, 2; k сразу узнал g по первой, остальные его
+    // подтверждают, а шаг ±1 не трогает
     let run = runSteps(from: 5, to: 95, duration: 0.5, lens: Lens(at: 5, gain: 5))
     #expect(run.outcome == .reached)
-    #expect(run.moves.filter { abs($0.steps) >= 3 }.count == 4)
-    #expect(run.pull.gain > 4.5 && run.pull.gain < 5.5)
+    #expect(run.moves.map { $0.steps } == [5, 1, 5, 5, 2])
+    #expect(abs(run.pull.gain - 5) < 1e-9)
 }
 
-@Test func stepsGainIgnoresSmallStepsAndStalls() {
-    // команда |n| < 3 коэффициент не трогает, даже если сдвинула
-    var small = FocusPull(mode: .steps, from: 50, to: 60, duration: 0)
-    let one = small.next(elapsed: 0, position: 56)
-    #expect(one == .nearFar(1))
-    let moved = small.next(elapsed: 0.1, position: 60)
-    #expect(moved == .finish(.reached))
-    #expect(small.gain == 3.5)
-    // и |n| = 2 тоже: уточняют только шаги от 3
-    var two = FocusPull(mode: .steps, from: 50, to: 60, duration: 0)
-    let pair = two.next(elapsed: 0, position: 52.5)                  // до цели 7,5: round(2,14) = 2
-    #expect(pair == .nearFar(2))
-    _ = two.next(elapsed: 0.1, position: 57.5)                       // сдвинуло на 5
-    #expect(two.gain == 3.5)
-    // команда |n| ≥ 3, которая ничего не сдвинула, — тоже
-    var stalled = FocusPull(mode: .steps, from: 0, to: 100, duration: 0)
-    let big = stalled.next(elapsed: 0, position: 0)
-    #expect(big == .nearFar(7))
-    let waiting = stalled.next(elapsed: 0.1, position: 0)            // положение прежнее, 0,1 с — ещё ждём
-    #expect(waiting == .wait)
-    let settled = stalled.next(elapsed: 0.4, position: 0)            // 0,3 с прошло: пустой шаг, k не трогаем
-    #expect(settled == .nearFar(7))
-    #expect(stalled.gain == 3.5)
-    // а сдвинувшая — уточняет: 0,7 · 3,5 + 0,3 · 25 / 7
-    var moving = FocusPull(mode: .steps, from: 0, to: 100, duration: 0)
-    _ = moving.next(elapsed: 0, position: 0)
-    _ = moving.next(elapsed: 0.1, position: 25)
-    #expect(abs(moving.gain - (0.7 * 3.5 + 0.3 * 25.0 / 7.0)) < 1e-12)
+@Test func stepsGainLongScaleKeepsTheLearnedValue() {
+    // длинная шкала 0…1000, g = 5: пять команд по 5 подряд; k = 5 уже после первой и таким остаётся
+    let run = runSteps(from: 0, to: 1000, duration: 0, lens: Lens(at: 0, gain: 5, limit: 1000),
+                       stop: { $0.moves.count >= 5 })
+    #expect(run.moves.count == 5)
+    #expect(run.moves.allSatisfy { $0.steps == 5 })
+    #expect(abs(run.pull.gain - 5) < 1e-9)
 }
 
 @Test func stepsGainStaysPositiveAndSane() {
-    // стартовое значение — в пределах 0,2…20, не-число — 3,5
+    // стартовое значение — в пределах 0,2…20, не-число — 1,0
     #expect(FocusPull(mode: .steps, from: 0, to: 1, duration: 1, gain: 100).gain == 20)
     #expect(FocusPull(mode: .steps, from: 0, to: 1, duration: 1, gain: 0).gain == 0.2)
     #expect(FocusPull(mode: .steps, from: 0, to: 1, duration: 1, gain: -4).gain == 0.2)
-    #expect(FocusPull(mode: .steps, from: 0, to: 1, duration: 1, gain: .nan).gain == 3.5)
-    #expect(FocusPull(mode: .steps, from: 0, to: 1, duration: 1).gain == 3.5)
-    // сдвиг, в разы больше, чем «n · k», тянет k вверх, но не выше 20
+    #expect(FocusPull(mode: .steps, from: 0, to: 1, duration: 1, gain: .nan).gain == 1)
+    #expect(FocusPull(mode: .steps, from: 0, to: 1, duration: 1).gain == 1)
+    // сдвиг, в разы больше, чем «n · k», первым измерением тянет k вверх, но не выше 20
     var jump = FocusPull(mode: .steps, from: 0, to: 10_000, duration: 0)
     _ = jump.next(elapsed: 0, position: 0)
-    _ = jump.next(elapsed: 0.1, position: 700)                        // 700 / 7 = 100
+    _ = jump.next(elapsed: 0.1, position: 700)                        // 700 / 5 = 140
     #expect(jump.gain == 20)
-    // сдвиг в обратную сторону (по формуле — отрицательное отношение) тянет k вниз, но не ниже 0,2 и не в минус
+    // и вниз — не ниже 0,2: сдвиг на полединицы за шаг 5 — 0,1
+    var tiny = FocusPull(mode: .steps, from: 0, to: 10_000, duration: 0)
+    _ = tiny.next(elapsed: 0, position: 0)
+    _ = tiny.next(elapsed: 0.1, position: 0.5)
+    #expect(tiny.gain == 0.2)
+    // сдвиг в обратную сторону (по формуле — отрицательное отношение) не учитывается: k остаётся прежним
     var back = FocusPull(mode: .steps, from: 0, to: 10_000, duration: 0)
     var position = 5000.0
     var gains: [Double] = []
@@ -639,7 +864,124 @@ func stepsConverge(gain: Double) {
         gains.append(back.gain)
     }
     #expect(gains.count >= 3)
-    #expect(gains.allSatisfy { $0 >= 0.2 })
+    #expect(gains.allSatisfy { $0 == 1 })
+}
+
+// MARK: - Шаги Near/Far: PZ 16-50
+
+// Объектив отвечает по таблице (`Lens.pz1650`) через 0,4 с: положение меняется к тику через 0,4 с после команды. `again` — как в
+// `runSlow`: после каждой команды автомат зовут ещё раз в тот же момент, когда положение ещё прежнее.
+
+@Test(arguments: [false, true])
+func pzFourSecondPullEndsOnTime(again: Bool) {
+    // 88 → 100, 100 → 88 и 40 → 52 за 4 с (12 единиц; у настоящего объектива перевод 88 → 100 шёл 6,0 с): «готово» на конце времени и
+    // не позже чем через 1,5 с после него, в единице от метки, команды не больше 5
+    for (from, to) in [(88.0, 100.0), (100.0, 88.0), (40.0, 52.0)] {
+        let run = runPZ(from: from, to: to, duration: 4, again: again)
+        let name = "\(Int(from))→\(Int(to))"
+        #expect(run.outcome == .reached, "\(name)")
+        #expect((3.5...5.5).contains(run.finishedAt ?? .infinity), "\(name): \(run.finishedAt ?? -1) с")
+        #expect(abs(run.lens.position - to) <= 1, "\(name): \(run.lens.position)")
+        #expect(!run.moves.isEmpty)
+        #expect(run.moves.allSatisfy { abs($0.steps) <= 5 }, "\(name)")
+    }
+}
+
+@Test(arguments: [false, true])
+func pzTwoSecondPullEndsWithinThreePointTwoSeconds(again: Bool) {
+    // 100 → 87, 50 → 62 и 62 → 50 за 2 с (13 и 12 единиц; у настоящего объектива перевод 100 → 87 шёл 3,9 с)
+    for (from, to) in [(100.0, 87.0), (50.0, 62.0), (62.0, 50.0)] {
+        let run = runPZ(from: from, to: to, duration: 2, again: again)
+        let name = "\(Int(from))→\(Int(to))"
+        #expect(run.outcome == .reached, "\(name)")
+        #expect((run.finishedAt ?? .infinity) <= 3.2, "\(name): \(run.finishedAt ?? -1) с")
+        #expect(abs(run.lens.position - to) <= 1, "\(name): \(run.lens.position)")
+        #expect(run.moves.allSatisfy { abs($0.steps) <= 5 }, "\(name)")
+    }
+}
+
+@Test(arguments: [false, true])
+func pzInstantPullGoesStraightToTheMark(again: Bool) {
+    // 84 → 63 «как можно быстрее» (у настоящего объектива фокус бросило через всю шкалу 84 → 18 → 0 → 100 → … и кончилось «Не успел
+    // за 3 с»): теперь четыре команды −5 подряд, в единице от метки, ни на единицу дальше 63 больше чем на 5 и ближе 84 + 5
+    let run = runPZ(from: 84, to: 63, duration: 0, again: again)
+    #expect(run.outcome == .reached)
+    #expect((run.finishedAt ?? .infinity) <= 2.5, "\(run.finishedAt ?? -1) с")
+    #expect(abs(run.lens.position - 63) <= 1, "\(run.lens.position)")
+    #expect(overshoot(run, from: 84, to: 63) <= 5)
+    #expect(run.moves.map { $0.steps } == [-5, -5, -5, -5])
+    #expect(abs(run.pull.gain - 1) < 1e-9)                           // первая команда узнала k = 5 / 5
+}
+
+@Test(arguments: [false, true])
+func pzMarksSweep(again: Bool) {
+    // все пары меток 5, 15 … 95 и все времена перевода, где объектив успевает за кривой (его скорость — не больше пяти единиц за
+    // 0,4 с, то есть 12,5 в секунду; пары дальше 8 · время + 20 единиц друг от друга не берём): везде «у метки» в единице от неё, не позже
+    // чем через 2 с после конца времени, команды не больше 5 и фокус не дальше чем на 5 за дальнюю из меток
+    let marks = Array(stride(from: 5.0, through: 95.0, by: 10.0))
+    var failed: [String] = []
+    var runs = 0
+    for duration in FocusPull.durations {
+        for from in marks {
+            for to in marks where to != from && abs(to - from) <= 8 * duration + 20 {
+                let run = runPZ(from: from, to: to, duration: duration, again: again)
+                runs += 1
+                let name = "\(Int(from))→\(Int(to)) за \(Int(duration)) с"
+                if run.outcome != .reached {
+                    failed.append("\(name): \(String(describing: run.outcome))")
+                } else if (run.finishedAt ?? .infinity) - duration > 2 {
+                    failed.append("\(name): кончился на \(run.finishedAt ?? -1) с")
+                } else if abs(run.lens.position - to) > 1 {
+                    failed.append("\(name): встал на \(run.lens.position)")
+                } else if overshoot(run, from: from, to: to) > 5 {
+                    failed.append("\(name): перелёт \(overshoot(run, from: from, to: to))")
+                } else if !run.moves.allSatisfy({ abs($0.steps) <= 5 }) {
+                    failed.append("\(name): команда больше 5")
+                }
+            }
+        }
+    }
+    #expect(runs == 274, "прогонов \(runs)")
+    #expect(failed.isEmpty, "\(failed.prefix(5))")
+}
+
+@Test func pzOneStepDoesNothingSoThePullStopsSendingIt() {
+    // середина шкалы: ±1 ничего не сдвигает. Первый такой шаг уходит (ошибка у кривой чуть больше допуска) и остаётся пустым;
+    // после него автомат шлёт не меньше 2 — и доходит до метки
+    let run = runPZ(from: 40, to: 52, duration: 4, again: false)
+    #expect(run.outcome == .reached)
+    let ones = run.moves.filter { abs($0.steps) == 1 }
+    #expect(ones.count == 1)
+    #expect(ones.allSatisfy { $0.after == $0.before })
+    #expect(!run.moves.isEmpty)
+    #expect(abs(run.moves[0].steps) == 1)                            // и это самая первая команда
+    #expect(run.moves.dropFirst().allSatisfy { abs($0.steps) >= 2 })
+    #expect(abs(run.lens.position - 52) <= 1)
+}
+
+@Test(arguments: [false, true])
+func oldFakeLensStillConverges(again: Bool) {
+    // поддельная камера прежней физики (`--focus-gain 3.5 --focus-step-ms 80 --focus-deadband 2`): ответ через 80 мс, всё время
+    // перевода, все пары меток — «у метки» не позже чем через секунду после конца времени, не дальше 2 единиц, команды не больше 5
+    let marks = Array(stride(from: 5.0, through: 95.0, by: 10.0))
+    var failed: [String] = []
+    var runs = 0
+    for duration in FocusPull.durations {
+        for from in marks {
+            for to in marks where to != from {
+                let run = runSlow(from: from, to: to, duration: duration, lens: Lens(at: from, gain: 3.5, deadband: 2),
+                                  delay: 0.08, again: again)
+                runs += 1
+                let name = "\(Int(from))→\(Int(to)) за \(Int(duration)) с"
+                if run.outcome != .reached || (run.finishedAt ?? .infinity) - duration > 1 || abs(run.lens.position - to) > 2
+                    || !run.moves.allSatisfy({ abs($0.steps) <= 5 }) {
+                    failed.append("\(name): \(String(describing: run.outcome)) на \(run.finishedAt ?? -1) с, \(run.lens.position)")
+                }
+            }
+        }
+    }
+    #expect(runs == 450, "прогонов \(runs)")
+    #expect(failed.isEmpty, "\(failed.prefix(5))")
 }
 
 // MARK: - Шаги Near/Far: упёрлись, не успели
@@ -657,15 +999,30 @@ func stepsConverge(gain: Double) {
 
 @Test func stepsStuckNeedsThreeInARowInOneDirection() {
     // две пустые команды, потом сдвиг, потом снова две пустые — ещё не «упёрлись»; третья пустая подряд — упёрлись.
-    // Команда «пустая», когда положение не изменилось и с неё прошло 0,3 с, поэтому вызовы идут через 0,4 с
-    var pull = FocusPull(mode: .steps, from: 80, to: 100, duration: 0)
-    let c1 = pull.next(elapsed: 0.0, position: 96)                   // команда 1
-    let c2 = pull.next(elapsed: 0.4, position: 96)                   // команда 1 пустая (одна подряд); команда 2
-    let c3 = pull.next(elapsed: 0.8, position: 97)                   // команда 2 сдвинула — счёт с нуля; команда 3
-    let c4 = pull.next(elapsed: 1.2, position: 97)                   // команда 3 пустая (одна подряд); команда 4
-    let c5 = pull.next(elapsed: 1.6, position: 97)                   // команда 4 пустая (две подряд); команда 5
-    #expect([c1, c2, c3, c4, c5].allSatisfy { $0 == .nearFar(1) })
-    let stuck = pull.next(elapsed: 2.0, position: 97)                // команда 5 пустая — три подряд
+    // Команда «пустая», когда положение не изменилось и с неё прошло 0,7 с, поэтому вызовы идут через 0,8 с. Время перевода 8 с и
+    // вызовы с 2-й секунды: кривая всё время выше объектива, и на всём пути надо вперёд
+    var pull = FocusPull(mode: .steps, from: 0, to: 100, duration: 8)
+    let c1 = pull.next(elapsed: 2.0, position: 10)                   // команда 1
+    let c2 = pull.next(elapsed: 2.8, position: 10)                   // команда 1 пустая (одна подряд); команда 2
+    let c3 = pull.next(elapsed: 3.6, position: 10)                   // команда 2 пустая (две подряд) — ещё не упёрлись; команда 3
+    let c4 = pull.next(elapsed: 4.4, position: 12)                   // команда 3 сдвинула — счёт с нуля; команда 4
+    let c5 = pull.next(elapsed: 5.2, position: 12)                   // команда 4 пустая (одна подряд); команда 5
+    let c6 = pull.next(elapsed: 6.0, position: 12)                   // команда 5 пустая (две подряд); команда 6
+    #expect([c1, c2, c3, c4, c5, c6].allSatisfy { $0 == .nearFar(5) })
+    let stuck = pull.next(elapsed: 6.8, position: 12)                // команда 6 пустая — три подряд
+    #expect(stuck == .finish(.stuck))
+}
+
+@Test func stepsEmptyUnitStepCountsTowardsStuck() {
+    // пустой шаг ±1 — такая же пустая команда, как любая: после него наименьшая команда 2, но счёт «три подряд» его помнит
+    var pull = FocusPull(mode: .steps, from: 80, to: 100, duration: 0, gain: 3.5)
+    let c1 = pull.next(elapsed: 0.0, position: 96)                   // до цели 4: round(1,14) = 1
+    #expect(c1 == .nearFar(1))
+    let c2 = pull.next(elapsed: 0.8, position: 96)                   // команда 1 пустая (одна подряд); теперь не меньше 2
+    #expect(c2 == .nearFar(2))
+    let c3 = pull.next(elapsed: 1.6, position: 96)                   // команда 2 пустая (две подряд)
+    #expect(c3 == .nearFar(2))
+    let stuck = pull.next(elapsed: 2.4, position: 96)                // команда 3 пустая — три подряд, среди них ±1
     #expect(stuck == .finish(.stuck))
 }
 
@@ -674,30 +1031,30 @@ func stepsConverge(gain: Double) {
     // не считаются — нужны три в одну сторону
     var pull = FocusPull(mode: .steps, from: 100, to: 0, duration: 2)
     let up1 = pull.next(elapsed: 0.0, position: 50)
-    #expect(up1 == .nearFar(7))
-    let up2 = pull.next(elapsed: 0.4, position: 50)                  // пустых вверх подряд: 1
-    #expect(up2 == .nearFar(7))
+    #expect(up1 == .nearFar(5))
+    let up2 = pull.next(elapsed: 0.8, position: 50)                  // пустых вверх подряд: 1
+    #expect(up2 == .nearFar(5))
     let down1 = pull.next(elapsed: 1.6, position: 50)                // вверх уже 2; кривая теперь ниже — команда вниз
-    #expect(down1 == .nearFar(-7))
-    let down2 = pull.next(elapsed: 2.0, position: 50)                // первая пустая вниз — счёт заново: 1
-    #expect(down2 == .nearFar(-7))
-    let down3 = pull.next(elapsed: 2.4, position: 50)                // вниз подряд: 2
-    #expect(down3 == .nearFar(-7))
-    let stuck = pull.next(elapsed: 2.8, position: 50)                // вниз подряд: 3 — упёрлись (всего пустых было пять)
+    #expect(down1 == .nearFar(-5))
+    let down2 = pull.next(elapsed: 2.4, position: 50)                // первая пустая вниз — счёт заново: 1
+    #expect(down2 == .nearFar(-5))
+    let down3 = pull.next(elapsed: 3.2, position: 50)                // вниз подряд: 2
+    #expect(down3 == .nearFar(-5))
+    let stuck = pull.next(elapsed: 4.0, position: 50)                // вниз подряд: 3 — упёрлись (всего пустых было пять)
     #expect(stuck == .finish(.stuck))
 }
 
 @Test func stepsStuckOnlyWhenTheCurveStillWantsThatWay() {
-    // объектив стоит на 50 и не двигается; три пустые команды вверх набрались, но кривая (100 → 0) как раз проходит
+    // объектив стоит на 42 и не двигается; три пустые команды вверх набрались, но кривая (100 → 0 за 4 с) как раз проходит
     // через его положение — двигать нечего, ждём; а дальше она уходит вниз, и «упёрлись» про другое направление
-    var pull = FocusPull(mode: .steps, from: 100, to: 0, duration: 2)
-    _ = pull.next(elapsed: 0.0, position: 50)                        // команда вверх
-    _ = pull.next(elapsed: 0.33, position: 50)                       // пустых вверх подряд: 1; команда вверх
-    _ = pull.next(elapsed: 0.66, position: 50)                       // пустых подряд: 2; команда вверх
-    let pass = pull.next(elapsed: 1.0, position: 50)                 // пустых подряд: 3, но кривая на 50: в допуске
+    var pull = FocusPull(mode: .steps, from: 100, to: 0, duration: 4)
+    _ = pull.next(elapsed: 0.0, position: 42)                        // команда вверх
+    _ = pull.next(elapsed: 0.75, position: 42)                       // пустых вверх подряд: 1; команда вверх
+    _ = pull.next(elapsed: 1.5, position: 42)                        // пустых подряд: 2; команда вверх
+    let pass = pull.next(elapsed: 2.2, position: 42)                 // пустых подряд: 3, но кривая на 42,5: в допуске
     #expect(pass == .wait)
-    let down = pull.next(elapsed: 1.1, position: 50)                 // кривая ниже: команда вниз, а не «упёрлись»
-    #expect(down == .nearFar(-2))
+    let down = pull.next(elapsed: 2.3, position: 42)                 // кривая 38,8: команда вниз, а не «упёрлись»
+    #expect(down == .nearFar(-3))
 }
 
 @Test func stepsTimeout() {
@@ -728,49 +1085,53 @@ func stepsConverge(gain: Double) {
 
 @Test func stepsStaleTicksAreNotEmptySteps() {
     // Шаг ушёл, а ответ камеры и свежее положение идут дольше тика: на тиках через 0,1 и 0,2 с положение ещё прежнее. Это не
-    // «камера не двинулась» — автомат ждёт, пока положение не изменится или не пройдёт 0,3 с. Восемь шагов подряд, ни один не пустой.
+    // «камера не двинулась» — автомат ждёт, пока положение не изменится или не пройдёт 0,7 с. Восемь шагов подряд, ни один не пустой.
     var pull = FocusPull(mode: .steps, from: 0, to: 1000, duration: 0)
     var position = 0.0
     var time = 0.0
     var action = pull.next(elapsed: time, position: position)
     for _ in 0..<8 {
-        #expect(action == .nearFar(7))
+        #expect(action == .nearFar(5))
         let first = pull.next(elapsed: time + 0.1, position: position)
         let second = pull.next(elapsed: time + 0.2, position: position)
         #expect(first == .wait)
         #expect(second == .wait)
-        position += 25                                               // 7 · 3,5 = 24,5 → 25: положение пришло
+        position += 25                                               // 5 · 5 = 25: положение пришло
         time += 0.25
         action = pull.next(elapsed: time, position: position)        // шаг учтён, следующий уходит сразу
     }
-    #expect(action == .nearFar(7))
-    // учтён как есть, со сдвигом 25: k подошёл к 25 / 7
-    #expect(abs(pull.gain - 25.0 / 7.0) < 0.01)
+    #expect(action == .nearFar(5))
+    // учтён как есть, со сдвигом 25: первое измерение заменило k на 25 / 5, остальные его подтвердили
+    #expect(abs(pull.gain - 5) < 1e-9)
 }
 
-@Test func stepsStaleWaitEndsAfterThreeTenthsOfASecond() {
-    var pull = FocusPull(mode: .steps, from: 80, to: 100, duration: 0)
+@Test func stepsStaleWaitEndsAfterSevenTenthsOfASecond() {
+    // k = 3,5 задан явно: шаг ±1, после пустого ±1 — не меньше 2
+    var pull = FocusPull(mode: .steps, from: 80, to: 100, duration: 0, gain: 3.5)
     let first = pull.next(elapsed: 0.0, position: 96)                // шаг +1
     #expect(first == .nearFar(1))
-    let early = pull.next(elapsed: 0.25, position: 96)               // 0,25 с, положение прежнее — ждём
+    let early = pull.next(elapsed: 0.45, position: 96)               // 0,45 с, положение прежнее — ждём (PZ 16-50 отвечает через 0,33–0,45 с)
     #expect(early == .wait)
-    let late = pull.next(elapsed: 0.35, position: 96)                // 0,35 с: камера не двинулась — пустой шаг, уходит следующий
-    #expect(late == .nearFar(1))
+    let almost = pull.next(elapsed: 0.65, position: 96)              // и 0,65 с — ещё ждём
+    #expect(almost == .wait)
+    let late = pull.next(elapsed: 0.75, position: 96)                // 0,75 с: камера не двинулась — пустой шаг, уходит следующий (≥ 2)
+    #expect(late == .nearFar(2))
 
-    // а изменившееся положение учитывается сразу, как только пришло (хоть через 10 мс): k уточняется по сдвигу 3 за шаг 7
+    // а изменившееся положение учитывается сразу, как только пришло (хоть через 10 мс): k заменяется по сдвигу 3 за шаг 5
     var quick = FocusPull(mode: .steps, from: 0, to: 100, duration: 0)
     let step = quick.next(elapsed: 1.0, position: 0)
-    #expect(step == .nearFar(7))
+    #expect(step == .nearFar(5))
     let reply = quick.next(elapsed: 1.01, position: 3)
     #expect(reply == .wait)                                          // следующая команда — на тике
-    #expect(abs(quick.gain - (0.7 * 3.5 + 0.3 * 3.0 / 7.0)) < 1e-12)
+    #expect(abs(quick.gain - 0.6) < 1e-12)
 }
 
 @Test(arguments: [2.0, 3.5, 5.0])
 func stepsSlowCameraConvergesWithoutFalseStuck(gain: Double) {
     // Ответ камеры и свежее положение идут 120…280 мс, контроллер тикает каждые 100 мс — и тик за тиком видит прежнее положение.
     // Раньше каждый такой шаг засчитывался «ничего не сдвинул», три подряд давали «упёрлись» (на 450 переводах — все 450).
-    // Теперь все доходят до метки, и не позже чем за секунду после конца времени.
+    // Теперь все доходят до метки, и не позже чем через 1,5 с после конца времени (команда ≤ 5 вместо ≤ 7: самые длинные пробеги
+    // 5 → 95 у слабого объектива g = 2 идут около 3,2 с, раньше укладывались в 3).
     let marks = Array(stride(from: 5.0, through: 95.0, by: 10.0))
     var failed: [String] = []
     for delay in [0.12, 0.15, 0.18, 0.22, 0.28] {
@@ -779,7 +1140,7 @@ func stepsSlowCameraConvergesWithoutFalseStuck(gain: Double) {
                 for to in marks where to != from {
                     let run = runSlow(from: from, to: to, duration: 2, lens: Lens(at: from, gain: gain), delay: delay,
                                       again: again)
-                    if run.outcome != .reached || (run.finishedAt ?? .infinity) > 3 {
+                    if run.outcome != .reached || (run.finishedAt ?? .infinity) > 3.5 {
                         failed.append("\(Int(from))→\(Int(to)) \(delay) с \(again ? "и" : "без") повтора: \(String(describing: run.outcome)) \(run.finishedAt ?? -1)")
                     }
                 }
@@ -826,10 +1187,10 @@ func stepsSlowCameraConvergesWithoutFalseStuck(gain: Double) {
 
     var steps = FocusPull(mode: .steps, from: -big, to: big, duration: 0)
     let up = steps.next(elapsed: 0, position: 0)
-    #expect(up == .nearFar(7))
+    #expect(up == .nearFar(5))
     var down = FocusPull(mode: .steps, from: big, to: -big, duration: 2)
     let far = down.next(elapsed: 2.0, position: big)                 // до цели −2e308: больше Double — всё равно самый большой шаг
-    #expect(far == .nearFar(-7))
+    #expect(far == .nearFar(-5))
     #expect(down.progress.isFinite)
     #expect((0.0...1.0).contains(down.progress))
     #expect(down.desired(at: 1).isFinite)
@@ -844,9 +1205,10 @@ func stepsSlowCameraConvergesWithoutFalseStuck(gain: Double) {
     #expect(FocusPull.register(65535.4) == 65535)
     #expect(FocusPull.register(0.5) == 1)
     #expect(FocusPull.steps(from: .nan) == 0)
-    #expect(FocusPull.steps(from: .infinity) == 7)
-    #expect(FocusPull.steps(from: -.infinity) == -7)
-    #expect(FocusPull.steps(from: 1e308) == 7)
+    #expect(FocusPull.steps(from: .infinity) == 5)
+    #expect(FocusPull.steps(from: -.infinity) == -5)
+    #expect(FocusPull.steps(from: 1e308) == 5)
+    #expect(FocusPull.steps(from: 6.4) == 5)
     #expect(FocusPull.steps(from: -2.5) == -3)
     #expect(FocusPull.steps(from: 0.4) == 0)
 }
@@ -888,23 +1250,23 @@ func stepsSlowCameraConvergesWithoutFalseStuck(gain: Double) {
 @Test func stepsSendOneCommandPerTick() {
     var pull = FocusPull(mode: .steps, from: 0, to: 100, duration: 0)
     let first = pull.next(elapsed: 1.0, position: 0)
-    #expect(first == .nearFar(7))
-    // сразу после ответа камеры, в то же время: положение учтено (k уточнился), но новая команда — не раньше следующего тика
+    #expect(first == .nearFar(5))
+    // сразу после ответа камеры, в то же время: положение учтено (k заменён на 25 / 5), но новая команда — не раньше следующего тика
     let reply = pull.next(elapsed: 1.0, position: 25)
     #expect(reply == .wait)
-    #expect(abs(pull.gain - (0.7 * 3.5 + 0.3 * 25.0 / 7.0)) < 1e-12)
+    #expect(pull.gain == 5)
     let early = pull.next(elapsed: 1.05, position: 25)
     #expect(early == .wait)
     // тик с небольшим запасом на дрожание таймера: 95 мс после прошлой команды уже можно
     let tick = pull.next(elapsed: 1.095, position: 25)
-    #expect(tick == .nearFar(7))
+    #expect(tick == .nearFar(5))
 }
 
 @Test func stepsTickDoesNotHoldBackTheEnd() {
     // «готово» и «упёрлись» от темпа не зависят: ответ на команду в тот же момент может закончить перевод
     var pull = FocusPull(mode: .steps, from: 0, to: 100, duration: 0)
     let first = pull.next(elapsed: 0.5, position: 0)
-    #expect(first == .nearFar(7))
+    #expect(first == .nearFar(5))
     let reply = pull.next(elapsed: 0.5, position: 100)
     #expect(reply == .finish(.reached))
 }
@@ -955,8 +1317,8 @@ func stepsSlowCameraConvergesWithoutFalseStuck(gain: Double) {
     #expect(still == .finish(.timedOut))
 
     var stuck = FocusPull(mode: .steps, from: 80, to: 100, duration: 0)
-    for index in 0..<3 { _ = stuck.next(elapsed: Double(index) * 0.4, position: 96) }   // пустые шаги — через 0,4 с
-    let three = stuck.next(elapsed: 1.2, position: 96)
+    for index in 0..<3 { _ = stuck.next(elapsed: Double(index) * 0.8, position: 96) }   // пустые шаги — через 0,8 с
+    let three = stuck.next(elapsed: 2.4, position: 96)
     #expect(three == .finish(.stuck))
     let kept = stuck.next(elapsed: 1.3, position: 100)
     #expect(kept == .finish(.stuck))

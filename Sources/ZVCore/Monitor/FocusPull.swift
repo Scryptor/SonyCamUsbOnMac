@@ -15,20 +15,24 @@ import Foundation
 /// конце времени (и при времени 0 — сразу) цель пишется один раз и дальше `.wait`, пока положение не станет в пределах 0,5 %
 /// шкалы от цели (327,675 единицы) — тогда `.finish(.reached)`. Не успело за 2 с после конца — `.finish(.timedOut)`.
 ///
-/// **Шаги Near/Far** (0…100, отрицательный шаг уменьшает положение — фокус ближе):
+/// **Шаги Near/Far** (0…100, отрицательный шаг уменьшает положение, фокус ближе). Числа — из замеров настоящей ZV-E10 с PZ 16-50
+/// на 16 мм (30 октября 2026, `docs/protocol.md`, «Near/Far»): положение меняется через 0,33–0,45 с после команды; ±1 в середине
+/// шкалы не двигает ничего, ±2…±5 — примерно на единицу на значение шага, ±7 — на всю шкалу:
 ///
-/// - команда считается отработанной, когда положение стало другим, чем было перед ней, или когда с неё прошло 0,3 с (тогда
+/// - команда считается отработанной, когда положение стало другим, чем было перед ней, или когда с неё прошло 0,7 с (тогда
 ///   положение берётся как есть, и если оно прежнее — камера не двинулась). Пока нет ни того ни другого, `next` отвечает
 ///   `.wait`: ответ камеры и свежее положение могли просто не дойти. Срок (тайм-аут) и `cancel()` при этом работают, а новая
 ///   команда уходит только после того, как прошлая отработана;
-/// - у отработанной команды n сдвиг Δ = положение − положение до неё. При |n| ≥ 3 и Δ ≠ 0 коэффициент (единиц положения на
-///   шаг) уточняется: k ← 0,7·k + 0,3·(Δ/n), в пределах 0,2…20. Три команды подряд в одну сторону с Δ = 0 — `.finish(.stuck)`:
-///   дальше камера не двигает (у края шкалы так бывает);
+/// - у отработанной команды n сдвиг Δ = положение − положение до неё. При |n| ≥ 2, Δ ≠ 0 и Δ/n > 0 коэффициент (единиц
+///   положения на шаг) уточняется: первое такое измерение за перевод заменяет его (k = Δ/n), следующие подмешиваются:
+///   k ← 0,7·k + 0,3·(Δ/n), всегда в пределах 0,2…20. Начинает перевод k = 1,0. Сдвиг в другую сторону (Δ/n ≤ 0) не учитывается.
+///   Три команды подряд в одну сторону с Δ = 0 — `.finish(.stuck)`: дальше камера не двигает (у края шкалы так бывает);
 /// - ошибка e — кривая в этот момент минус положение; допуск τ = max(1, k/2). В допуске — `.wait` до конца времени и
-///   `.finish(.reached)` на конце. Вне допуска — команда `round(e / k)` в пределах −7…7, но не 0 (шаг ±1 сдвигает фокус
-///   примерно на k, ближе камера не подойдёт);
-/// - после конца времени два шага ±1 подряд в разные стороны, второй из которых перескочил цель, — тоже `.reached`:
-///   это ближайшее, куда камера может встать;
+///   `.finish(.reached)` на конце. Вне допуска — команда `round(e / k)` в пределах −5…5 и не меньше «наименьшей команды»
+///   по модулю. Наименьшая команда сначала 1; шаг ±1, который ничего не сдвинул, поднимает её до 2 до конца перевода (такой
+///   объектив ±1 не отрабатывает; тот, что отработал ±1, остаётся на 1);
+/// - после конца времени две наименьшие команды подряд в разные стороны, вторая из которых перескочила цель, — тоже
+///   `.reached`: это ближайшее, куда камера может встать;
 /// - команды уходят не чаще одной за тик (с запасом 10 % на дрожание таймера): вызов сразу после ответа камеры только
 ///   учитывает результат, а следующую команду автомат отдаёт на ближайшем тике;
 /// - не кончилось за 3 с после конца времени — `.finish(.timedOut)`.
@@ -41,7 +45,7 @@ public struct FocusPull: Sendable {
     public enum Mode: Equatable, Sendable {
         /// Записывается положение 0xE042 (0…65535), читается 0xE043 — у новых камер.
         case absolute
-        /// Шаги Near/Far 0xD2D1 (−7…7) и положение 0xD24C (0…100) — у ZV-E10.
+        /// Шаги Near/Far 0xD2D1 (регистр принимает −7…7, перевод шлёт не больше ±5) и положение 0xD24C (0…100) — у ZV-E10.
         case steps
     }
 
@@ -80,7 +84,8 @@ public struct FocusPull: Sendable {
     public let target: Double
     /// Сколько времени на путь, секунд; 0 — как можно быстрее.
     public let duration: Double
-    /// Единиц положения на шаг Near/Far: начальное значение уточняется по ходу (режим шагов).
+    /// Единиц положения на шаг Near/Far: начинается с 1,0, по первой отработанной команде |n| ≥ 2 заменяется измеренным, дальше
+    /// уточняется (режим шагов).
     public private(set) var gain: Double
 
     // MARK: Числа из спецификации
@@ -90,18 +95,27 @@ public struct FocusPull: Sendable {
     /// Сколько ждать после конца времени, секунд: абсолютный фокус — 2, шаги — 3.
     private static let absoluteGrace = 2.0
     private static let stepsGrace = 3.0
-    /// Самая большая команда Near/Far.
-    private static let maxSteps = 7.0
+    /// Самая большая команда Near/Far: у PZ 16-50 ±7 проходит всю шкалу, ±6 — то 3 единицы, то 7, а ±5 — не больше пяти.
+    private static let maxSteps = 5.0
     /// Сколько пустых команд подряд в одну сторону — «дальше камера не двигает».
     private static let stuckRun = 3
     /// Не чаще одной команды за тик, с запасом на дрожание таймера.
     private static let commandSpacing = tick * 0.9
     /// Сколько ждать новое положение после шага, секунд: пока оно прежнее и этого времени не прошло, «камера не двинулась» не
-    /// засчитывается. Столько же (300 мс) контроллер ждёт свежий 0xD24C.
-    private static let settleWindow = 0.3
-    /// Коэффициент: пределы и начальное значение, если дали не число.
+    /// засчитывается. PZ 16-50 меняет положение через 0,33–0,45 с после команды (замер 0,2–0,55 с с учётом опроса). Свежий 0xD24C
+    /// контроллер после команды ждёт не дольше 300 мс за раз — это окно с ним не связано.
+    private static let settleWindow = 0.7
+    /// Запас на неточность чисел с плавающей точкой при сравнении с окном: тики в проверках считаются как k · 0,1, и разность двух
+    /// тиков в 0,7 с бывает 0,6999999999999997. Окно «вышло», если до него не хватает меньше этого.
+    private static let timeSlack = 1e-9
+    /// С какого |n| команда уточняет коэффициент: ±1 у PZ 16-50 то сдвигает на единицу, то нет — по нему k не измерить.
+    private static let calibrationSteps: Int64 = 2
+    /// Наименьшая команда: сначала 1, после пустого шага ±1 — 2.
+    private static let unitSteps: Int64 = 1
+    private static let raisedSteps: Int64 = 2
+    /// Коэффициент: пределы и начальное значение (оно же, если дали не число).
     private static let gainRange = 0.2...20.0
-    private static let defaultGain = 3.5
+    private static let defaultGain = 1.0
 
     // MARK: Состояние
 
@@ -121,13 +135,18 @@ public struct FocusPull: Sendable {
     /// Сколько пустых команд подряд и в какую сторону (−1, 1; 0 — не было).
     private var zeroRun = 0
     private var zeroDirection = 0
-    /// Сторона прошлого шага ±1 (0 — прошлая команда была другой) и признак «два шага ±1 в разные стороны перескочили цель».
+    /// Сторона прошлой наименьшей команды (0 — прошлая команда была другой) и признак «две наименьшие команды в разные стороны,
+    /// вторая перескочила цель».
     private var unitDirection = 0
     private var dithered = false
+    /// Было ли уже измерение коэффициента: первое заменяет его, дальнейшие подмешиваются.
+    private var calibrated = false
+    /// Наименьшая команда по модулю: 1, а после пустого шага ±1 — 2.
+    private var smallest = Self.unitSteps
 
     /// Перевод из `start` в `target` за `duration` секунд. Не-числа читаются как 0, отрицательное время — как 0, начальный
-    /// коэффициент `gain` — в пределах 0,2…20.
-    public init(mode: Mode, from start: Double, to target: Double, duration: Double, gain: Double = 3.5) {
+    /// коэффициент `gain` — в пределах 0,2…20 (не-число — 1,0).
+    public init(mode: Mode, from start: Double, to target: Double, duration: Double, gain: Double = 1.0) {
         self.mode = mode
         self.start = start.isFinite ? start : 0
         self.target = target.isFinite ? target : 0
@@ -217,9 +236,9 @@ public struct FocusPull: Sendable {
 
     private mutating func nextSteps(time: Double, position: Double) -> Action {
         if let command = pending {
-            // положение прежнее и с команды не прошло 0,3 с: ответ камеры и свежее положение могли просто не дойти — «камера
+            // положение прежнее и с команды не прошло 0,7 с: ответ камеры и свежее положение могли просто не дойти — «камера
             // не двинулась» ещё не засчитываем, ждём (срок при этом идёт)
-            if position == command.before, time - command.issuedAt < Self.settleWindow {
+            if position == command.before, time - command.issuedAt < Self.settleWindow - Self.timeSlack {
                 return time >= deadline ? end(.timedOut) : .wait
             }
             pending = nil
@@ -228,7 +247,7 @@ public struct FocusPull: Sendable {
         let error = desired(at: time) - position
         let ended = time >= duration
         if abs(error) <= max(1, gain / 2) { return ended ? end(.reached) : .wait }
-        // вне допуска. Ближе камера не подходит: два шага ±1 в разные стороны перескочили цель
+        // вне допуска. Ближе камера не подходит: две наименьшие команды в разные стороны перескочили цель
         if ended, dithered { return end(.reached) }
         // дальше не двигает — только если и теперь надо в ту же сторону
         let direction = error > 0 ? 1 : -1
@@ -237,18 +256,25 @@ public struct FocusPull: Sendable {
         // следующая команда — на ближайшем тике, а не сразу после ответа на прошлую
         if time - lastCommandAt < Self.commandSpacing { return .wait }
         var steps = Self.steps(from: error / gain)
-        if steps == 0 { steps = Int64(direction) }
+        // не меньше наименьшей команды: 1, а если объектив ±1 не отрабатывает — 2
+        if abs(steps) < smallest { steps = Int64(direction) * smallest }
         pending = Command(steps: steps, before: position, issuedAt: time)
         lastCommandAt = time
         return .nearFar(steps)
     }
 
-    /// Что вышло из команды: уточняет коэффициент, считает пустые команды и дребезг.
+    /// Что вышло из команды: уточняет коэффициент, считает пустые команды, поднимает наименьшую команду и следит за дребезгом.
     private mutating func settle(_ command: Command, at position: Double) {
         let moved = position - command.before
+        let size = abs(command.steps)
         let sign = command.steps > 0 ? 1 : -1
-        if abs(command.steps) >= 3, moved != 0 {
-            gain = Self.sane(0.7 * gain + 0.3 * (moved / Double(command.steps)))
+        // коэффициент: первое измерение заменяет, следующие подмешиваются; сдвиг в другую сторону не берётся вовсе
+        if size >= Self.calibrationSteps, moved != 0 {
+            let ratio = moved / Double(command.steps)
+            if ratio > 0 {
+                gain = Self.sane(calibrated ? 0.7 * gain + 0.3 * ratio : ratio)
+                calibrated = true
+            }
         }
         if moved == 0 {
             zeroRun = zeroDirection == sign ? zeroRun + 1 : 1
@@ -257,7 +283,15 @@ public struct FocusPull: Sendable {
             zeroRun = 0
             zeroDirection = 0
         }
-        if abs(command.steps) == 1 {
+        // шаг ±1, который ничего не сдвинул: меньше 2 команд не будет. Пара наименьших команд начинается заново: ±1 уже не
+        // наименьшая
+        if size == Self.unitSteps, moved == 0, smallest < Self.raisedSteps {
+            smallest = Self.raisedSteps
+            dithered = false
+            unitDirection = 0
+            return
+        }
+        if size == smallest {
             let crossed = (command.before - target) * (position - target) < 0
             dithered = unitDirection == -sign && crossed
             unitDirection = sign
@@ -285,7 +319,7 @@ public struct FocusPull: Sendable {
         return UInt16(min(max(value.rounded(), 0), 65535))
     }
 
-    /// Команда Near/Far из «шагов» (ошибка / k): целое в пределах −7…7; не-число — 0. Не `private` ради проверки.
+    /// Команда Near/Far из «шагов» (ошибка / k): целое в пределах −5…5; не-число — 0. Не `private` ради проверки.
     static func steps(from raw: Double) -> Int64 {
         guard !raw.isNaN else { return 0 }
         return Int64(min(max(raw.rounded(), -maxSteps), maxSteps))

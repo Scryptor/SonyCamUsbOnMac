@@ -213,7 +213,7 @@ private func properties(_ list: SonyProperty...) -> [UInt16: SonyProperty] {
     #expect(FocusPosition.fraction(of: -5, mode: .steps) == 0)
     #expect(FocusPosition.fraction(of: 400, mode: .steps) == 1)
     #expect(FocusPosition.fraction(of: .nan, mode: .absolute) == 0)
-    // допуск «уже у метки» — тот же, что у самого перевода: 0,5 % шкалы и max(1, k/2) при k = 3,5
+    // допуск «уже у метки» — тот же, что у самого перевода в начале: 0,5 % шкалы и max(1, k/2) при k = 1,0
     #expect(abs(FocusPosition.tolerance(.absolute) - 327.675) < 1e-9)
-    #expect(FocusPosition.tolerance(.steps) == 1.75)
+    #expect(FocusPosition.tolerance(.steps) == 1)
 }

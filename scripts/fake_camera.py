@@ -27,6 +27,11 @@ make-viewfinder-picture.py --log), остальные профили и «вык
 Как сам объектив отзывается на Near/Far, задают --focus-gain, --focus-step-ms и --focus-deadband (по умолчанию — 1:1,
 сразу, без мёртвой зоны): шаг сдвигает фокус на round(команда × G), на половинке — от нуля (3,5 → 4, −3,5 → −4); ответ
 приходит через T мс; шаг не больше ±3, когда до края шкалы, куда он идёт, ближе D, фокус не двигает — у ZV-E10 так у края.
+--focus-lens pz16-50 — готовый объектив вместо этих трёх: китовый PZ 16-50 ZV-E10 на 16 мм так, как его замерили на настоящей
+камере 30 октября 2026 года (docs/protocol.md, «Near/Far»), но без разброса — каждая команда отвечает одним и тем же:
+|1| сдвигает на 0 единиц шкалы (на 1, когда положение не дальше единицы от края), |2| — на 1, |3| — на 3, |4| — на 4, |5| — на 5,
+|6| — на 7, |7| — до края шкалы в ту сторону; шкала 0…100; ответ приходит через 400 мс, если не задан --focus-step-ms.
+--focus-gain и --focus-deadband при нём не действуют. На нём программа проверяет перевод фокуса к меткам (scripts/e2e_lens.py).
 
 Новая камера Sony — --model newer (сборка в scripts/fake_newer.py; без --model камера прежняя, ZV-E10): в GetDeviceInfo модель
 ILCE-7M4 и операции 0x9215 (подписи списков от камеры: Creative Look 0x13 и «Человек/Животное» 0x15), 0x9216 (версия кода
@@ -50,7 +55,7 @@ Creative Look 0xD0FA, гамма и цвет профиля 0xD0E1 и 0xD0E9 (S-
                          [--name ZV-E10] [--serial …] [--mark zoom|pan|flip|flop|rotate] [--picture кадр.jpg]
                          [--battery 0–100] [--mode photo|video] [--format jpeg|raw+jpeg] [--ssdp] [--busy] [--pairing]
                          [--reject iso,…] [--record-delay с] [--record сценарий]
-                         [--focus-gain G] [--focus-step-ms T] [--focus-deadband D] [--model zv-e10|newer]
+                         [--focus-gain G] [--focus-step-ms T] [--focus-deadband D] [--focus-lens pz16-50] [--model zv-e10|newer]
                          [--broken type0|garbage|refuse|hang] [--control [127.0.0.1:]15751]
   ZV_PTPIP_HOST=127.0.0.1 …/ZVViewer --automation        # Mac
   am start … --es ptpipHost <IP Mac>                       # планшет: --listen <IP Mac>:15740
@@ -91,6 +96,12 @@ PICTURE_PROFILE = 0xD23F                                   # 0 — выкл, 1�
 # профиль → какой лог камера показывает в превью (заводские гаммы Sony у ZV-E10): имя — в scripts/assets/viewfinder-<имя>.jpg
 LOG_FRAMES = {7: "slog2", 8: "slog3", 9: "slog3", 10: "hlg"}
 NEAR_FAR_SMALL = 3                                         # шаги до ±3 у края шкалы фокуса камера может не отработать
+# --focus-lens: готовые объективы; ответ на Near/Far — по таблице, а не по усилению. Через сколько мс камера отвечает на команду,
+# если не задан --focus-step-ms — в FOCUS_LENS_REPLY_MS
+FOCUS_LENSES = {"pz16-50": "китовый PZ 16-50 ZV-E10 на 16 мм по замерам настоящей камеры"}
+FOCUS_LENS_REPLY_MS = {"pz16-50": 400.0}
+# PZ 16-50 на 16 мм: на сколько единиц шкалы 0…100 сдвигает команда с таким модулем (1 — особый случай, 7 и больше — до края)
+PZ_STEPS = {2: 1, 3: 3, 4: 4, 5: 5, 6: 7}
 EXPOSURE_PROGRAM, BATTERY = 0x500E, 0xD218
 WHITE_BALANCE, COLOR_TEMP, MANUAL_WB = 0x5005, 0xD20F, 0x8012  # температура открыта только в «Цвет. темп.»
 MODES = {"photo": 0x1, "video": 0x78053}                   # буква M в фото и в видео
@@ -197,6 +208,20 @@ def scaled_step(value, gain):
     """Шаг Near/Far с усилением: round(value·gain), на половинке — от нуля (3,5 → 4, −3,5 → −4, 2,5 → 3); встроенный
     round() округляет к чётному. Считается в десятичных, чтобы 5·1,1 было ровно 5,5, а не 5,4999…"""
     return int((Decimal(repr(gain)) * value).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+
+
+def pz16_50_step(value, position):
+    """Шаг Near/Far PZ 16-50 на 16 мм (шкала 0…100): таблица замеров настоящей ZV-E10 от 30 октября 2026 года, без разброса.
+    |1| — 0 единиц, а когда положение не дальше единицы от края шкалы — 1; |2| — 1, |3| — 3, |4| — 4, |5| — 5, |6| — 7; |7| и больше —
+    до края шкалы в ту сторону. Знак — как у команды. За шкалу фокус выведет вызывающий (`max(0, min(100, …))`)."""
+    size = abs(value)
+    if size == 0:
+        return 0
+    if size == 1:
+        moved = 1 if min(position, 100 - position) <= 1 else 0
+    else:
+        moved = PZ_STEPS.get(size, 100)
+    return moved if value > 0 else -moved
 
 
 class SSDPResponder(asyncio.DatagramProtocol):
@@ -339,8 +364,10 @@ class Camera:
         self.building = set()
         self.photo = open(args.photo, "rb").read() if args.photo else big_photo(jpeg)
         self.rate = args.rate
+        self.focus_lens = args.focus_lens                   # готовый объектив (FOCUS_LENSES): ответы по таблице; None — по усилению
         self.focus_gain = args.focus_gain                   # объектив: на сколько единиц шкалы сдвигает команда Near/Far 1
-        self.focus_step = args.focus_step_ms / 1000         # через сколько секунд камера отвечает на Near/Far
+        reply_ms = args.focus_step_ms if args.focus_step_ms is not None else FOCUS_LENS_REPLY_MS.get(args.focus_lens, 0.0)
+        self.focus_step = reply_ms / 1000                   # через сколько секунд камера отвечает на Near/Far
         self.focus_deadband = args.focus_deadband           # у края шкалы меньше этого малые шаги не двигают фокус
         self.ignore_record = args.ignore_record
         self.record_delay = args.record_delay
@@ -625,10 +652,13 @@ class Camera:
                 return OK
             before = self.props.get(FOCAL_POSITION)
             to_edge = 100 - before if value > 0 else before     # сколько до края шкалы, куда идёт шаг
-            if value and abs(value) <= NEAR_FAR_SMALL and to_edge < self.focus_deadband:
-                self.log(f"Near/Far {value:+d} — до края {to_edge}, мёртвая зона {self.focus_deadband:g}, не двигаю")
-                return OK
-            moved = scaled_step(value, self.focus_gain)
+            if self.focus_lens:                             # готовый объектив: ответ по таблице, усиление и мёртвая зона не нужны
+                moved = pz16_50_step(value, before)
+            else:
+                if value and abs(value) <= NEAR_FAR_SMALL and to_edge < self.focus_deadband:
+                    self.log(f"Near/Far {value:+d} — до края {to_edge}, мёртвая зона {self.focus_deadband:g}, не двигаю")
+                    return OK
+                moved = scaled_step(value, self.focus_gain)
             pos = max(0, min(100, before + moved))
             self.changed(FOCAL_POSITION, pos)
             absolute = ""
@@ -637,7 +667,11 @@ class Camera:
                 self.changed(FOCUS_CURRENT, max(0, min(fake_newer.FOCUS_MAX,
                                                        self.props.get(FOCUS_CURRENT) + moved * FOCUS_PER_STEP)))
                 absolute = f", 0xE043 = {self.props.get(FOCUS_CURRENT)}"
-            gain = f" (×{self.focus_gain:g} = {moved:+d})" if self.focus_gain != 1 else ""
+            gain = ""
+            if self.focus_lens:
+                gain = f" ({self.focus_lens}: {moved:+d})"
+            elif self.focus_gain != 1:
+                gain = f" (×{self.focus_gain:g} = {moved:+d})"
             self.log(f"фокус {'ближе' if value < 0 else 'дальше'} на {abs(value)}{gain} → {pos}{absolute}")
             return OK
         if code == ZOOM:
@@ -932,11 +966,17 @@ async def main():
     ap.add_argument("--focus-gain", type=non_negative, default=1.0, metavar="G",
                     help="объектив: шаг Near/Far сдвигает фокус на round(команда × G) единиц шкалы 0…100, на половинке — "
                          "от нуля; по умолчанию 1 — на столько, на сколько просили")
-    ap.add_argument("--focus-step-ms", type=non_negative, default=0.0, metavar="T",
-                    help="объектив: ответ на Near/Far приходит через T миллисекунд; по умолчанию 0 — сразу")
+    ap.add_argument("--focus-step-ms", type=non_negative, default=None, metavar="T",
+                    help="объектив: ответ на Near/Far приходит через T миллисекунд; по умолчанию 0 — сразу, а у готового объектива "
+                         "(--focus-lens) — его собственное время, у pz16-50 это 400")
     ap.add_argument("--focus-deadband", type=non_negative, default=0.0, metavar="D",
                     help="объектив: шаг Near/Far не больше ±3, когда до края шкалы, куда он идёт, ближе D, фокус не двигает; "
                          "по умолчанию 0 — мёртвой зоны нет")
+    ap.add_argument("--focus-lens", choices=list(FOCUS_LENSES), metavar="|".join(FOCUS_LENSES),
+                    help="готовый объектив вместо --focus-gain и --focus-deadband (при нём они не действуют): " +
+                         "; ".join(f"{k} — {v}" for k, v in FOCUS_LENSES.items()) + ". Шкала 0…100, шаг ±1 сдвигает на 0 единиц "
+                         "(на 1, если положение не дальше единицы от края), ±2 — на 1, ±3 — на 3, ±4 — на 4, ±5 — на 5, ±6 — на 7, "
+                         "±7 — до края шкалы; ответ приходит через 400 мс, если не задан --focus-step-ms")
     ap.add_argument("--model", choices=["zv-e10", "newer"], default="zv-e10",
                     help="камера: zv-e10 — как в дампах; newer — новая Sony (fake_newer.py): модель " + fake_newer.MODEL
                          + ", подписи списков 0x9215, версия кода 0x9216, данные объектива 0x9223, Creative Look 0xD0FA, "
@@ -951,6 +991,9 @@ async def main():
     if a.broken and a.model != "newer":
         print(f"ВНИМАНИЕ: --broken {a.broken} действует только у --model newer: у ZV-E10 операций 0x9215, 0x9216 и 0x9223 нет, "
               "и ломать нечего", file=sys.stderr, flush=True)
+    if a.focus_lens and (a.focus_gain != 1 or a.focus_deadband):
+        print(f"ВНИМАНИЕ: --focus-lens {a.focus_lens} отвечает по своей таблице: --focus-gain и --focus-deadband при нём не действуют",
+              file=sys.stderr, flush=True)
     cam = Camera(a)
     host, port = a.listen.rsplit(":", 1)
     server = await asyncio.start_server(lambda r, w: serve(cam, r, w), host, int(port))
@@ -961,9 +1004,10 @@ async def main():
     extras = [f"№ …{a.serial[-4:]}" if a.serial else "", a.mark or "", f"батарея {a.battery}%" if a.battery is not None else "",
               a.mode or "", "SSDP" if a.ssdp else "", "занята" if a.busy else "", "сопряжение" if a.pairing else "",
               f"не меняет {a.reject}" if a.reject else "", f"запись: {a.record}" if a.record != "normal" else "",
-              f"усиление фокуса ×{a.focus_gain:g}" if a.focus_gain != 1 else "",
-              f"шаг фокуса {a.focus_step_ms:g} мс" if a.focus_step_ms else "",
-              f"мёртвая зона фокуса {a.focus_deadband:g}" if a.focus_deadband else "",
+              f"объектив {a.focus_lens}" if a.focus_lens else "",
+              f"усиление фокуса ×{a.focus_gain:g}" if a.focus_gain != 1 and not a.focus_lens else "",
+              f"шаг фокуса {cam.focus_step * 1000:g} мс" if cam.focus_step else "",
+              f"мёртвая зона фокуса {a.focus_deadband:g}" if a.focus_deadband and not a.focus_lens else "",
               f"новая камера: в DeviceInfo {fake_newer.MODEL}" if cam.newer else "",
               f"ломается: {a.broken}" if a.broken else "", f"управление: {a.control[0]}:{a.control[1]}" if a.control else ""]
     plain = cam.sets[None].frames

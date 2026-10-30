@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """e2e_lens.py — фокус и зум с экрана в программе для Mac против поддельной камеры: фокус касанием (касание экрана
 камеры в зоне «Широкая», точка AF в зоне «Точка»), рамки фокуса камеры, моторный зум, шкала фокуса в MF. И метки фокуса A и B с
-переводом за выбранное время — на камере с физикой объектива (--focus-gain 3.5 --focus-step-ms 80 --focus-deadband 2): перевод
-к метке за 4 с, остановка, отмены (AF, ручной шаг, второй «перевести», обрыв связи, смена объектива), отказы API, отказы камеры
-(Near/Far отвергнут — одна строка в журнале программы за перевод).
+переводом за выбранное время — на двух объективах поддельной камеры: с физикой «×3,5, ответ 80 мс» (--focus-gain 3.5
+--focus-step-ms 80 --focus-deadband 2) и с китовым PZ 16-50 по замерам настоящей ZV-E10 (--focus-lens pz16-50: шаг ±1 — ничего,
+±2 — 1, ±3 — 3, ±5 — 5, ±7 — вся шкала, ответ через 0,4 с). На обоих: перевод к метке за 4 с, остановка, отмены (AF, ручной шаг,
+второй «перевести», обрыв связи, смена объектива), отказы API, отказы камеры (Near/Far отвергнут — одна строка в журнале программы
+за перевод). Только на PZ 16-50: перевод за 2 с не дольше 3,2 с, перевод «как можно быстрее» 84 → 63 встаёт у метки (±1), не
+уходя за дальнюю из меток больше чем на 5 единиц, и камера не получает команд больше ±5.
 
 Запускает scripts/fake_camera.py на 127.0.0.1:15741 (с управляющим портом: смена объектива — событие 0xC21B) и программу с API
 автоматизации (адрес камеры подменён), проверяет /state и снимает скриншоты в --out. Зону и режим фокуса поддельной камеры
@@ -173,15 +176,59 @@ def position(s=None):
     return lens(s or state())["focalPosition"]
 
 
-def go_to(target, tolerance=1.5, tries=14):
-    """Ручными шагами к положению (шкала 0…100): камера с усилением ×3,5 за раз сдвигает на 3,5 единицы, так что считаем по ней."""
+class Glass:
+    """Объектив поддельной камеры, на котором идут метки: как её запустить и чем он отличается для проверок. `far` — метка A
+    (дальний край), `near` — откуда переводят к ней; `mid` — через сколько секунд 4-секундный перевод уже сдвинул фокус, но ещё далёк
+    от конца (на PZ 16-50 первая команда ±1 бывает пустой, а положение приходит через 0,4 с); `pull4` — сколько секунд может длиться
+    перевод за 4 с; `rollback` — на сколько единиц фокус по дороге к A может откатиться назад: у объектива ×3,5 первая же команда
+    (стартовый k = 1,0) перелетает почти плоскую кривую, и в начале перевода бывает команда назад (−7); два «двигателя» качали бы
+    фокус куда сильнее."""
+
+    def __init__(self, title, args, suffix, far, near, mid, pull4, rollback, table):
+        self.title, self.args, self.suffix = title, args, suffix
+        self.far, self.near, self.mid, self.pull4, self.rollback, self.table = far, near, mid, pull4, rollback, table
+
+
+# ×3,5, ответ 80 мс, мёртвая зона 2: метка B у 20 (80 единиц до A), перевод за 4 с — от 3,5 до 5 с
+FAKE_GLASS = Glass("×3,5, ответ 80 мс, мёртвая зона 2", PHYSICS, "", far=100, near=20, mid=1.6, pull4=(3.5, 5.0), rollback=15,
+                   table=False)
+# PZ 16-50 по замерам настоящей камеры: ±5 за 0,4 с — не больше 12,5 единицы в секунду, поэтому B у 88 (12 единиц до A), как в замере
+PZ_GLASS = Glass("PZ 16-50, --focus-lens pz16-50", ["--focus-lens", "pz16-50"], "-pz", far=100, near=88, mid=2.0, pull4=(3.5, 5.5),
+                 rollback=0, table=True)
+
+
+def go_to(target, glass, tolerance=1.5, tries=24):
+    """Ручными шагами к положению (шкала 0…100). Камера с усилением ×3,5 за команду сдвигает на 3,5 единицы, так что считаем по ней.
+    У PZ 16-50 ±1 не двигает, ±3 — на 3, а ±7 — на всю шкалу: если до цели далеко (дальше 12 единиц) и ближайший к ней край заметно
+    ближе к цели, чем фокус, прыгаем ±7 к этому краю; дальше идём шагами по 3 и 6 (6 — две команды по 3)."""
     for _ in range(tries):
         here = position()
         if here is None or abs(here - target) <= tolerance:
             return here
-        act("focusStep", offset=int(round((target - here) / 3.5)) or (1 if target > here else -1))
-        time.sleep(0.9)
+        gap = target - here
+        if glass.table:
+            edge = 100 if target > 50 else 0                  # край, ближайший к цели: прыжок туда выгоден, только если он ближе к цели
+            if abs(gap) > 12 and abs(edge - target) + 12 < abs(gap):
+                act("focusStep", offset=7 if edge == 100 else -7)
+            else:
+                act("focusStep", offset=max(-6, min(6, int(3 * round(gap / 3)))) or (3 if gap > 0 else -3))
+            time.sleep(1.1)
+        else:
+            act("focusStep", offset=int(round(gap / 3.5)) or (1 if gap > 0 else -1))
+            time.sleep(0.9)
     return position()
+
+
+def rollback(path):
+    """Наибольший откат назад от самого большого положения, достигнутого к этому моменту: по дороге вверх (к A) должен быть 0 или
+    единицы. Опросы без положения пропускаются."""
+    peak, worst = None, 0
+    for y in path:
+        if y is None:
+            continue
+        peak = y if peak is None else max(peak, y)
+        worst = max(worst, peak - y)
+    return worst
 
 
 def pulling(s):
@@ -214,6 +261,13 @@ def near_far_commands(stand):
     return len(re.findall(r"Near/Far [+-]\d+|фокус (?:ближе|дальше) на", stand.camera.session_log()))
 
 
+def near_far_sizes(stand, since=0):
+    """Размеры (по модулю) команд Near/Far, что получила камера, запущенная последней, после `since` символов её журнала: и
+    отработанных («фокус ближе на N»), и тех, что она не отработала («Near/Far ±N — отказ / закрыт / мёртвая зона»)."""
+    text = stand.camera.session_log()[since:]
+    return [int(done or other) for done, other in re.findall(r"фокус (?:ближе|дальше) на (\d+)|Near/Far [+-](\d+) —", text)]
+
+
 def stands_still(seconds=1.2, settle=0.6):
     """Фокус не двигается: положение через `settle` секунд после начала и ещё через `seconds` одно и то же."""
     time.sleep(settle)
@@ -222,10 +276,11 @@ def stands_still(seconds=1.2, settle=0.6):
     return first == position(), (first, position())
 
 
-def run_marks(out, stand):
-    """Метки на камере с физикой объектива: ZV-E10, шаги Near/Far (положение 0…100)."""
-    s = stand.swap_camera(*PHYSICS)
-    check("камера с объективом (×3,5, ответ 80 мс, мёртвая зона 2) на связи", s is not None and s["phase"] == "ready", s and s["phase"])
+def run_marks(out, stand, glass):
+    """Метки на камере с физикой объектива: ZV-E10, шаги Near/Far (положение 0…100); `glass` — какой объектив (FAKE_GLASS, PZ_GLASS)."""
+    print(f"\n  --- метки A и B, объектив: {glass.title} ---")
+    s = stand.swap_camera(*glass.args)
+    check(f"камера с объективом ({glass.title}) на связи", s is not None and s["phase"] == "ready", s and s["phase"])
     time.sleep(3)
     act("setPreference", key="autoHide", value="false")
     act("setPreference", key="focusMarksHelpShown", value="true")
@@ -241,41 +296,59 @@ def run_marks(out, stand):
     check("метки пусты, время 2 с, перевода нет", lens(state())["marks"] == {"A": None, "B": None, "duration": 2}
           and lens(state())["pull"] is None, lens(state()))
 
-    # MF: A на 100, шагами к 20 — B
+    # MF: A на дальнем краю (100), шагами к ближней метке (20 или 88) — B
     act("request", setting="focusMode", value=FOCUS_MODE_MF)
     s = wait(lambda s: lens(s)["focusScale"], 5)
     check("MF — шкала фокуса", lens(s)["focusScale"], lens(s))
-    here = go_to(100)
+    here = go_to(glass.far, glass)
     check("фокус у дальнего края", here is not None and here >= 98, here)
     check("метка A запомнена", act("focusMark", mark="A", op="save") == {"ok": True})
     a = lens(state())["marks"]["A"]
     check("A = положение фокуса (100), B пуста", a == position() and a >= 98 and lens(state())["marks"]["B"] is None, lens(state())["marks"])
-    here = go_to(20)
+    here = go_to(glass.near, glass)
     act("focusMark", mark="B", op="save")
     marks = lens(state())["marks"]
     b = marks["B"]
-    check("метка B запомнена у 20", b is not None and b == position() and abs(b - 20) <= 5, marks)
-    shot(out, "5-marks-scale")
+    check(f"метка B запомнена у {glass.near}", b is not None and b == position() and abs(b - glass.near) <= 5, marks)
+    shot(out, "5-marks-scale" + glass.suffix)
 
     # перевод к A за 4 с
+    log_mark = len(stand.camera.session_log())
     took, caption, path, _ = run_pull("A", 4)
-    print(f"  перевод к A за 4 с: {took and round(took, 2)} с, «{caption}», фокус {position()}")
-    check("перевод к A за 4 с кончился за 3,5–5 с", took is not None and 3.5 <= took <= 5.0, took)
+    sizes = near_far_sizes(stand, log_mark)
+    print(f"  перевод к A за 4 с ({b} → {a}): {took and round(took, 2)} с, «{caption}», фокус {position()}, команд {len(sizes)}, "
+          f"наибольшая {max(sizes, default=0)}")
+    low, high = glass.pull4
+    check(f"перевод к A за 4 с кончился за {low}–{high} с".replace(".", ","), took is not None and low <= took <= high, took)
     check("подпись «Фокус у метки A»", caption == "Фокус у метки A", caption)
-    check("фокус у A: 99–100", position() is not None and 99 <= position() <= 100, position())
-    check("по дороге фокус только растёт — один «двигатель»", all(y >= x for x, y in zip(path, path[1:])), path[::10])
-    shot(out, "6-marks-pull-done")
+    check("фокус у A: в пределах единицы", position() is not None and abs(position() - a) <= 1, position())
+    check(f"по дороге фокус откатывается не больше чем на {glass.rollback} — один «двигатель»", rollback(path) <= glass.rollback,
+          (rollback(path), path[::10]))
+    if glass.table:
+        check("PZ 16-50: камера не получила команд больше ±5", sizes and max(sizes) <= 5, sizes)
+    shot(out, "6-marks-pull-done" + glass.suffix)
     time.sleep(3.3)
     check("подпись исчезла через 3 с, lens.pull пуст", lens(state())["pull"] is None, lens(state())["pull"])
 
+    if glass.table:
+        # перевод за 2 с (12 единиц) — не дольше 3,2 с; у настоящего объектива такой шёл 3,9 с
+        log_mark = len(stand.camera.session_log())
+        took2, caption2, path2, _ = run_pull("B", 2)
+        sizes2 = near_far_sizes(stand, log_mark)
+        print(f"  перевод к B за 2 с ({a} → {b}): {took2 and round(took2, 2)} с, «{caption2}», фокус {position()}, команд {len(sizes2)}")
+        check("PZ 16-50: перевод за 2 с кончился не позже чем за 3,2 с", took2 is not None and took2 <= 3.2, took2)
+        check("…подписью «Фокус у метки B», фокус у B (±1)", caption2 == "Фокус у метки B" and abs(position() - b) <= 1, (caption2, position(), b))
+        check("…и камера не получила команд больше ±5", sizes2 and max(sizes2) <= 5, sizes2)
+        time.sleep(3.3)
+
     # «стоп» посреди перевода
-    go_to(20)
+    go_to(glass.near, glass)
     act("focusPullTime", seconds=4)
     act("focusMark", mark="A", op="go")
-    time.sleep(1.6)
+    time.sleep(glass.mid)
     s = state()
     check("посреди перевода: метка A и доля пути между 0 и 1", pulling(s) and 0 < lens(s)["pull"]["progress"] < 1, lens(s)["pull"])
-    shot(out, "7-marks-pulling")
+    shot(out, "7-marks-pulling" + glass.suffix)
     act("focusPullStop")
     s = wait(lambda s: lens(s)["pull"] is None, 1)
     check("focusPullStop: lens.pull пуст сразу, подписи нет", lens(s)["pull"] is None, lens(s)["pull"])
@@ -283,7 +356,8 @@ def run_marks(out, stand):
     check("и движение прекратилось", still, seen)
     check("остановка без перевода ничего не делает — 200", act("focusPullStop") == {"ok": True})
 
-    # фокус на AF посреди перевода
+    # фокус на AF посреди перевода (перевод начинается далеко от A: после «стопа» фокус мог уже быть у неё)
+    go_to(glass.near, glass)
     act("focusPullTime", seconds=4)
     act("focusMark", mark="A", op="go")
     time.sleep(1.2)
@@ -307,6 +381,7 @@ def run_marks(out, stand):
           (seen, sent, near_far_commands(stand)))
 
     # ручной шаг посреди перевода
+    go_to(glass.near, glass)
     act("focusMark", mark="A", op="go")
     time.sleep(1.0)
     check("перевод идёт", pulling(state()), lens(state())["pull"])
@@ -318,7 +393,7 @@ def run_marks(out, stand):
 
     # камера отвергает Near/Far посреди перевода (управляющий порт: refuse-focus): отказ записан в журнале программы — одна строка за
     # перевод, а не по строке на каждую отвергнутую команду; автомат сам сдаётся, когда фокус не двигается
-    go_to(20)
+    go_to(glass.near, glass)
     try:
         for n in (1, 2):
             stand.camera.control("refuse-focus", "on")
@@ -337,12 +412,12 @@ def run_marks(out, stand):
             check(f"отказ камеры (перевод {n}): перевод кончился сам, фокус не двигался",
                   (lens(s)["pull"] or {}).get("caption") == "Дальше камера не двигает", lens(s)["pull"])
             wait(lambda s: lens(s)["pull"] is None, 5)
-            go_to(20)
+            go_to(glass.near, glass)
     finally:
         stand.camera.control("refuse-focus", "off")
 
     # два «перевести» подряд — двигатель один
-    go_to(20)
+    go_to(glass.near, glass)
     act("focusPullTime", seconds=4)
     t0 = time.monotonic()
     act("focusMark", mark="A", op="go")
@@ -361,36 +436,41 @@ def run_marks(out, stand):
                 break
         time.sleep(0.05)
     print(f"  два «перевести» подряд: второй на {t_second:.2f} с, готово на {done and round(done, 2)} с, фокус {position()}")
-    check("«перевести» дважды подряд: фокус растёт без откатов (один двигатель)", all(y >= x for x, y in zip(path, path[1:])), path[::8])
+    check(f"«перевести» дважды подряд: фокус откатывается не больше чем на {glass.rollback} (один двигатель)",
+          rollback(path) <= glass.rollback, (rollback(path), path[::8]))
     check("…подпись одна", captions and set(captions) == {"Фокус у метки A"}, captions[:3])
-    check("…второе нажатие начинает перевод заново: ещё 3,5–5 с от него", done is not None and 3.5 <= done - t_second <= 5.2,
-          done and (round(done, 2), round(t_second, 2)))
+    check(f"…второе нажатие начинает перевод заново: ещё {glass.pull4[0]}–{glass.pull4[1]} с от него".replace(".", ","),
+          done is not None and glass.pull4[0] <= done - t_second <= glass.pull4[1] + 0.2, done and (round(done, 2), round(t_second, 2)))
     time.sleep(3.3)
 
-    # очередь ручных шагов не доезжает до края, если сразу перевести: перевод вытесняет её
-    go_to(60)
-    act("focusMark", mark="A", op="save")
-    a60 = lens(state())["marks"]["A"]
-    go_to(20)
-    act("focusPullTime", seconds=2)
-    act("focusStep", offset=60)
-    time.sleep(0.15)
-    act("focusMark", mark="A", op="go")
-    t0 = time.monotonic()
-    peak, caption = 0, None
-    while time.monotonic() - t0 < 8:
-        s = state()
-        peak = max(peak, position(s) or 0)
-        pull = lens(s)["pull"]
-        if pull and pull["caption"]:
-            caption = pull["caption"]
-            break
-        time.sleep(0.03)
-    time.sleep(1.0)
-    print(f"  очередь шагов и перевод к A ({a60}): наибольшее положение {peak}, итог {position()}, «{caption}»")
-    check("очередь ручных шагов не уводит фокус за A дальше одной команды (≤ A + 30)", peak <= a60 + 30, (peak, a60))
-    check("фокус пришёл к A и стоит", caption == "Фокус у метки A" and abs(position() - a60) <= 4, (position(), a60, caption))
-    time.sleep(3.3)
+    # очередь ручных шагов не доезжает до края, если сразу перевести: перевод вытесняет её. Очередь из 60 единиц — это команды по 7,
+    # а ±7 у PZ 16-50 проходит всю шкалу, так что на нём очередь ничего не доказала бы: логика от объектива не зависит
+    if glass.table:
+        print("  очередь ручных шагов: на PZ 16-50 не проверяется (±7 — вся шкала), см. объектив ×3,5")
+    else:
+        go_to(60, glass)
+        act("focusMark", mark="A", op="save")
+        a60 = lens(state())["marks"]["A"]
+        go_to(20, glass)
+        act("focusPullTime", seconds=2)
+        act("focusStep", offset=60)
+        time.sleep(0.15)
+        act("focusMark", mark="A", op="go")
+        t0 = time.monotonic()
+        peak, caption = 0, None
+        while time.monotonic() - t0 < 8:
+            s = state()
+            peak = max(peak, position(s) or 0)
+            pull = lens(s)["pull"]
+            if pull and pull["caption"]:
+                caption = pull["caption"]
+                break
+            time.sleep(0.03)
+        time.sleep(1.0)
+        print(f"  очередь шагов и перевод к A ({a60}): наибольшее положение {peak}, итог {position()}, «{caption}»")
+        check("очередь ручных шагов не уводит фокус за A дальше одной команды (≤ A + 30)", peak <= a60 + 30, (peak, a60))
+        check("фокус пришёл к A и стоит", caption == "Фокус у метки A" and abs(position() - a60) <= 4, (position(), a60, caption))
+        time.sleep(3.3)
 
     # другие исходы: уже у метки; время 0 — как можно быстрее; пустая метка и «стереть»
     act("focusMark", mark="B", op="save")
@@ -400,24 +480,47 @@ def run_marks(out, stand):
     pull = lens(state())["pull"]
     check("уже у метки: сразу подпись, а не 8 с ожидания", pull is not None and pull["caption"] == "Фокус у метки B" and pull["progress"] is None, pull)
     time.sleep(3.3)
-    # время 0 — как можно быстрее. Фокус сейчас у A (B сохранена на нём же), и «уже у метки» мерить нечего, — уходим на ~40 единиц
-    # и едем к A по-настоящему. Замер на камере с физикой объектива (×3,5, ответ 80 мс): два шага Near/Far, 0,23–0,24 с (шесть
-    # переводов туда и обратно); самый короткий перевод по времени — 1 с, так что граница 1 с отличает «как можно быстрее» от него
-    far = go_to(20)
-    a_mark = lens(state())["marks"]["A"]
-    check(f"перед нулевым переводом фокус ушёл от A ({far} против {a_mark})", far is not None and a_mark - far >= 30, (far, a_mark))
-    took, caption, path, ticks = run_pull("A", 0, limit=6)
-    print(f"  время 0: {far} → {position()} (метка A {a_mark}) за {took and round(took, 2)} с, «{caption}», перевод виден в {ticks} опросах")
-    check("время 0: перевод шёл по-настоящему (метка и доля пути в опросах, фокус сдвинулся на ≥ 30), а не «уже у метки»",
-          ticks >= 1 and max(path) - far >= 30, (ticks, far, max(path)))
-    check("…и кончился «Фокус у метки A» меньше чем за 1 с", caption == "Фокус у метки A" and took is not None and took < 1.0, (took, caption))
-    check("…с фокусом у A (±2)", abs(position() - a_mark) <= 2, (position(), a_mark))
+    if glass.table:
+        # PZ 16-50: 84 → 63 «как можно быстрее» (так в замере у настоящей камеры фокус бросило через всю шкалу и перевод кончился
+        # «Не успел за 3 с»): теперь команды −5 одна за другой, у метки (±1) за 1,5–2 с, дальше метки не больше чем на 5 единиц
+        go_to(63, glass)
+        act("focusMark", mark="A", op="save")
+        a_mark = lens(state())["marks"]["A"]
+        far = go_to(84, glass)
+        check(f"перед нулевым переводом фокус ушёл от A ({far} против {a_mark})", far is not None and far - a_mark >= 18, (far, a_mark))
+        log_mark = len(stand.camera.session_log())
+        took, caption, path, ticks = run_pull("A", 0, limit=6)
+        sizes = near_far_sizes(stand, log_mark)
+        shown = [y for y in path if y is not None]
+        print(f"  время 0: {far} → {position()} (метка A {a_mark}) за {took and round(took, 2)} с, «{caption}», перевод виден в {ticks} опросах, "
+              f"положения {min(shown)}…{max(shown)}, команд {len(sizes)}, наибольшая {max(sizes, default=0)}")
+        check("время 0: перевод шёл по-настоящему (метка и доля пути в опросах), а не «уже у метки»", ticks >= 1, ticks)
+        check("…и кончился «Фокус у метки A» меньше чем за 3 с (было: «Не успел за 3 с»)",
+              caption == "Фокус у метки A" and took is not None and took < 3.0, (took, caption))
+        check("…с фокусом у A (±1)", abs(position() - a_mark) <= 1, (position(), a_mark))
+        low, high = min(far, a_mark), max(far, a_mark)
+        check("…фокус не вышел за дальнюю из меток больше чем на 5 единиц", min(shown) >= low - 5 and max(shown) <= high + 5,
+              (min(shown), max(shown), low, high))
+        check("…и камера не получила команд больше ±5", sizes and max(sizes) <= 5, sizes)
+    else:
+        # время 0 — как можно быстрее. Фокус сейчас у A (B сохранена на нём же), и «уже у метки» мерить нечего, — уходим на ~40 единиц
+        # и едем к A по-настоящему. Замер на камере с физикой объектива (×3,5, ответ 80 мс): два шага Near/Far, 0,23–0,24 с (шесть
+        # переводов туда и обратно); самый короткий перевод по времени — 1 с, так что граница 1 с отличает «как можно быстрее» от него
+        far = go_to(20, glass)
+        a_mark = lens(state())["marks"]["A"]
+        check(f"перед нулевым переводом фокус ушёл от A ({far} против {a_mark})", far is not None and a_mark - far >= 30, (far, a_mark))
+        took, caption, path, ticks = run_pull("A", 0, limit=6)
+        print(f"  время 0: {far} → {position()} (метка A {a_mark}) за {took and round(took, 2)} с, «{caption}», перевод виден в {ticks} опросах")
+        check("время 0: перевод шёл по-настоящему (метка и доля пути в опросах, фокус сдвинулся на ≥ 30), а не «уже у метки»",
+              ticks >= 1 and max(path) - far >= 30, (ticks, far, max(path)))
+        check("…и кончился «Фокус у метки A» меньше чем за 1 с", caption == "Фокус у метки A" and took is not None and took < 1.0, (took, caption))
+        check("…с фокусом у A (±2)", abs(position() - a_mark) <= 2, (position(), a_mark))
     time.sleep(3.3)
     act("focusMark", mark="B", op="clear")
     check("B стёрта, A осталась", lens(state())["marks"]["B"] is None and lens(state())["marks"]["A"] is not None, lens(state())["marks"])
     r = act("focusMark", mark="B", op="go")
     check("перевод к пустой метке — 409", r.get("status") == 409 and "empty" in (r.get("error") or ""), r)
-    go_to(20)
+    go_to(glass.near, glass)
     act("focusMark", mark="B", op="save")
 
     # обрыв связи посреди перевода: камеру выключили; пока её нет, метки не запомнить и к ним не перевести; вернулась — метки на месте
@@ -460,7 +563,7 @@ def run_marks(out, stand):
     check("обрыв связи: не позже чем через 2 с после смены фазы lens.pull пуст и остаётся пустым",
           empty_after is not None and s is not None and lens(s)["pull"] is None, (empty_after, s and lens(s)["pull"]))
     check("…и подписи («Фокус у метки …», любой) за эти 2 с не было", not captions, captions)
-    stand.camera.start(*PHYSICS)
+    stand.camera.start(*glass.args)
     s = wait(lambda s: s["phase"] == "ready" and s["fps"] > 3 and s["currentCamera"], 45)
     time.sleep(3)
     marks = lens(state())["marks"]
@@ -508,7 +611,8 @@ def main():
             autohide = s["prefs"]["autoHide"]
             try:
                 run(args.out, stand)
-                run_marks(args.out, stand)
+                for glass in (FAKE_GLASS, PZ_GLASS):
+                    run_marks(args.out, stand, glass)
                 touched = real_cameras_touched()
                 check("сейчас нет соединений PTP/IP (порт 15740) с чужими адресами", not touched, touched)
             finally:
